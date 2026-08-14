@@ -193,6 +193,7 @@ const Player = (() => {
     }
   }
   const _dTmp2 = new THREE.Vector3();
+  const _mvF = new THREE.Vector3(), _mvR = new THREE.Vector3(), _mvW = new THREE.Vector3(), _np = new THREE.Vector3();   // update 移动临时量
   // G 键丢出：手持物品沿视线抛出（count 未定带 Shift 丢整组）
   function throwHeld(count){
     const s = inv[hotIdx];
@@ -475,9 +476,8 @@ const Player = (() => {
     const sel = inv[hotIdx];
     const item = sel && ITEMS[sel.item];
     if (!item || !item.block) return null;
-    const dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    const hit = World.raycast(camera.position.clone(), dir, 6);
+    camera.getWorldDirection(_beamDir);
+    const hit = World.raycast(_mineOrigin.copy(camera.position), _beamDir, 6);
     if (!hit) return null;
     const px = hit.x + hit.face[0], py = hit.y + hit.face[1], pz = hit.z + hit.face[2];
     if (!World.inBounds(px, py, pz)) return null;
@@ -515,10 +515,11 @@ const Player = (() => {
 
   // ---------- 粒子 ----------
   const particleMat = {};
+  const partGeo = new THREE.BoxGeometry(0.08, 0.08, 0.08);   // 全部粒子共享（注意：死亡时不得 dispose）
   function spawnParticles(x, y, z, color, n = 10){
     if (!particleMat[color]) particleMat[color] = new THREE.MeshBasicMaterial({ color });
     for (let i = 0; i < n; i++){
-      const p = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.08), particleMat[color]);
+      const p = new THREE.Mesh(partGeo, particleMat[color]);
       p.position.set(x + Math.random(), y + Math.random(), z + Math.random());
       p.userData.vel = new THREE.Vector3((Math.random() - 0.5) * 4, Math.random() * 4, (Math.random() - 0.5) * 4);
       p.userData.life = 0.5 + Math.random() * 0.4;
@@ -530,7 +531,7 @@ const Player = (() => {
     for (let i = particles.length - 1; i >= 0; i--){
       const p = particles[i];
       p.userData.life -= dt;
-      if (p.userData.life <= 0){ particleGroup.remove(p); p.geometry.dispose(); particles.splice(i, 1); continue; }
+      if (p.userData.life <= 0){ particleGroup.remove(p); particles.splice(i, 1); continue; }   // 几何共享，不 dispose
       p.userData.vel.y -= 12 * dt;
       p.position.addScaledVector(p.userData.vel, dt);
       p.scale.setScalar(Math.max(0.1, p.userData.life));
@@ -561,9 +562,9 @@ const Player = (() => {
 
     // --- 移动 ---
     const speed = keys['ShiftLeft'] ? 7.2 : 4.5;
-    const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-    const r = new THREE.Vector3(-f.z, 0, f.x);
-    const wish = new THREE.Vector3();
+    const f = _mvF.set(-Math.sin(yaw), 0, -Math.cos(yaw));
+    const r = _mvR.set(-f.z, 0, f.x);
+    const wish = _mvW.set(0, 0, 0);
     if (keys['KeyW']) wish.add(f);
     if (keys['KeyS']) wish.sub(f);
     if (keys['KeyD']) wish.add(r);
@@ -594,7 +595,8 @@ const Player = (() => {
 
     // 轴分离碰撞
     const wasGround = onGround;
-    let np = pos.clone();
+    _np.copy(pos);
+    const np = _np;
     np.x += vel.x * dt;
     if (collides(np.x, pos.y, pos.z)){ np.x = pos.x; vel.x = 0; }
     np.z += vel.z * dt;
@@ -732,12 +734,20 @@ const Player = (() => {
   // ---------- 挖掘与放置 ----------
   let mineHeld = false, noLaserHintT = 0;
   const _beamDir = new THREE.Vector3(), _beamFrom = new THREE.Vector3(), _beamTo = new THREE.Vector3();
+  const _mineOrigin = new THREE.Vector3();   // 射线起点（注意：不能与 _beamFrom 混用——枪口世界坐标会覆盖它）
   const _yAxis = new THREE.Vector3(0, 1, 0);
   function updateMining(dt, camera){
+    if (dt <= 0){   // 面板打开等暂停状态：跳过 22 格射线，仅清理挖掘视觉
+      mining = null; breakMesh.visible = false; beamGroup.visible = false; impactGlow.visible = false;
+      if (muzzleGlow) muzzleGlow.visible = false;
+      hiliteMesh.visible = false;
+      Sound.loops.laser.stop();
+      return;
+    }
     const laserSelected = hotIdx === -1;
-    const dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    const origin = camera.position.clone();
+    camera.getWorldDirection(_beamDir);
+    const dir = _beamDir;
+    const origin = _mineOrigin.copy(camera.position);
     const far = World.raycast(origin, dir, 22);              // 远程射线：光束在墙面截断
     const hit = far && far.dist <= 6 ? far : null;           // 6 格内才可挖掘
 

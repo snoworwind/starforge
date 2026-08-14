@@ -2378,6 +2378,10 @@ const Space = (() => {
     const targetFov = ((window.Game && Game.baseFov) || 75) - 5 + (shipState.speed / PULSE_SPEED) * 40 + (input.boost ? 6 : 0);
     camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 3);
     camera.updateProjectionMatrix();
+    // 相机挂在 planetScene 下；渲染 Space.scene 时 r128 的 renderer 仅当 camera.parent===null 才自动刷新相机世界矩阵，
+    // 否则依赖 refreshHints 里 aheadInfo→getWorldDirection 顺带刷新——面板打开/冲出大气层交棒帧会漏刷，
+    // 导致视角用上一帧的世界矩阵渲染而瞬移。这里显式强制刷新，保证本帧 Space.scene 渲染用的是最新相机位姿。
+    camera.updateMatrixWorld(true);
 
     if (dt > 0){
       Sound.loops.engine.start();

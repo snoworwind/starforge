@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: 自动化测试（无头浏览器）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 测试运行器用 playwright-core 驱动系统浏览器；ubuntu-latest 预装了 Google Chrome。
+      # 本机开发默认走 Edge（--browser=edge），CI 无 Edge，故显式指定 chrome。
+      - name: Run tests
+        run: npm test -- --browser=chrome

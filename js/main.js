@@ -2754,7 +2754,7 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v82-station';
+    bd.textContent = 'build v83-station';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;

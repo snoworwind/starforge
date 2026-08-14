@@ -15,6 +15,12 @@ const Factory = (() => {
 
   const key = (x, y, z) => x + ',' + y + ',' + z;
   const DIRS = [[1,0],[0,1],[-1,0],[0,-1]];   // 0:+x 1:+z 2:-x 3:-z
+  const _lv = new THREE.Vector3();   // 光源门控距离临时量
+  // 机器点光源可见性门控：48 格外或亮度≈0 时不参与渲染收集（工厂规模大时省去大量光源 uniform 开销）
+  function setLight(light, m, x){
+    light.intensity = x;
+    light.visible = x > 0.01 && window.Player && Player.pos.distanceToSquared(_lv.set(m.x + 0.5, m.y, m.z + 0.5)) < 48 * 48;
+  }
 
   // ---------- 材质 ----------
   const M = {};
@@ -53,7 +59,7 @@ const Factory = (() => {
       const chimney = box(0.22, 0.4, 0.22, M.metalDark); chimney.position.set(0.25, 1.1, -0.25); g.add(chimney);
       m.animParts = { body };
       // 火光
-      const light = new THREE.PointLight(0xff7722, 0, 3); light.position.set(0, 0.5, 0.6); g.add(light);
+      const light = new THREE.PointLight(0xff7722, 0, 3); light.position.set(0, 0.5, 0.6); light.visible = false; g.add(light);
       m.animParts.light = light;
       return g;
     },
@@ -105,7 +111,7 @@ const Factory = (() => {
       chimney.position.set(-0.25, 1.2, -0.25); g.add(chimney);
       const coil = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.04, 6, 12), M.glowOff);
       coil.rotation.x = Math.PI / 2; coil.position.set(0.25, 0.95, 0.25); g.add(coil);
-      const light = new THREE.PointLight(0xff7722, 0, 3); light.position.set(0, 0.5, 0.6); g.add(light);
+      const light = new THREE.PointLight(0xff7722, 0, 3); light.position.set(0, 0.5, 0.6); light.visible = false; g.add(light);
       m.animParts = { body, coil, light, smokeT: 0 };
       return g;
     },
@@ -121,7 +127,7 @@ const Factory = (() => {
       });
       const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.16, 26, 8, 1, true), beamMat);
       beam.position.y = 13.5; g.add(beam);
-      const light = new THREE.PointLight(0xffcf4d, 0.6, 7); light.position.y = 1.2; g.add(light);
+      const light = new THREE.PointLight(0xffcf4d, 0.6, 7); light.position.y = 1.2; light.visible = false; g.add(light);
       m.animParts = { lamp, beam, beamMat, light };
       return g;
     },
@@ -200,7 +206,7 @@ const Factory = (() => {
       const core = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), M.glowGreen); core.position.y = 1.15; g.add(core);
       const ringA = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.025, 6, 16), M.metal); ringA.position.y = 1.15; g.add(ringA);
       const ringB = new THREE.Mesh(new THREE.TorusGeometry(0.36, 0.025, 6, 16), M.metalDark); ringB.position.y = 1.15; ringB.rotation.x = Math.PI / 3; g.add(ringB);
-      const light = new THREE.PointLight(0x66ff66, 0.7, 6); light.position.y = 1.2; g.add(light);
+      const light = new THREE.PointLight(0x66ff66, 0.7, 6); light.position.y = 1.2; light.visible = false; g.add(light);
       m.animParts = { core, ringA, ringB, light };
       return g;
     },
@@ -725,7 +731,7 @@ const Factory = (() => {
     switch (b.state){
       case 'scan': {
         moveTo(m.x + 0.5, m.z + 0.5);   // 悬停回桩
-        for (let i = 0; i < 24 && b.scanIdx < SCAN_OFFS.length; i++, b.scanIdx++){
+        for (let i = 0; i < 6 && b.scanIdx < SCAN_OFFS.length; i++, b.scanIdx++){   // 每帧限 6 列：全表 ~8.8 秒扫完，与 5 秒休息节奏匹配
           const [dx, dz] = SCAN_OFFS[b.scanIdx];
           const y = findLogInColumn(m.x + dx, m.z + dz);
           if (y >= 0){
@@ -959,7 +965,7 @@ const Factory = (() => {
         case 'furnace': {
           const on = m.active || m.data.burn > 0;
           A.body.material[4] = on ? M.furnaceOn : M.furnaceFront;
-          A.light.intensity = on ? 0.8 + Math.sin(animT * 12) * 0.25 : 0;
+          setLight(A.light, m, on ? 0.8 + Math.sin(animT * 12) * 0.25 : 0);
           break;
         }
         case 'assembler':
@@ -982,7 +988,7 @@ const Factory = (() => {
           A.ringA.rotation.x += dt * (m.active ? 2 : 0.2);
           A.ringB.rotation.z += dt * (m.active ? 1.6 : 0.15);
           A.core.scale.setScalar(1 + Math.sin(animT * 6) * (m.active ? 0.15 : 0.03));
-          A.light.intensity = m.active ? 0.9 + Math.sin(animT * 6) * 0.3 : 0.15;
+          setLight(A.light, m, m.active ? 0.9 + Math.sin(animT * 6) * 0.3 : 0.15);
           break;
         case 'solar':
           A.panel.rotation.z = 0.18 + Math.sin(animT * 0.5) * 0.04;
@@ -1001,7 +1007,7 @@ const Factory = (() => {
           const on = m.active;
           A.body.material[4] = on ? M.furnaceOn : M.furnaceFront;
           A.coil.material = on ? M.glowAmber : M.glowOff;
-          A.light.intensity = on ? 0.7 + Math.sin(animT * 10) * 0.2 : 0;
+          setLight(A.light, m, on ? 0.7 + Math.sin(animT * 10) * 0.2 : 0);
           if (on){
             A.smokeT += dt;
             if (A.smokeT > 0.5){
@@ -1017,7 +1023,7 @@ const Factory = (() => {
           A.lamp.material = pulse > 0.5 ? M.glowAmber : M.glowOff;
           A.beamMat.opacity = 0.16 + pulse * 0.2;
           A.beam.scale.x = A.beam.scale.z = 0.9 + pulse * 0.25;
-          A.light.intensity = 0.35 + pulse * 0.5;
+          setLight(A.light, m, 0.35 + pulse * 0.5);
           break;
         }
         case 'lumberbot':

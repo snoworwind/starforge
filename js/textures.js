@@ -605,3 +605,25 @@ const Icons = (() => {
   }
   return { get, img };
 })();
+
+/* ============================================================
+   公共资源释放工具：销毁场景时调用，释放 GPU 资源
+   skipGeo：GLB 克隆体共享模板 geometry，不能 dispose（会毁掉模板）
+   skipTex：贴图来自共享缓存（tileTexture / sunTextures / 星系图缓存）时跳过
+   ============================================================ */
+function disposeObject3D(obj, opts){
+  if (!obj) return;
+  const skipGeo = !!(opts && opts.skipGeo), skipTex = !!(opts && opts.skipTex);
+  obj.traverse(o => {
+    const mat = o.material;
+    if (mat){
+      const mats = Array.isArray(mat) ? mat : [mat];
+      for (const m of mats){
+        if (m && !skipTex && m.map) m.map.dispose();
+        if (m && m.dispose) m.dispose();
+      }
+    }
+    if (!skipGeo && o.geometry && o.geometry.dispose) o.geometry.dispose();
+  });
+}
+window.disposeObject3D = disposeObject3D;

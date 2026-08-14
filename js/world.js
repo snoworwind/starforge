@@ -885,9 +885,9 @@ const World = (() => {
     const tDX = stepX !== 0 ? Math.abs(1 / dir.x) : Infinity;
     const tDY = stepY !== 0 ? Math.abs(1 / dir.y) : Infinity;
     const tDZ = stepZ !== 0 ? Math.abs(1 / dir.z) : Infinity;
-    let tX = stepX > 0 ? (x + 1 - origin.x) * tDX : (origin.x - x) * tDX;
-    let tY = stepY > 0 ? (y + 1 - origin.y) * tDY : (origin.y - y) * tDY;
-    let tZ = stepZ > 0 ? (z + 1 - origin.z) * tDZ : (origin.z - z) * tDZ;
+    let tX = stepX === 0 ? Infinity : (stepX > 0 ? (x + 1 - origin.x) * tDX : (origin.x - x) * tDX);
+    let tY = stepY === 0 ? Infinity : (stepY > 0 ? (y + 1 - origin.y) * tDY : (origin.y - y) * tDY);
+    let tZ = stepZ === 0 ? Infinity : (stepZ > 0 ? (z + 1 - origin.z) * tDZ : (origin.z - z) * tDZ);
     let face = [0, 0, 0], t = 0;
     while (t <= maxDist){
       const def = getDef(x, y, z);

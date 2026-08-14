@@ -383,5 +383,15 @@ window.addEventListener('unhandledrejection', e => {
   document.body.appendChild(d);
 })();
 </script>
+<script>
+// 自动化测试接口：仅当 URL 携带 ?test 或 #test 时加载（生产/正常游玩路径零开销、零副作用）
+(function(){
+  if (/\btest\b/.test(location.search + location.hash)){
+    var s = document.createElement('script');
+    s.src = 'js/test-api.js?v=st84';
+    document.body.appendChild(s);
+  }
+})();
+</script>
 </body>
 </html>

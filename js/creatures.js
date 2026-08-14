@@ -263,6 +263,7 @@ const Creatures = (() => {
         } else {
           u.state = 'idle';
           u.timer = 1.5 + Math.random() * 3;
+          if (u.baseSpeed !== undefined){ u.speed = u.baseSpeed; delete u.baseSpeed; }   // 逃窜结束恢复原速
         }
       }
       // 移动
@@ -280,10 +281,19 @@ const Creatures = (() => {
             u.dir = Math.atan2(dz, dx);
           }
         }
-        // 贴地
-        const gy = World.topAt(Math.floor(wx), Math.floor(wz));
-        const targetY = gy + 1 + u.foot;
-        g.position.set(wx, THREE.MathUtils.lerp(g.position.y, targetY, dt * 6), wz);
+        // 贴地（仅落地时吸附；空中交给重力，避免跳跃/坠崖被逐帧拉回地面）
+        if (u.onGround){
+          const gy = World.topAt(Math.floor(wx), Math.floor(wz));
+          const targetY = gy + 1 + u.foot;
+          if (targetY < g.position.y - 0.5){
+            u.onGround = false;   // 前方悬空 → 转入自由落体
+            g.position.set(wx, g.position.y, wz);
+          } else {
+            g.position.set(wx, THREE.MathUtils.lerp(g.position.y, targetY, dt * 6), wz);
+          }
+        } else {
+          g.position.x = wx; g.position.z = wz;
+        }
         // 朝向：模型前方(-Z)对齐移动方向
         g.rotation.y = -u.dir - Math.PI / 2;
         // 跳跃
@@ -292,18 +302,17 @@ const Creatures = (() => {
           u.onGround = false;
         }
       }
-      // 重力
-      if (!u.onGround || u.state === 'walk'){
-        const below = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
-        if (g.position.y < below + 1 + u.foot){
-          g.position.y = below + 1 + u.foot;
-          u.onGround = true;
-          u.jumpVel = 0;
-        }
-      }
-      if (u.jumpVel > 0){
+      // 重力：空中自由落体 + 落地吸附（跳跃不再被当帧抵消）
+      if (!u.onGround){
         u.jumpVel -= 20 * dt;
         g.position.y += u.jumpVel * dt;
+        const below = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
+        const floorY = below + 1 + u.foot;
+        if (g.position.y <= floorY && u.jumpVel <= 0){
+          g.position.y = floorY;
+          u.jumpVel = 0;
+          u.onGround = true;
+        }
       }
       if (g.userData.isGlb){
         // 精模：行走时轻微摇摆 + 步伐起伏
@@ -364,6 +373,7 @@ const Creatures = (() => {
     u.state = 'walk';
     u.timer = 2.5 + Math.random() * 2;
     if (fromPos) u.dir = Math.atan2(g.position.z - fromPos.z, g.position.x - fromPos.x);
+    if (u.baseSpeed === undefined) u.baseSpeed = u.speed;   // 记录原速，逃窜结束后恢复
     u.speed = Math.max(u.speed, (u.typeDef.speed || 1) * 2.4);
     if (u.hp <= 0){ kill(g); return true; }
     return false;

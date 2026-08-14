@@ -879,6 +879,8 @@ const Player = (() => {
         if (d.in && typeof d.in === 'object' && !d.in.item)
           for (const k in d.in) if (typeof d.in[k] === 'number' && d.in[k] > 0) spawnDrop(cx, cy, cz, k, d.in[k]);
         if (d.items) d.items.forEach(it => spawnDrop(cx, cy, cz, it.item, 1));
+        if (m.type === 'reactor' && typeof d.fuel === 'number' && d.fuel > 0)
+          spawnDrop(cx, cy, cz, 'uranium', Math.ceil(d.fuel / 60));   // 核燃料按秒存：拆机按 60s/枚 返还铀
       }
     } else {
       World.set(hit.x, hit.y, hit.z, 0);

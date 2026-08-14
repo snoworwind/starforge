@@ -2452,8 +2452,12 @@ const Space = (() => {
             a.visible = false;
             Sound.play('explode');
             const n = 4 + (Math.random() * 5) | 0;
-            Player.addItem('tritium', n);
-            if (Math.random() < 0.25) Player.addItem('gold_ore', 1 + (Math.random() * 2 | 0));
+            // 战利品直入飞船货仓（背包满也不丢失；溢出自动转随身）
+            (window.Game && Game.addCargo) ? Game.addCargo('tritium', n) : Player.addItem('tritium', n);
+            if (Math.random() < 0.25){
+              const g = 1 + (Math.random() * 2 | 0);
+              (window.Game && Game.addCargo) ? Game.addCargo('gold_ore', g) : Player.addItem('gold_ore', g);
+            }
           }
           break;
         }

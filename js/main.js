@@ -467,6 +467,7 @@ const Game = (() => {
     // 重置
     techState = { survival: true };
     flags = {}; questIdx = 0; fuelLoaded = 0;
+    for (const k in placedCount) delete placedCount[k];   // 新游戏必须清零放置类任务进度
     visitedPlanets = {};
     galaxyArchives = {};
     mapMarks = {};
@@ -509,6 +510,7 @@ const Game = (() => {
     UI.buildHotbar();
     techState = { survival: true };
     flags = {}; questIdx = 0; fuelLoaded = 0;
+    for (const k in placedCount) delete placedCount[k];   // 联机加入同样重置放置类任务进度
     visitedPlanets = {};
     galaxyArchives = {};
     mapMarks = {};
@@ -2132,14 +2134,14 @@ const Game = (() => {
     };
   }
   // saveTo(key)：覆盖指定槽位；saveTo(null, name)：新建槽位（世界快照同步截取，写盘异步化）
-  let saveBusy = false, saveAgain = false, saveChain = null;
+  let saveBusy = false, saveAgain = false, saveChain = null, pendingKey = null, pendingName = null;
   function saveTo(key, name){
     if (state === 'menu' || state === 'loading') return Promise.resolve(false);
     if (state === 'atmo' || state === 'atmoland'){
       UI.bigMessage('飞行中无法存档', '请先降落', 1600);
       return Promise.resolve(false);
     }
-    if (saveBusy){ saveAgain = true; return saveChain; }   // 写入中：合并到收尾重写
+    if (saveBusy){ saveAgain = true; pendingKey = key; pendingName = name; return saveChain; }   // 写入中：合并到收尾重写（记住目标槽位）
     saveBusy = true;
     const payload = buildSaveData();   // 此刻的完整状态快照（可能触发 RLE 序列化）
     saveChain = (async () => {
@@ -2167,7 +2169,12 @@ const Game = (() => {
         return false;
       } finally {
         saveBusy = false;
-        if (saveAgain){ saveAgain = false; saveTo(activeSaveKey); }   // 补一次最新状态重写
+        if (saveAgain){
+          saveAgain = false;
+          const k = pendingKey, nm = pendingName;
+          pendingKey = pendingName = null;
+          saveTo(k, nm);   // 补一次最新状态重写到正确的目标槽位
+        }
       }
     })();
     return saveChain;

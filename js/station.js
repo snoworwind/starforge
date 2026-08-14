@@ -20,7 +20,6 @@ const Station = (() => {
   let onDocked = null;         // 泊入完成回调（main 挂接任务/音乐）
   let onBuyShip = null;        // 购船回调（main 执行信用点扣款/仓库流转），返回 true 表示成交
   let onGarage = null;         // 换船电脑回调（main 打开飞船仓库面板）
-  let buyArm = null;           // 两步购买：{v, t} 二次确认窗口
 
   const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
   const _q = new THREE.Quaternion(), _e = new THREE.Euler();
@@ -67,6 +66,16 @@ const Station = (() => {
   function pressE(){
     if (phase === 'parked'){ disembark(); return; }
     if (phase !== 'walk') return;
+    // 飞行员购船二次确认：最后一句读完后再按 E 即成交（与「再按一次 E 成交」文案一致）
+    if (dlg && dlg.buy){
+      const last = dlg.lines[dlg.lines.length - 1];
+      if (dlg.idx === dlg.lines.length - 1 && (dlg.chars | 0) >= last.length){
+        const v = dlg.buy;
+        dlg = null; closeDlgBox();
+        if (onBuyShip) onBuyShip(v);
+        return;
+      }
+    }
     if (dlg){ advanceDlg(); return; }
     if (near === 'ship'){ board(); return; }
     if (near === 'terminal'){
@@ -80,13 +89,8 @@ const Station = (() => {
       if (onGarage) onGarage();
       return;
     }
-    if (near && near.userData && near.userData.pilot){   // 访客驾驶员：对话 → 二次按 E 购船
+    if (near && near.userData && near.userData.pilot){   // 访客驾驶员：对话 → 读完最后一句再按 E 购船
       const v = near.userData.visitor;
-      if (buyArm && buyArm.v === v && buyArm.t > 0){
-        buyArm = null;
-        if (onBuyShip && onBuyShip(v)) return;   // 成交（main 负责扣款与流转）
-        return;
-      }
       const u = v.userData;
       const C = Space.SHIP_CLASSES[u.cls];
       dlg = {
@@ -97,10 +101,10 @@ const Station = (() => {
           '出价 ' + u.price.toLocaleString() + ' 信用点，一口价。想要的话，再按一次 E 成交。',
         ],
         idx: 0, chars: 0,
+        buy: v,
       };
       el('dialogBox').classList.remove('hidden');
       Sound.play('uiOpen');
-      buyArm = { v, t: 12 };
       const dk = Space.getDock();
       near.rotation.y = Math.atan2(near.position.x - walk.pos.x, near.position.z - walk.pos.z);
       near.rotation.x = 0;   // 收起玩手机的低头姿态
@@ -348,11 +352,6 @@ const Station = (() => {
           }
         }
       }
-      // 两步购买窗口倒计时
-      if (buyArm){
-        buyArm.t -= dt;
-        if (buyArm.t <= 0) buyArm = null;
-      }
       // 对话推进 + 走远自动结束
       if (dlg){
         dlg.chars = Math.min(dlg.lines[dlg.idx].length, dlg.chars + dt * 26);
@@ -368,7 +367,7 @@ const Station = (() => {
       else if (near === 'terminal') UI.setInteractHint('<b>E</b> 交易终端');
       else if (near && near.userData && near.userData.pilot){
         const u = near.userData.visitor.userData;
-        UI.setInteractHint(buyArm && buyArm.v === near.userData.visitor
+        UI.setInteractHint(dlg && dlg.buy === near.userData.visitor
           ? `<b>E</b> 确认购买 ${u.cls}级·${(Space.SHIP_MODEL_NAMES[u.model] || u.model)}（¥${u.price.toLocaleString()}）`
           : `<b>E</b> 与${near.userData.name}攀谈（${u.cls}级飞船）`);
       }

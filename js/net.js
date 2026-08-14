@@ -17,6 +17,7 @@ const Net = (() => {
   function isApplying(){ return applyDepth > 0; }
   let patched = false;
   let posTimer = 0;
+  let initRetryT = 0;
   const remotes = new Map();    // id -> {group, ship, body, tag, planet, st, pos, tgt, yaw, tyaw, inScene, last}
   const pendingBlk = {};        // planetId -> [msg]
   const pendingMac = {};        // planetId -> [msg]
@@ -90,7 +91,8 @@ const Net = (() => {
 
   // ---------- 世界就绪 / 初始化包 ----------
   function gameReady(){
-    return window.Game && (Game.state === 'planet' || Game.state === 'space' || Game.state === 'atmo' || Game.state === 'seated');
+    const STATION_STATES = ['station', 'docked', 'dockAnim', 'stationed', 'stationWalk', 'undockAnim'];
+    return window.Game && (Game.state === 'planet' || Game.state === 'space' || Game.state === 'atmo' || Game.state === 'atmoland' || Game.state === 'seated' || STATION_STATES.includes(Game.state));
   }
   function buildInit(to){
     return {
@@ -120,7 +122,7 @@ const Net = (() => {
         // 整个初始化回播期间抑制本地广播（否则重连客人会把自己的机器数据回播主机、覆盖主机状态）
         if (role === 'guest' && (m.to === undefined || m.to === myId) && window.Game){
           beginApply();
-          Promise.resolve(Game.joinGame(m)).catch(e => console.warn('[net] init apply', e)).finally(endApply);
+          Promise.resolve().then(() => Game.joinGame(m)).catch(e => console.warn('[net] init apply', e)).finally(endApply);
         }
         break;
       case 'pos': onPos(m); break;
@@ -131,6 +133,8 @@ const Net = (() => {
   }
   function onBlk(m){
     if (m.id === myId) return;
+    // 入站校验：坐标必须为有限整数，方块 id 必须为有限数，否则丢弃（防止畸形报文写坏世界）
+    if (!Number.isInteger(m.x) || !Number.isInteger(m.y) || !Number.isInteger(m.z) || !Number.isFinite(m.b)) return;
     if (gameReady() && Game.currentPlanet === m.planet){
       beginApply();
       World.set(m.x, m.y, m.z, m.b);
@@ -141,6 +145,10 @@ const Net = (() => {
   }
   function onMac(m){
     if (m.id === myId) return;
+    // 入站校验：坐标必须为有限整数，放置时方块 key 必须存在、操作类型必须合法
+    if (!Number.isInteger(m.x) || !Number.isInteger(m.y) || !Number.isInteger(m.z)) return;
+    if (m.op === 'add' && (typeof m.bk !== 'string' || !BLOCKS[m.bk] || !BLOCKS[m.bk].machine)) return;
+    if (m.op !== 'add' && m.op !== 'remove') return;
     if (gameReady() && Game.currentPlanet === m.planet){
       beginApply();
       if (m.op === 'add') Factory.place(m.x, m.y, m.z, m.bk, m.dir);
@@ -172,7 +180,7 @@ const Net = (() => {
     const worldSet = World.set;
     World.set = function(x, y, z, id, silent){   // 透传 silent：与原始签名保持一致
       worldSet(x, y, z, id, silent);
-      if (active() && !isApplying() && gameReady())
+      if (active() && !isApplying() && gameReady() && !silent)
         broadcast({ t: 'blk', id: myId, planet: Game.currentPlanet, x, y, z, b: id });
     };
     const facPlace = Factory.place;
@@ -246,6 +254,7 @@ const Net = (() => {
   }
   function onPos(m){
     if (m.id === myId) return;
+    if (!Array.isArray(m.p) || m.p.length < 3 || !m.p.every(Number.isFinite) || !Number.isFinite(m.yaw)) return;
     const r = ensureRemote(m.id);
     r.planet = m.planet;
     r.st = m.st;
@@ -267,6 +276,11 @@ const Net = (() => {
   function tick(dt){
     if (!active() || !window.Game) return;
     drainPending();
+    // 访客尚未就绪（仍处菜单/加载）时周期重发 need-init，直到主机回 init（主机在空间站/加载中时也能最终同步）
+    if (role === 'guest' && (Game.state === 'menu' || Game.state === 'loading')){
+      initRetryT += dt;
+      if (initRetryT > 2){ initRetryT = 0; broadcast({ t: 'need-init', id: myId }); }
+    }
     if (gameReady()){
       posTimer += dt;
       if (posTimer > 0.1){ posTimer = 0; broadcast(myPosMsg()); }
@@ -277,7 +291,7 @@ const Net = (() => {
       // 场景归属：同星球地面态 → planetScene；太空态 → Space.scene
       const myState = Game.state;
       let scene = null, showShip = false;
-      if ((myState === 'planet' || myState === 'seated' || myState === 'atmo' || myState === 'atmoland') && r.planet === Game.currentPlanet){
+      if ((myState === 'planet' || myState === 'seated' || myState === 'atmo' || myState === 'atmoland' || myState === 'launching') && r.planet === Game.currentPlanet){
         if (r.st === 'planet' || r.st === 'seated') scene = Game.planetScene;
         else if (r.st === 'atmo' || r.st === 'atmoland' || r.st === 'launching'){ scene = Game.planetScene; showShip = true; }
       } else if (myState === 'space' && r.st === 'space'){

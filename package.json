@@ -1,0 +1,16 @@
+{
+  "name": "starforge",
+  "private": true,
+  "version": "1.0.0",
+  "description": "STARFORGE 星穹熔炉 — 体素星际工厂（含全自动测试接口）",
+  "type": "module",
+  "scripts": {
+    "test": "node test/run.mjs",
+    "test:headed": "node test/run.mjs --headed",
+    "test:factory": "node test/run.mjs --grep=factory",
+    "serve": "node test/serve.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

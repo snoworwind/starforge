@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    STARFORGE - ui.js
    HUD / 背包 / 合成 / 机器面板 / 科技树 / 贸易 / 提示
    ============================================================ */
@@ -438,9 +438,29 @@ const UI = (() => {
         if (!cursorStack && s){ cursorStack = { ...s }; setStack(null); }
         else if (cursorStack && (!acceptFilter || acceptFilter(cursorStack.item))){
           if (!s){ setStack({ ...cursorStack }); cursorStack = null; }
-          else if (s.item === cursorStack.item){ setStack({ item: s.item, n: s.n + cursorStack.n }); cursorStack = null; }
+          else if (s.item === cursorStack.item){
+            const max = (ITEMS[s.item] && ITEMS[s.item].stack) || 250;
+            const add = Math.min(cursorStack.n, max - s.n);
+            if (add > 0){ setStack({ item: s.item, n: s.n + add }); cursorStack.n -= add; }
+            if (cursorStack.n <= 0) cursorStack = null;
+            else Sound.play('uiError');
+          }
           else { const tmp = { ...s }; setStack({ ...cursorStack }); cursorStack = tmp; }
         } else if (cursorStack) Sound.play('uiError');
+      } else if (e.button === 2){
+        // 右键拆半（与背包/面板槽位一致）
+        if (!cursorStack && s){
+          const half = Math.ceil(s.n / 2);
+          cursorStack = { item: s.item, n: half };
+          setStack(s.n - half > 0 ? { item: s.item, n: s.n - half } : null);
+        } else if (cursorStack){
+          if (!s && (!acceptFilter || acceptFilter(cursorStack.item))){ setStack({ item: cursorStack.item, n: 1 }); cursorStack.n--; }
+          else if (s && s.item === cursorStack.item){
+            const max = (ITEMS[s.item] && ITEMS[s.item].stack) || 250;
+            if (s.n < max){ setStack({ item: s.item, n: s.n + 1 }); cursorStack.n--; }
+          }
+          if (cursorStack && !cursorStack.n) cursorStack = null;
+        }
       }
       updateGhost();
       buildMachineBody();
@@ -468,7 +488,7 @@ const UI = (() => {
 
     if (m.type === 'furnace'){
       const flow = document.createElement('div'); flow.className = 'mach-flow';
-      flow.appendChild(mslot('原料', ...stackRef(d, 'in')));
+      flow.appendChild(mslot('原料', ...stackRef(d, 'in'), it => !!RECIPES.find(r => r.where === 'furnace' && r.in[it])));
       const fireCol = document.createElement('div');
       fireCol.style.textAlign = 'center';
       fireCol.innerHTML = `<div style="font-size:22px">${m.active ? '🔥' : '🧯'}</div>`;
@@ -816,7 +836,10 @@ const UI = (() => {
         const n = e.shiftKey ? 10 : 1;
         let bought = 0;
         for (let i = 0; i < n; i++){
-          if (Player.credits >= buyP){ Player.credits -= buyP; Player.addItem(id, 1, true); bought++; }
+          if (Player.credits < buyP) break;
+          if (Player.addItem(id, 1, true) === 0) break;   // 背包满：未入包则不扣款，避免白扣信用点
+          Player.credits -= buyP;
+          bought++;
         }
         if (bought){ Sound.play('buy'); Game.market[id] = Math.min(1.6, (Game.market[id] || 1) + 0.01 * bought); Game.flags.traded = true; }
         else Sound.play('uiError');
@@ -1421,7 +1444,6 @@ const UI = (() => {
     btn.className = 'gal-warp-btn';
     const locked = Game.warpLockSeed === ent.seed;
     if (cur){ btn.textContent = '当前所在星系'; btn.disabled = true; }
-    else if (!locked && wc < 1){ btn.textContent = '⚠ 需要曲率电池 ×1（仍可锁定导航）'; btn.disabled = false; }
     if (!cur){
       btn.textContent = locked ? '◉ 解除锁定' : (wc >= 1 ? '◎ 锁定星系（出图后对准方框脉冲冲刺跃迁）' : '◎ 锁定导航方向（需要 1 枚曲率电池才可跃迁）');
       btn.onclick = () => {

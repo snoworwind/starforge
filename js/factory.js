@@ -420,6 +420,8 @@ const Factory = (() => {
     }
   }
   function machineInsert(m, item){
+    // 统一走 canMachineAccept 校验：容量上限 / 可冶炼原料 / 配方匹配，杜绝绕过校验直接塞入
+    if (!canMachineAccept(m, item)) return false;
     switch (m.type){
       case 'furnace': {
         if (FUEL_VALUE[item] && (!m.data.fuel || m.data.fuel.item === item)){

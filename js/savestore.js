@@ -15,6 +15,7 @@ const SaveStore = (() => {
 
   let dbPromise = null;   // open() 幂等：缓存打开中/已打开的 Promise
   let mem = null;         // 降级模式：内存 Map（IDB 打开失败时启用）
+  let opened = false;     // open() 是否已 settle（available 在 open 前不应误报 true）
 
   function open(){
     if (dbPromise) return dbPromise;
@@ -25,10 +26,10 @@ const SaveStore = (() => {
           const db = req.result;
           if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
         };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => { mem = new Map(); resolve(null); };
-        req.onblocked = () => { mem = new Map(); resolve(null); };
-      } catch(e){ mem = new Map(); resolve(null); }
+        req.onsuccess = () => { opened = true; resolve(req.result); };
+        req.onerror = () => { opened = true; mem = new Map(); resolve(null); };
+        req.onblocked = () => { opened = true; mem = new Map(); resolve(null); };
+      } catch(e){ opened = true; mem = new Map(); resolve(null); }
     });
     return dbPromise;
   }
@@ -60,8 +61,16 @@ const SaveStore = (() => {
     try {
       const db = await dbPromise;
       if (!db) return false;
-      const ok = await req(db.transaction(STORE, 'readwrite').objectStore(STORE).put(data, key), true);
-      return ok === true;
+      return await new Promise(resolve => {
+        let txn;
+        try {
+          txn = db.transaction(STORE, 'readwrite');
+          txn.objectStore(STORE).put(data, key);
+        } catch(e){ resolve(false); return; }
+        txn.oncomplete = () => resolve(true);
+        txn.onerror = () => resolve(false);
+        txn.onabort = () => resolve(false);
+      });
     } catch(e){ return false; }
   }
   async function deleteSlot(key){
@@ -70,8 +79,16 @@ const SaveStore = (() => {
     try {
       const db = await dbPromise;
       if (!db) return false;
-      const ok = await req(db.transaction(STORE, 'readwrite').objectStore(STORE).delete(key), true);
-      return ok === true;
+      return await new Promise(resolve => {
+        let txn;
+        try {
+          txn = db.transaction(STORE, 'readwrite');
+          txn.objectStore(STORE).delete(key);
+        } catch(e){ resolve(false); return; }
+        txn.oncomplete = () => resolve(true);
+        txn.onerror = () => resolve(false);
+        txn.onabort = () => resolve(false);
+      });
     } catch(e){ return false; }
   }
   async function getIndex(){
@@ -119,7 +136,7 @@ const SaveStore = (() => {
 
   return {
     open, getSlot, putSlot, deleteSlot, getIndex, putIndex, atomicWrite, isMigrated, setMigrated,
-    get available(){ return mem === null; },
+    get available(){ return opened && mem === null; },
   };
 })();
 window.SaveStore = SaveStore;

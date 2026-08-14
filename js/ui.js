@@ -964,10 +964,14 @@ const UI = (() => {
     refreshHUD();
   }
 
+  let lastHintText = null;   // 提示文本去重：同文本不重写 innerHTML（避免每帧 DOM 重建尖峰）
   function setInteractHint(text){
     const el = $('interactHint');
-    if (!text){ el.classList.add('hidden'); return; }
-    el.innerHTML = text;
+    if (!text){ el.classList.add('hidden'); lastHintText = null; return; }
+    if (text !== lastHintText){
+      lastHintText = text;
+      el.innerHTML = text;
+    }
     el.classList.remove('hidden');
   }
 

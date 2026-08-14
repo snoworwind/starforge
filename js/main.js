@@ -898,7 +898,7 @@ const Game = (() => {
   }
 
   // ---------- 起飞 / 大气层飞行 / 降落 ----------
-  const atmo = { yaw: 0, pitch: 0, speed: 0, roll: 0, camRoll: 0 };
+  const atmo = { yaw: 0, pitch: 0, speed: 0, roll: 0, camRoll: 0, handoff: null, pitchFloor: undefined };
   const _trimQ = new THREE.Quaternion(), _trimAxis = new THREE.Vector3(0, 0, 1);
   const _atQ = new THREE.Quaternion(), _atD = new THREE.Quaternion(), _atE = new THREE.Euler();
   const _atFwd = new THREE.Vector3();
@@ -935,31 +935,51 @@ const Game = (() => {
     atmo.camRoll = 0;
     atmo.warmed = false;
     atmo.presaved = false;
+    atmo.handoff = null;        // 出大气交棒状态机（分帧预加载太空资源）
+    atmo.pitchFloor = undefined;   // 再入俯冲保护地板（逐帧平滑抬升，消除入星机头跳变）
     Player.setToolVisible(false);
     $('spaceHud').classList.remove('hidden');
     UI.bigMessage('大气层飞行', 'W/S 油门 · 鼠标转向 · A/D 滚转 · E 就地降落 · 持续拉升冲出大气层');
     lockPointer();
   }
   function updateAtmo(dt){
+    // 出大气缓冲区锁控：进入 EXIT_Y 前的缓冲区且交棒资源未就绪时，短暂锁定操控
+    // （正常情况预加载在 y>145 就已分帧完成，锁控几乎不触发；低端机兜底防卡顿）
+    const handoffLock = !!atmo.handoff && !atmo.handoff.done && shipMesh.position.y > EXIT_Y - HANDOFF_BUFFER_H;
     // 转向：NMS 式——鼠标俯仰/偏航 + A/D 绕前进轴滚转，均作用于机体本地轴
     // 滚转存入 camRoll（模型/相机整体携带，缓慢自动回正，与太空换系无缝衔接）
-    const dRoll = (spaceInput.rollLeft ? -1.7 : spaceInput.rollRight ? 1.7 : 0) * dt;
+    const dRoll = handoffLock ? 0 : (spaceInput.rollLeft ? -1.7 : spaceInput.rollRight ? 1.7 : 0) * dt;
     _atQ.setFromEuler(_atE.set(atmo.pitch, atmo.yaw, atmo.camRoll || 0, 'YXZ'));
     const sAtmo = settings.mouseSens * 0.0022;
-    _atQ.multiply(_atD.setFromEuler(_atE.set(spaceInput.mouseDY * -sAtmo, spaceInput.mouseDX * -sAtmo, dRoll, 'YXZ')));
+    _atQ.multiply(_atD.setFromEuler(_atE.set(handoffLock ? 0 : spaceInput.mouseDY * -sAtmo, handoffLock ? 0 : spaceInput.mouseDX * -sAtmo, dRoll, 'YXZ')));
     _atE.setFromQuaternion(_atQ, 'YXZ');
-    // 动态俯仰上限：无缝再入时可暂超 ±1.2，随后缓收回常规范围（无clamp跳变）
-    atmo.pitchLim = Math.max(1.2, (atmo.pitchLim || 1.2) - dt * 0.45);
+    // 动态俯仰上限：无缝再入时可暂超 ±1.2，随后缓收回常规范围（无clamp跳变）；
+    // 硬上限 1.55——越过 ±90° 会触发 YXZ 欧拉分解万向锁跳变（大幅转视角的突变根源）
+    atmo.pitchLim = Math.min(1.55, Math.max(1.2, (atmo.pitchLim || 1.2) - dt * 0.45));
     atmo.pitch = THREE.MathUtils.clamp(_atE.x, -atmo.pitchLim, atmo.pitchLim);
     atmo.yaw = _atE.y;
     atmo.camRoll = _atE.z;
-    const targetRoll = spaceInput.mouseDX * -0.04 * settings.mouseSens;
+    // 再入俯冲保护地板：入星瞬间机头不再跳变，逐帧平滑抬升到安全俯冲角
+    if (atmo.pitchFloor !== undefined){
+      if (atmo.pitch < atmo.pitchFloor){
+        atmo.pitch = Math.min(atmo.pitchFloor, atmo.pitch + dt * (reentryT > 0 ? 2.4 : 1.6));
+      } else {
+        atmo.pitchFloor = undefined;
+      }
+    }
+    if (handoffLock){
+      // 缓冲区锁控：俯仰/滚转自动配平为稳定爬升（保证穿过大气层顶），出太空时姿态零突变
+      atmo.pitch += (0.32 - atmo.pitch) * Math.min(1, dt * 2.2);
+      atmo.roll += (0 - atmo.roll) * Math.min(1, dt * 4);
+      atmo.camRoll += (0 - atmo.camRoll) * Math.min(1, dt * 4);
+    }
+    const targetRoll = handoffLock ? 0 : spaceInput.mouseDX * -0.04 * settings.mouseSens;
     atmo.roll += (targetRoll - atmo.roll) * Math.min(1, dt * 5);
-    const steer = Math.abs(spaceInput.mouseDX) + Math.abs(spaceInput.mouseDY);
+    const steer = handoffLock ? 0 : Math.abs(spaceInput.mouseDX) + Math.abs(spaceInput.mouseDY);
     spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;
-    // 速度
+    // 速度（锁控期间维持当前速度下限 20，保证尽快穿过缓冲区，不再响应油门/刹车）
     const maxS = spaceInput.boost ? 55 : 30;
-    let target = spaceInput.thrust ? maxS : spaceInput.brake ? 3 : Math.min(atmo.speed, maxS);
+    let target = handoffLock ? Math.max(atmo.speed, 20) : spaceInput.thrust ? maxS : spaceInput.brake ? 3 : Math.min(atmo.speed, maxS);
     atmo.speed += (target - atmo.speed) * Math.min(1, dt * 2.2);
     // 位移
     _atQ.setFromEuler(_atE.set(atmo.pitch, atmo.yaw, 0, 'YXZ'));
@@ -1056,10 +1076,21 @@ const Game = (() => {
     $('speedVal').textContent = atmo.speed.toFixed(0);
     $('pulseHint').textContent = `高度 ${(shipMesh.position.y - gh).toFixed(0)}m · 大气层顶 ${Math.max(0, EXIT_Y - shipMesh.position.y).toFixed(0)}m`;
     UI.setInteractHint('<b>E</b> 就地降落 · 拉升至大气层顶进入太空');
-    // 高空预热太空场景（初始化 + 着色器预编译）+ 预存档（消除冲出大气层瞬间的卡顿）
+    // 高空预热太空场景（初始化 + 着色器预编译）+ 出大气交棒分帧预加载（消除冲出大气瞬间的卡顿）
     if (!atmo.warmed && shipMesh.position.y > 145){
       atmo.warmed = true;
+      // 交棒状态机：分帧生成 55 张星系贴图（每帧 8 张 ≈ 0.12s），随后建精灵 + 预编译着色器
+      atmo.handoff = { seeds: neighborSeeds().map(s => ({ seed: s })), i: 0, done: false };
       renderer.compile(Space.scene, camera);
+    }
+    if (atmo.handoff && !atmo.handoff.done){
+      const H = atmo.handoff;
+      for (let k = 0; k < 8 && H.i < H.seeds.length; k++, H.i++) Space.galaxyCanvas(H.seeds[H.i].seed);
+      if (H.i >= H.seeds.length){
+        Space.setGalaxySprites(H.seeds);   // 贴图已全部缓存，建精灵开销可忽略
+        renderer.compile(Space.scene, camera);
+        H.done = true;
+      }
     }
     if (!atmo.presaved && shipMesh.position.y > 160){
       atmo.presaved = true;
@@ -1068,8 +1099,8 @@ const Game = (() => {
     // 大气层内持续整球回绘 + 浮雕位移（出大气前球面已是本星球地形全貌）
     Space.paintGlobe(currentPlanet, World.mapColorAt, World.seed, 2);
     Space.displaceGlobe(currentPlanet, World.mapHeightAt, World.seed, 2);
-    // 冲出大气层
-    if (shipMesh.position.y > EXIT_Y){
+    // 冲出大气层（交棒资源就绪后；未就绪则缓冲区锁控下继续飞行等待，绝不带卡顿进太空）
+    if (shipMesh.position.y > EXIT_Y && (!atmo.handoff || atmo.handoff.done)){
       Sound.loops.engine.stop();
       finishLaunch();
     }
@@ -1263,6 +1294,7 @@ const Game = (() => {
   const SEA_Y = 16;               // 与球面表面对应的体素高度（略低于海平面20，防止球体穿透水面）
   const HANDOFF_Y = 104;          // 太空→大气 握手高度（体素）：入场留足反应高度（峰顶+树冠≈63）
   const EXIT_Y = 175;             // 大气→太空 高度（体素）：突破云层顶(≈124~158)即冲出大气，不再爬无谓的平流层
+  const HANDOFF_BUFFER_H = 16;    // 大气→太空 交棒缓冲区高度（格）：进入该区间且资源未就绪时短暂锁控兜底
   // 信标放置/改名后即刻存档（使太空立即可见）
   function saveBeaconState(pid){
     if (!pid && pid !== 0) pid = currentPlanet;
@@ -1440,15 +1472,18 @@ const Game = (() => {
     const qVox = _qBasis.clone().invert().multiply(shipSpaceQ);
     const ev = new THREE.Euler().setFromQuaternion(qVox, 'YXZ');
     atmo.yaw = ev.y;
-    // 俯冲角入场保护：太空正对星球俯冲映射过来常是大角度俯冲，低空反应时间不足会一头砸进方块地面
-    atmo.pitch = Math.max(ev.x, -0.4);
-    atmo.pitchLim = Math.max(1.2, Math.abs(atmo.pitch) + 0.01);
+    // 俯冲角入场保护：太空正对星球俯冲映射过来常是大角度俯冲，低空反应时间不足会一头砸进方块地面。
+    // 不再瞬时抬到 -0.4（入星瞬间机头跳变），改设俯冲地板，由 updateAtmo 逐帧平滑抬升
+    atmo.pitch = THREE.MathUtils.clamp(ev.x, -1.55, 1.55);
+    atmo.pitchLim = Math.min(1.55, Math.max(1.2, Math.abs(atmo.pitch) + 0.01));
+    atmo.pitchFloor = -0.4;
     atmo.camRoll = ev.z;
     // 动量延续：速度按比例换算，超出大气极速的部分由空气阻力自然衰减
     atmo.speed = Math.min(110, Space.shipState.speed / s);
     atmo.roll = 0;
     atmo.warmed = false;
     atmo.presaved = false;
+    atmo.handoff = null;        // 再入重置出大气交棒状态机（下次冲出大气时重新分帧预加载）
     // 机身初始姿态 = 精确映射姿态（模型无跳变）
     shipMesh.quaternion.copy(qVox);
     camBlend = { t: 0, dist0: 11 / s, fov0: camera.fov };   // 仅视距/FOV 比例过渡，朝向零动画

@@ -561,7 +561,11 @@ const Space = (() => {
 
   // ---------- 远方星系贴图（曲速跃迁目标：太空可见的旋涡星系群，方向按种子确定）----------
   let galSprites = [], galSpritesReady = false;
+  // 星系贴图 canvas 缓存：galaxyCanvas 纯函数（种子确定性），出大气前分帧预生成，
+  // setGalaxySprites 建精灵时直接命中缓存，消除进入太空首帧的同步绘制开销
+  const _galCanvasCache = new Map();
   function galaxyCanvas(seed){
+    if (_galCanvasCache.has(seed)) return _galCanvasCache.get(seed);
     const S = 128;
     const c = document.createElement('canvas');
     c.width = S; c.height = S;
@@ -586,6 +590,7 @@ const Space = (() => {
         x.fillRect(cx + Math.cos(ang) * r + (rnd() - 0.5) * 5, cy + Math.sin(ang) * r * 0.62 + (rnd() - 0.5) * 5, 1.6, 1.6);
       }
     }
+    _galCanvasCache.set(seed, c);
     return c;
   }
   function setGalaxySprites(list){
@@ -2307,7 +2312,11 @@ const Space = (() => {
     const sens = ((window.Game && Game.mouseSens) || 1) * 0.0022;
     _qAtt.multiply(_qDlt.setFromEuler(_eAtt.set(input.mouseDY * -sens, input.mouseDX * -sens, dRoll, 'YXZ'))).normalize();
     _eAtt.setFromQuaternion(_qAtt, 'YXZ');
-    shipState.pitch = _eAtt.x; shipState.yaw = _eAtt.y; shipState.roll = _eAtt.z;
+    // 俯仰钳制（±1.55，与行走/大气/setAttitude 一致）：越过 ±90° 后 YXZ 欧拉角分解发生
+    // 万向锁跳变（yaw/roll 瞬间翻转），大幅持续转动视角会偶发"视角突变"。钳制在远离
+    // 万向锁的区间内，分解连续稳定。
+    shipState.pitch = THREE.MathUtils.clamp(_eAtt.x, -1.55, 1.55);
+    shipState.yaw = _eAtt.y; shipState.roll = _eAtt.z;
     visBank += (input.mouseDX * -0.045 * ((window.Game && Game.mouseSens) || 1) - visBank) * Math.min(1, dt * 5);
 
     // 速度

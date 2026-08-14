@@ -631,9 +631,11 @@ const Game = (() => {
   document.addEventListener('mousemove', e => {
     if (!pointerLocked) return;
     if (skipMouseJump){ skipMouseJump = false; return; }   // 锁定瞬间的异常跳变，丢弃本帧
-    // 单帧增量防护：个别系统/浏览器会偶发超大 movementX/Y，导致视角瞬间跳到别的方向
-    const mx = THREE.MathUtils.clamp(Number.isFinite(e.movementX) ? e.movementX : 0, -300, 300);
-    const my = THREE.MathUtils.clamp(Number.isFinite(e.movementY) ? e.movementY : 0, -300, 300);
+    // Chromium/Edge 偶发超大 movementX/Y（指针锁定回中跳变，单帧可达上千像素）：
+    // 正常快速甩鼠标单帧最多几十像素，超过阈值视为异常增量，整帧丢弃，彻底避免视角瞬移。
+    const mx = Number.isFinite(e.movementX) ? e.movementX : 0;
+    const my = Number.isFinite(e.movementY) ? e.movementY : 0;
+    if (Math.abs(mx) > 200 || Math.abs(my) > 200) return;
     if (state === 'planet' || (state === 'station' && Station.walking)){
       // station 行走与星球行走共用同一条被验证的视角通道（Player.yaw/pitch）
       const s = settings.mouseSens * 0.0024;
@@ -2957,12 +2959,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v84-station';
+    bd.textContent = 'build v85-station';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v84';
+  window.__V_MAIN = 'v85';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

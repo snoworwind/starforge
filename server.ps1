@@ -132,6 +132,7 @@ function Broadcast([string]$text, $except){
 }
 
 function Accept-WsClient($tcp){
+  $tcp.SendTimeout = 5000   # 写阻塞超时：僵尸连接写满缓冲不再卡死主循环
   $stream = $tcp.GetStream()
   $req = Read-HttpRequest $stream
   if ($req -match 'Sec-WebSocket-Key:\s*(\S+)'){
@@ -224,6 +225,7 @@ while ($true){
   while ($httpListener.Pending()){
     $work = $true
     $tcp = $httpListener.AcceptTcpClient()
+    $tcp.SendTimeout = 5000   # 慢速客户端也不阻塞文件下发
     try {
       $req = Read-HttpRequest $tcp.GetStream()
       Send-HttpFile $tcp $req
@@ -237,7 +239,12 @@ while ($true){
   # ws pump
   foreach ($cl in @($clients)){
     if (-not $cl.Dead){
-      try { if ($cl.Stream.DataAvailable){ $work = $true }; Pump-WsClient $cl } catch { $cl.Dead = $true }
+      try {
+        # 对端已断开（收到 FIN 且无残留数据）：立即下线，防止僵尸连接累积、写满缓冲后阻塞中继
+        if ($cl.Tcp.Client.Poll(0, [System.Net.Sockets.SelectMode]::SelectRead) -and $cl.Tcp.Available -eq 0){ $cl.Dead = $true; continue }
+        if ($cl.Stream.DataAvailable){ $work = $true }
+        Pump-WsClient $cl
+      } catch { $cl.Dead = $true }
     }
   }
   # drop dead

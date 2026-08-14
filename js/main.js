@@ -3012,6 +3012,9 @@ const Game = (() => {
     const now = performance.now();
     let dt = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
+    // 联机：位置广播 + 远程玩家化身 + need-init 重试。必须在菜单/加载/暂停早退之前运行，
+    // 否则访客在「等待房主世界同步」的 menu/loading 态永远不重发 need-init，卡死在主菜单。
+    if (window.Net) Net.tick(dt);
     if (state === 'menu' || state === 'loading') return;
     if (paused) return;
     playTime += dt;
@@ -3019,7 +3022,6 @@ const Game = (() => {
     applyAtmoTint(dt);        // 大气颜色滤镜（接近/再入渐显，其余状态自动淡出）
     tickAtmoScan(dt);         // 地表扫描波前动画（跨状态走完）
     tickShipPreview(dt);      // 背包飞船页 3D 预览（打开时才渲染）
-    if (window.Net) Net.tick(dt);   // 联机：位置广播 + 远程玩家化身
 
     if (state === 'planet'){
       const day = updateDayNight(dt);

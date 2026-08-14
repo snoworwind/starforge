@@ -931,10 +931,10 @@ const Player = (() => {
   }
 
   // 目视目标（供交互提示）
+  const _ltDir = new THREE.Vector3(), _ltFrom = new THREE.Vector3();
   function lookTarget(camera){
-    const dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    return World.raycast(camera.position.clone(), dir, 5);
+    camera.getWorldDirection(_ltDir);
+    return World.raycast(_ltFrom.copy(camera.position), _ltDir, 5);
   }
 
   // ---------- 装备充能（NMS 风格：用资源为系统充能）----------

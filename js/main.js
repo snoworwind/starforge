@@ -637,7 +637,13 @@ const Game = (() => {
       // station 行走与星球行走共用同一条被验证的视角通道（Player.yaw/pitch）
       const s = settings.mouseSens * 0.0024;
       Player.yaw -= mx * s;
-      Player.pitch = THREE.MathUtils.clamp(Player.pitch - my * s, -1.55, 1.55);
+      // 俯仰软限位：±1.35 后指数渐近到 ±1.55——扫过天空顶点时镜头渐慢停住，
+      // 而不是硬限位瞬间卡死（"正常转动小幅度突变"的手感来源之一）
+      const PITCH_SOFT = 1.35, PITCH_MAX = 1.55, PITCH_SPAN = PITCH_MAX - PITCH_SOFT;
+      let p = Player.pitch - my * s;
+      if (p > PITCH_SOFT) p = PITCH_SOFT + PITCH_SPAN * (1 - Math.exp((PITCH_SOFT - p) / PITCH_SPAN));
+      else if (p < -PITCH_SOFT) p = -PITCH_SOFT - PITCH_SPAN * (1 - Math.exp((p + PITCH_SOFT) / PITCH_SPAN));
+      Player.pitch = p;
     } else if (state === 'station'){
       // 站内行走视角：复用太空飞行同一条输入管线（spaceInput 累积 → station.js 消费）
       spaceInput.mouseDX += mx;

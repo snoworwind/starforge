@@ -11,7 +11,10 @@ const Net = (() => {
   let role = null;              // null | 'host' | 'guest'
   let myId = 0;                 // 服务器分配
   let connected = false;
-  let applyingRemote = false;   // 应用远程操作时不回播
+  let applyDepth = 0;   // 深度计数：应用远程操作期间不回播（异步初始化会嵌套，布尔会被中途重置）
+  function beginApply(){ applyDepth++; }
+  function endApply(){ applyDepth--; }
+  function isApplying(){ return applyDepth > 0; }
   let patched = false;
   let posTimer = 0;
   const remotes = new Map();    // id -> {group, ship, body, tag, planet, st, pos, tgt, yaw, tyaw, inScene, last}
@@ -114,7 +117,11 @@ const Net = (() => {
         if (role === 'host' && gameReady()) broadcast(buildInit(m.id));
         break;
       case 'init':
-        if (role === 'guest' && (m.to === undefined || m.to === myId) && window.Game) Game.joinGame(m);
+        // 整个初始化回播期间抑制本地广播（否则重连客人会把自己的机器数据回播主机、覆盖主机状态）
+        if (role === 'guest' && (m.to === undefined || m.to === myId) && window.Game){
+          beginApply();
+          Promise.resolve(Game.joinGame(m)).catch(e => console.warn('[net] init apply', e)).finally(endApply);
+        }
         break;
       case 'pos': onPos(m); break;
       case 'blk': onBlk(m); break;
@@ -125,9 +132,9 @@ const Net = (() => {
   function onBlk(m){
     if (m.id === myId) return;
     if (gameReady() && Game.currentPlanet === m.planet){
-      applyingRemote = true;
+      beginApply();
       World.set(m.x, m.y, m.z, m.b);
-      applyingRemote = false;
+      endApply();
     } else {
       (pendingBlk[m.planet] = pendingBlk[m.planet] || []).push(m);
     }
@@ -135,10 +142,10 @@ const Net = (() => {
   function onMac(m){
     if (m.id === myId) return;
     if (gameReady() && Game.currentPlanet === m.planet){
-      applyingRemote = true;
+      beginApply();
       if (m.op === 'add') Factory.place(m.x, m.y, m.z, m.bk, m.dir);
       else Factory.remove(m.x, m.y, m.z);
-      applyingRemote = false;
+      endApply();
     } else {
       (pendingMac[m.planet] = pendingMac[m.planet] || []).push(m);
     }
@@ -146,7 +153,7 @@ const Net = (() => {
   function drainPending(){
     if (!gameReady()) return;
     const pid = Game.currentPlanet;
-    applyingRemote = true;
+    beginApply();
     if (pendingBlk[pid]){ for (const m of pendingBlk[pid]) World.set(m.x, m.y, m.z, m.b); delete pendingBlk[pid]; }
     if (pendingMac[pid]){
       for (const m of pendingMac[pid]){
@@ -155,7 +162,7 @@ const Net = (() => {
       }
       delete pendingMac[pid];
     }
-    applyingRemote = false;
+    endApply();
   }
 
   // ---------- 本地操作钩子（广播方块/机器变更） ----------
@@ -163,22 +170,22 @@ const Net = (() => {
     if (patched) return;
     patched = true;
     const worldSet = World.set;
-    World.set = function(x, y, z, id){
-      worldSet(x, y, z, id);
-      if (active() && !applyingRemote && gameReady())
+    World.set = function(x, y, z, id, silent){   // 透传 silent：与原始签名保持一致
+      worldSet(x, y, z, id, silent);
+      if (active() && !isApplying() && gameReady())
         broadcast({ t: 'blk', id: myId, planet: Game.currentPlanet, x, y, z, b: id });
     };
     const facPlace = Factory.place;
     Factory.place = function(x, y, z, bk, dir){
       const r = facPlace(x, y, z, bk, dir);
-      if (active() && !applyingRemote && gameReady())
+      if (active() && !isApplying() && gameReady())
         broadcast({ t: 'mac', id: myId, planet: Game.currentPlanet, op: 'add', x, y, z, bk, dir });
       return r;
     };
     const facRemove = Factory.remove;
     Factory.remove = function(x, y, z){
       const r = facRemove(x, y, z);
-      if (active() && !applyingRemote && gameReady())
+      if (active() && !isApplying() && gameReady())
         broadcast({ t: 'mac', id: myId, planet: Game.currentPlanet, op: 'remove', x, y, z });
       return r;
     };
@@ -228,7 +235,10 @@ const Net = (() => {
   }
   function removeRemote(id){
     const r = remotes.get(id);
-    if (r && r.inScene) r.inScene.remove(r.group);
+    if (r){
+      if (r.inScene) r.inScene.remove(r.group);
+      disposeObject3D(r.group);   // 化身体素几何/材质独立；名牌 CanvasTexture 独立（随遍历 dispose）
+    }
     remotes.delete(id);
   }
   function clearRemotes(){
@@ -262,6 +272,7 @@ const Net = (() => {
       if (posTimer > 0.1){ posTimer = 0; broadcast(myPosMsg()); }
     }
     const now = performance.now();
+    const expired = [];   // 超时掉线者：彻底移除并释放化身资源（防异常断开后 Map 无限增长）
     for (const [id, r] of remotes){
       // 场景归属：同星球地面态 → planetScene；太空态 → Space.scene
       const myState = Game.state;
@@ -272,6 +283,8 @@ const Net = (() => {
       } else if (myState === 'space' && r.st === 'space'){
         scene = Space.scene; showShip = true;
       }
+      // 超时：8秒无包视为掉线
+      if (now - r.last > 8000){ expired.push(id); continue; }
       if (r.inScene !== scene){
         if (r.inScene) r.inScene.remove(r.group);
         if (scene) scene.add(r.group);
@@ -287,9 +300,9 @@ const Net = (() => {
       r.group.position.copy(r.pos);
       if (r.st === 'planet' || r.st === 'seated') r.group.position.y -= 1.4;   // Player.pos 是眼睛高度
       r.group.rotation.y = r.yaw + Math.PI;
-      // 超时：8秒无包隐藏
-      r.group.visible = now - r.last <= 8000;
+      r.group.visible = true;
     }
+    for (const id of expired){ removeRemote(id); onStatus(); }
   }
   // 供 HUD 标记使用：远程玩家列表（插值后的位置）
   function getRemotes(){

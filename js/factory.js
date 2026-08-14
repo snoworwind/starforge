@@ -256,9 +256,22 @@ const Factory = (() => {
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     return new THREE.MeshLambertMaterial({ map: tex });
   }
+  // 释放传送带的专属皮带材质/贴图（每次重建都会新建；共享材质 railMat 等不在此列）
+  function disposeBeltMats(m){
+    const ap = m && m.animParts;
+    if (!ap) return;
+    for (const k of ['beltMat', 'beltMat2']){
+      const mm = ap[k];
+      if (mm){
+        if (mm.map && mm.map.dispose) mm.map.dispose();
+        if (mm.dispose) mm.dispose();
+      }
+    }
+  }
   function rebuildBeltVisual(m, g){
     g = g || m.mesh;
     if (!g) return;
+    disposeBeltMats(m);   // 释放上一轮创建的专属皮带材质/贴图（防 GPU 资源泄漏）
     while (g.children.length) g.remove(g.children[0]);
     m.shape = computeBeltShape(m);
     const { turn, slope, inDir } = m.shape;
@@ -386,6 +399,7 @@ const Factory = (() => {
     const k = key(x, y, z);
     const m = machines.get(k);
     if (!m) return null;
+    disposeBeltMats(m);   // 皮带专属材质/贴图随机器一并释放
     if (m.mesh) group.remove(m.mesh);
     if (m.bot && m.bot.mesh) group.remove(m.bot.mesh);   // 伐木机器人实体随桩拆除
     machines.delete(k);
@@ -1098,6 +1112,7 @@ const Factory = (() => {
     }
   }
   function reset(){
+    for (const m of machines.values()) disposeBeltMats(m);   // 皮带专属材质/贴图随清空一并释放
     machines = new Map();
     if (group){ group.clear(); }
     if (itemGroup){ itemGroup.clear(); }

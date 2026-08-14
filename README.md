@@ -76,7 +76,7 @@ start index.html
 
 ```bash
 npm install            # 安装 playwright-core（仅几 MB，无需下载浏览器）
-npm test               # 无头运行全套（需 Node ≥ 18 + Edge / Chrome）
+npm test               # 无头运行全套（需 Node ≥ 20 + Edge / Chrome）
 npm run test:headed    # 有头模式可视化调试
 ```
 

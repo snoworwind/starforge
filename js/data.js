@@ -109,7 +109,7 @@ const ITEMS = {
   chest_b:    { name: '储物箱', cat: 'mach', iconBlock: 'chest', block: 'chest', stack: 50, desc: '24 格储存空间。', price: 90 },
   reactor_b:  { name: '核子反应堆', cat: 'mach', iconBlock: 'reactor', block: 'reactor', stack: 20, desc: '全天候发电 100kW，消耗铀。', price: 4000 },
   launchpad_b:{ name: '发射平台', cat: 'mach', iconBlock: 'launchpad', block: 'launchpad', stack: 10, desc: '飞船停泊于此免耗燃料起飞。', price: 1500 },
-  wind_b:     { name: '风力涡轮机', cat: 'mach', iconBlock: 'wind', block: 'wind', stack: 50, desc: '全天候发电 4~14kW，海拔越高风越大。', price: 420 },
+  wind_b:     { name: '风力涡轮机', cat: 'mach', iconBlock: 'wind', block: 'wind', stack: 50, desc: '全天候发电 2~16kW，海拔越高风越大。', price: 420 },
   burner_b:   { name: '火力发电机', cat: 'mach', iconBlock: 'burner', block: 'burner', stack: 50, desc: '烧煤/碳发电 25kW，工业的第一缕黑烟。', price: 260 },
   beacon_b:   { name: '标记方块', cat: 'mach', iconBlock: 'beacon', block: 'beacon', stack: 20, desc: '放置后在屏幕上显示定位标记，按 E 设置名称与全星系显示。永不迷路。', price: 120 },
   lumberbot_b:{ name: '伐木机器人', cat: 'mach', iconBlock: 'lumberbot', block: 'lumberbot', stack: 10, desc: '放置充电桩后悬浮机器人自动巡林伐木，采集碳装满后自动送往附近的收集点。', price: 320 },

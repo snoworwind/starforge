@@ -39,7 +39,7 @@ wrsk/
 
 ## 2. 快速开始
 
-前置条件：本机装有 **Node ≥ 18** 和 **Microsoft Edge（或 Chrome）**。首次执行：
+前置条件：本机装有 **Node ≥ 20**（playwright-core 1.49 要求）和 **Microsoft Edge（或 Chrome）**。首次执行：
 
 ```bash
 npm install        # 安装 playwright-core（约几 MB，无需下载浏览器）

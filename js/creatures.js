@@ -209,7 +209,8 @@ const Creatures = (() => {
     if (lastSpawnPos && plyPos.distanceToSquared(lastSpawnPos) < 1600) return; // ~40m 内不刷新
 
     lastSpawnPos = plyPos.clone();
-    // 清理旧生物
+    // 清理旧生物（GLB 克隆几何共享模板跳过；体素回退全量）
+    for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
     group.clear();
     list = [];
 
@@ -229,7 +230,7 @@ const Creatures = (() => {
         state: 'idle', timer: 1 + Math.random() * 3,
         jumpVel: 0, onGround: true,
         typeDef, animT: Math.random() * 10, foot,
-        hp: 4,
+        hp: 4, isGlb: !!g.userData.isGlb,
         radius: Math.max(0.55, Math.max(typeDef.w, typeDef.h, typeDef.d) * 1.3),
       };
       group.add(g);
@@ -327,9 +328,15 @@ const Creatures = (() => {
   }
 
   function reset(){
-    if (group) group.clear();
+    if (group){
+      for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+      group.clear();
+    }
     list = [];
-    if (vGroup) vGroup.clear();
+    if (vGroup){
+      for (const g of villagers) disposeObject3D(g, { skipGeo: true, skipTex: true });   // 村民克隆共享模板几何
+      vGroup.clear();
+    }
     villagers = [];
     spawnedVillages.clear();
     lastSpawnPos = null;
@@ -364,6 +371,7 @@ const Creatures = (() => {
   function kill(g){
     const i = list.indexOf(g);
     if (i >= 0) list.splice(i, 1);
+    disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
     group.remove(g);
     if (window.Player){
       Player.spawnParticles(g.position.x, g.position.y + 0.3, g.position.z, 0xd4544a, 14);

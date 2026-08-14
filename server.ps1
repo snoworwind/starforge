@@ -170,10 +170,11 @@ function Pump-WsClient($cl){
     $off = 2
     if ($len -eq 126){
       if ($data.Length -lt 4) { return }
-      $len = ($data[2] -shl 8) -bor $data[3]; $off = 4
+      # 必须显式转 int：$data[x] 是 Byte，Byte -shl 8 会回绕（1 -shl 8 = 0），导致 ≥256 字节的帧长度解析错误
+      $len = ([int]$data[2] -shl 8) -bor [int]$data[3]; $off = 4
     } elseif ($len -eq 127){
       if ($data.Length -lt 10) { return }
-      $len = 0
+      $len = [long]0
       for ($i = 2; $i -lt 10; $i++){ $len = ($len * 256) + $data[$i] }
       $off = 10
     }

@@ -28,7 +28,7 @@ const Station = (() => {
 
   // ---------- 进入检测（太空态每帧调用；接管则返回 true）----------
   let shieldWarnCd = 0;
-  function tryBegin(){
+  function tryBegin(dt = 0.016){
     const dk = Space.getDock();
     if (!dk) return false;
     _v1.copy(Space.shipState.pos).sub(dk.origin);
@@ -37,7 +37,7 @@ const Station = (() => {
     if (!inBay && !inGate) return false;
     // 防护盾激活期间禁止泊入（门口引导光已变红警示）
     if (Space.stationShieldUp){
-      shieldWarnCd -= 0.016;
+      shieldWarnCd -= dt;   // 按实际帧时长扣减（120Hz 下警告频率不再翻倍）
       if (shieldWarnCd <= 0){
         shieldWarnCd = 2.5;
         UI.bigMessage('⛔ 泊入请求被拒绝', '空间站防护盾激活中——停止攻击 10 秒后恢复准入', 2200);

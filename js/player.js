@@ -194,6 +194,7 @@ const Player = (() => {
   }
   const _dTmp2 = new THREE.Vector3();
   const _mvF = new THREE.Vector3(), _mvR = new THREE.Vector3(), _mvW = new THREE.Vector3(), _np = new THREE.Vector3();   // update 移动临时量
+  const _yprE = new THREE.Euler();   // 相机朝向（显式 YXZ 欧拉，等价 Ry(yaw)·Rx(pitch)，无 rotation 残留歧义）
   // G 键丢出：手持物品沿视线抛出（count 未定带 Shift 丢整组）
   function throwHeld(count){
     const s = inv[hotIdx];
@@ -648,10 +649,10 @@ const Player = (() => {
     }
 
     // --- 相机 ---
+    // 显式 YXZ 四元数构建（等价 Ry(yaw)·Rx(pitch)）：不依赖 camera.rotation 残留状态，
+    // 画圈快速转动时朝向分解完全连续，杜绝任何顺序/残留导致的偶发突变
     camera.position.set(pos.x, pos.y + EYE, pos.z);
-    camera.rotation.set(0, 0, 0);
-    camera.rotateY(yaw);
-    camera.rotateX(pitch);
+    camera.quaternion.setFromEuler(_yprE.set(pitch, yaw, 0, 'YXZ'));
 
     // --- 手持工具/物品动画 ---
     attachToolTo(camera);

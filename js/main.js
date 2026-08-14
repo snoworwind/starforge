@@ -626,20 +626,25 @@ const Game = (() => {
 
   // ---------- 输入 ----------
   const spaceInput = { mouseDX: 0, mouseDY: 0, thrust: false, brake: false, boost: false, pulse: false, rollLeft: false, rollRight: false };
+  const MAX_MOUSE_MOVE = 400;   // 单事件位移限幅：鼠标偶发大跳（驱动/浏览器异常）不再引起视角瞬转
   document.addEventListener('mousemove', e => {
     if (!pointerLocked) return;
+    let mx = Number.isFinite(e.movementX) ? e.movementX : 0;
+    let my = Number.isFinite(e.movementY) ? e.movementY : 0;
+    if (Math.abs(mx) > MAX_MOUSE_MOVE) mx = Math.sign(mx) * MAX_MOUSE_MOVE;
+    if (Math.abs(my) > MAX_MOUSE_MOVE) my = Math.sign(my) * MAX_MOUSE_MOVE;
     if (state === 'planet' || (state === 'station' && Station.walking)){
       // station 行走与星球行走共用同一条被验证的视角通道（Player.yaw/pitch）
       const s = settings.mouseSens * 0.0024;
-      Player.yaw -= e.movementX * s;
-      Player.pitch = THREE.MathUtils.clamp(Player.pitch - e.movementY * s, -1.55, 1.55);
+      Player.yaw -= mx * s;
+      Player.pitch = THREE.MathUtils.clamp(Player.pitch - my * s, -1.55, 1.55);
     } else if (state === 'station'){
       // 站内行走视角：复用太空飞行同一条输入管线（spaceInput 累积 → station.js 消费）
-      spaceInput.mouseDX += e.movementX;
-      spaceInput.mouseDY += e.movementY;
+      spaceInput.mouseDX += mx;
+      spaceInput.mouseDY += my;
     } else if (state === 'space' || state === 'atmo'){
-      spaceInput.mouseDX += e.movementX;
-      spaceInput.mouseDY += e.movementY;
+      spaceInput.mouseDX += mx;
+      spaceInput.mouseDY += my;
     }
   });
   document.addEventListener('mousedown', e => {

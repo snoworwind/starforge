@@ -18,6 +18,7 @@ const Net = (() => {
   let patched = false;
   let posTimer = 0;
   let initRetryT = 0;
+  let gotInit = false;          // 已收到主机 init（停止 need-init 重试，避免重复 joinGame）
   const remotes = new Map();    // id -> {group, ship, body, tag, planet, st, pos, tgt, yaw, tyaw, inScene, last}
   const pendingBlk = {};        // planetId -> [msg]
   const pendingMac = {};        // planetId -> [msg]
@@ -68,6 +69,8 @@ const Net = (() => {
   async function joinRoom(addr){
     await connect(addr);
     role = 'guest';
+    gotInit = false;
+    initRetryT = 0;
     broadcast({ t: 'need-init', id: myId });
     onStatus();
   }
@@ -76,6 +79,7 @@ const Net = (() => {
     ws = null;
     connected = false;
     role = null;
+    gotInit = false;
     clearRemotes();
   }
   function broadcast(msg){
@@ -121,6 +125,7 @@ const Net = (() => {
       case 'init':
         // 整个初始化回播期间抑制本地广播（否则重连客人会把自己的机器数据回播主机、覆盖主机状态）
         if (role === 'guest' && (m.to === undefined || m.to === myId) && window.Game){
+          gotInit = true;
           beginApply();
           Promise.resolve().then(() => Game.joinGame(m)).catch(e => console.warn('[net] init apply', e)).finally(endApply);
         }
@@ -277,7 +282,7 @@ const Net = (() => {
     if (!active() || !window.Game) return;
     drainPending();
     // 访客尚未就绪（仍处菜单/加载）时周期重发 need-init，直到主机回 init（主机在空间站/加载中时也能最终同步）
-    if (role === 'guest' && (Game.state === 'menu' || Game.state === 'loading')){
+    if (role === 'guest' && !gotInit && (Game.state === 'menu' || Game.state === 'loading')){
       initRetryT += dt;
       if (initRetryT > 2){ initRetryT = 0; broadcast({ t: 'need-init', id: myId }); }
     }

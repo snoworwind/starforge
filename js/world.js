@@ -56,10 +56,12 @@ const World = (() => {
     if (farMesh) farMesh.receiveShadow = shadowsOn;
   }
 
-  let chunks = new Map();       // "cx,cz" -> {cx,cz,data,mesh,waterMesh,dirty,modified}
+  let chunks = new Map();       // 整数键 -> {cx,cz,data,mesh,waterMesh,dirty,modified}
   let savedMods = null;         // 存档中被修改过的区块 {key: rle}
   let group = null;
   let noise = null, biome = null, seed = 0;
+  let streamDirty = true, lastScCx = 1e9, lastScCz = 1e9;   // 流式扫描空闲门控：有脏区块或玩家跨区块时重扫
+  function markDirty(c){ c.dirty = true; streamDirty = true; }
 
   const solidMat = new THREE.MeshLambertMaterial({ map: Tex.texture, vertexColors: true, transparent: true, alphaTest: 0.4, side: THREE.DoubleSide });
   const waterMat = new THREE.MeshLambertMaterial({ map: Tex.texture, transparent: true, opacity: 0.72, side: THREE.DoubleSide });
@@ -110,7 +112,8 @@ const World = (() => {
     curveU.edgeR.value = edgeR === undefined ? 9999 : edgeR;
   }
 
-  const ckey = (cx, cz) => cx + ',' + cz;
+  const ckey = (cx, cz) => cx * 65536 + cz;   // 整数键（区块坐标 ±99，无碰撞），避免每帧字符串拼接
+  const strkey = (cx, cz) => cx + ',' + cz;   // 存档/联机包边界使用的字符串键（格式不可变）
   const lidx = (lx, y, lz) => (y * CHUNK + lz) * CHUNK + lx;
   const cf = v => Math.floor(v / CHUNK);
 
@@ -172,9 +175,9 @@ const World = (() => {
     c.data[lidx(x - cx * CHUNK, y, z - cz * CHUNK)] = id;
     c.modified = true;
     if (!silent){
-      c.dirty = true;
+      markDirty(c);
       const lx = x - cx * CHUNK, lz = z - cz * CHUNK;
-      const mark = (ax, az) => { const n = chunks.get(ckey(ax, az)); if (n) n.dirty = true; };
+      const mark = (ax, az) => { const n = chunks.get(ckey(ax, az)); if (n) markDirty(n); };
       if (lx === 0) mark(cx - 1, cz);
       if (lx === CHUNK - 1) mark(cx + 1, cz);
       if (lz === 0) mark(cx, cz - 1);
@@ -343,10 +346,11 @@ const World = (() => {
     if (c) return c;
     c = { cx, cz, data: new Uint8Array(CHUNK_CELLS), mesh: null, waterMesh: null, dirty: true, modified: false };
     chunks.set(k, c);
+    streamDirty = true;   // 新区块（外部触发时）需要下一帧扫描建网格
 
-    // 存档区块直接还原
-    if (savedMods && savedMods[k]){
-      const rle = savedMods[k];
+    // 存档区块直接还原（存档键为字符串格式）
+    if (savedMods && savedMods[strkey(cx, cz)]){
+      const rle = savedMods[strkey(cx, cz)];
       let i = 0;
       for (let p = 0; p < rle.length; p += 2){
         c.data.fill(rle[p + 1], i, i + rle[p]);
@@ -482,7 +486,7 @@ const World = (() => {
   function markNeighborsDirty(cx, cz){
     for (const [ox, oz] of [[1,0],[-1,0],[0,1],[0,-1]]){
       const n = chunks.get(ckey(cx + ox, cz + oz));
-      if (n && n.mesh) n.dirty = true;
+      if (n && n.mesh) markDirty(n);
     }
   }
 
@@ -622,6 +626,8 @@ const World = (() => {
   // ---------- 流式加载（每帧限额）----------
   function stream(px, pz){
     const pcx = cf(px), pcz = cf(pz);
+    // 空闲门控：无脏区块且玩家未跨区块时整轮跳过（静止时每帧数千次 Map 查询归零）
+    if (!streamDirty && pcx === lastScCx && pcz === lastScCz) return;
     let genBudget = 4, meshBudget = 2;
     // 由近及远
     for (let r = 0; r <= GEN_R && (genBudget > 0 || meshBudget > 0); r++){
@@ -648,9 +654,11 @@ const World = (() => {
       if (Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) > UNLOAD_R){
         if (c.mesh){ group.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh = null; }
         if (c.waterMesh){ group.remove(c.waterMesh); c.waterMesh.geometry.dispose(); c.waterMesh = null; }
-        c.dirty = true;   // 回来时重建
+        markDirty(c);   // 回来时重建
       }
     }
+    // 本轮未生成/重建任何区块 → 进入空闲，等待脏标记或玩家移动再唤醒
+    if (genBudget === 4 && meshBudget === 2){ streamDirty = false; lastScCx = pcx; lastScCz = pcz; }
   }
 
   // 载入屏预生成
@@ -906,8 +914,8 @@ const World = (() => {
   }
   function serialize(){
     const mods = {};
-    for (const [k, c] of chunks){
-      if (c.modified) mods[k] = rleEncode(c.data);
+    for (const c of chunks.values()){
+      if (c.modified) mods[strkey(c.cx, c.cz)] = rleEncode(c.data);
     }
     return { seed, mods };
   }
@@ -919,6 +927,7 @@ const World = (() => {
     savedMods = mods || null;
     chunks = new Map();
     group = new THREE.Group();
+    streamDirty = true; lastScCx = 1e9; lastScCz = 1e9;   // 新世界：唤醒流式扫描
     genStructures();   // 村庄/遗迹布点（种子确定性）
     // 光源方块点光源池（初始化即建满 6 盏，加载期完成着色器编译）
     lampPool = [];

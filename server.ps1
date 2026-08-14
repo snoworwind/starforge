@@ -65,19 +65,34 @@ function Send-HttpFile($client, $reqText){
     $path = [Uri]::UnescapeDataString($path) -replace '/', '\'
     $full = Join-Path $root $path.TrimStart('\')
     $fullResolved = [System.IO.Path]::GetFullPath($full)
-    if (-not $fullResolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $fullResolved -PathType Leaf)){
+    # 路径边界校验：必须等于根目录或以「根目录+分隔符」开头（防 wrsk_backup 之类前缀绕过）
+    $rootBound = $root + [System.IO.Path]::DirectorySeparatorChar
+    $insideRoot = ($fullResolved -eq $root) -or $fullResolved.StartsWith($rootBound, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $insideRoot -or -not (Test-Path -LiteralPath $fullResolved -PathType Leaf)){
       $body = [Text.Encoding]::UTF8.GetBytes('404 Not Found')
       $hdr = "HTTP/1.1 404 Not Found`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n"
       $hb = [Text.Encoding]::ASCII.GetBytes($hdr)
       $stream.Write($hb, 0, $hb.Length); $stream.Write($body, 0, $body.Length)
     } else {
-      $bytes = [System.IO.File]::ReadAllBytes($fullResolved)
       $ext = [System.IO.Path]::GetExtension($fullResolved).ToLower()
       $ct = if ($mime.ContainsKey($ext)) { $mime[$ext] } else { 'application/octet-stream' }
-      $hdr = "HTTP/1.1 200 OK`r`nContent-Type: $ct`r`nContent-Length: $($bytes.Length)`r`nCache-Control: no-cache`r`nConnection: close`r`n`r`n"
-      $hb = [Text.Encoding]::ASCII.GetBytes($hdr)
-      $stream.Write($hb, 0, $hb.Length)
-      $stream.Write($bytes, 0, $bytes.Length)
+      # 静态缓存：ETag（修改时间+大小）支持 304；HTML 保持 no-cache（版本更新可靠传播），其余资源 24h 缓存
+      $fi = Get-Item -LiteralPath $fullResolved
+      $etag = [BitConverter]::ToString([Text.Encoding]::ASCII.GetBytes($fi.LastWriteTimeUtc.Ticks.ToString() + '-' + $fi.Length)).Replace('-','')
+      $cacheCtl = if ($ext -eq '.html') { 'no-cache' } else { 'max-age=86400' }
+      $inm = $null
+      if ($reqText -match 'If-None-Match:\s*"?([A-Za-z0-9]+)"?') { $inm = $Matches[1] }
+      if ($inm -and $inm -eq $etag){
+        $hdr = "HTTP/1.1 304 Not Modified`r`nETag: `"$etag`"`r`nCache-Control: $cacheCtl`r`nConnection: close`r`n`r`n"
+        $hb = [Text.Encoding]::ASCII.GetBytes($hdr)
+        $stream.Write($hb, 0, $hb.Length)
+      } else {
+        $bytes = [System.IO.File]::ReadAllBytes($fullResolved)
+        $hdr = "HTTP/1.1 200 OK`r`nContent-Type: $ct`r`nContent-Length: $($bytes.Length)`r`nCache-Control: $cacheCtl`r`nETag: `"$etag`"`r`nConnection: close`r`n`r`n"
+        $hb = [Text.Encoding]::ASCII.GetBytes($hdr)
+        $stream.Write($hb, 0, $hb.Length)
+        $stream.Write($bytes, 0, $bytes.Length)
+      }
     }
   } catch {}
   try { $client.Close() } catch {}
@@ -162,6 +177,8 @@ function Pump-WsClient($cl){
       for ($i = 2; $i -lt 10; $i++){ $len = ($len * 256) + $data[$i] }
       $off = 10
     }
+    # 帧长上限 16MB（含未完成分片累计）：防恶意/异常客户端声明巨帧撑爆宿主内存
+    if ($len -gt 16777216 -or ($cl.Frag.Length + $len) -gt 16777216){ $cl.Dead = $true; return }
     $maskLen = if ($masked) { 4 } else { 0 }
     if ($data.Length -lt $off + $maskLen + $len) { return }
     $payload = New-Object byte[] $len
@@ -229,5 +246,6 @@ while ($true){
     Broadcast ('{"t":"left","id":' + $cl.Id + '}') $null
     Write-Host ("[-] player {0} left" -f $cl.Id)
   }
-  if (-not $work){ Start-Sleep -Milliseconds 8 }
+  # 有流量时也保证每轮至少 1ms 休眠：空转会烧满一个核（房主自己也要流畅游玩）
+  if ($work){ Start-Sleep -Milliseconds 1 } else { Start-Sleep -Milliseconds 8 }
 }

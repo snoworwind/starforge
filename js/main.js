@@ -96,7 +96,8 @@ const Game = (() => {
 
   // ---------- 星球场景 ----------
   let sceneFor = null;   // 当前 planetScene 属于哪颗星球（同球再入免重建）
-  function buildPlanetScene(){
+  let deferredSkyBuild = null;   // deferSky 模式下待构建的天空元素队列（由 scenePrepQ 分帧消费）
+  function buildPlanetScene(deferSky){
     planetScene = new THREE.Scene();
     sceneFor = currentPlanet;
     const b = World.biome;
@@ -121,25 +122,39 @@ const Game = (() => {
     // 停驻的飞船
     shipMesh = buildLandedShip();
     planetScene.add(shipMesh);
-    // 天空中的姊妹星球（酷炫背景）
-    addSkyPlanets();
-    // 星星（夜晚显示）
-    addPlanetStars();
-    // 远方星系贴图（夜晚似繁星，白天不明显）
-    addSkyGalaxies();
-    // 太阳（与昼夜光照方向一致）
-    addPlanetSun();
-    // 体积云（画面设置可开关）
     groundClouds = null;
-    if (settings.clouds === 'on') buildGroundClouds();
-    // 逼真大气层：天穹散射穹顶（画面设置可开关）
     skyDome = null;
-    if (settings.realAtmo === 'on') buildSkyDome();
+    // 天空重物（姊妹星球/空间站克隆/星星/星系/太阳/云/天穹）：接近星球时的单帧卡顿主源。
+    // deferSky 模式下入队由 scenePrepQ 逐帧构建（每帧 1 个），太空态下用户完全无感
+    deferredSkyBuild = null;
+    if (deferSky){
+      deferredSkyBuild = [
+        () => addSkyPlanets(),
+        () => addPlanetStars(),
+        () => addSkyGalaxies(),
+        () => addPlanetSun(),
+        () => { if (settings.clouds === 'on') buildGroundClouds(); },
+        () => { if (settings.realAtmo === 'on') buildSkyDome(); },
+      ];
+    } else {
+      // 天空中的姊妹星球（酷炫背景）
+      addSkyPlanets();
+      // 星星（夜晚显示）
+      addPlanetStars();
+      // 远方星系贴图（夜晚似繁星，白天不明显）
+      addSkyGalaxies();
+      // 太阳（与昼夜光照方向一致）
+      addPlanetSun();
+      // 体积云（画面设置可开关）
+      if (settings.clouds === 'on') buildGroundClouds();
+      // 逼真大气层：天穹散射穹顶（画面设置可开关）
+      if (settings.realAtmo === 'on') buildSkyDome();
+    }
   }
   // ---------- 逼真大气层（地面）：程序化天穹散射 + 晨昏霞光 ----------
   let skyDome = null, skyDomeU = null;
   function buildSkyDome(){
-    if (!planetScene || !World.biome) return;
+    if (!planetScene || !World.biome || skyDome) return;   // 已构建或场景未就绪则跳过（防分帧队列与设置面板重复构建）
     const b = World.biome;
     skyDomeU = {
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
@@ -185,7 +200,7 @@ const Game = (() => {
   let groundClouds = null;
   const _gcM = new THREE.Matrix4();
   function buildGroundClouds(){
-    if (!planetScene) return;
+    if (!planetScene || groundClouds) return;   // 已构建或场景未就绪则跳过（防分帧队列与设置面板重复构建）
     const rnd = mulberry32(((World.seed || 1) ^ 0xC10D5) >>> 0);
     const span = 1100, items = [];
     for (let c = 0; c < 70; c++){
@@ -1559,15 +1574,18 @@ const Game = (() => {
     }
     if (prepState || worldLoadedFor === best.def.id) prepTick();
     // 后台预备目标星球的场景/工厂/着色器（逐帧一步，摊销开销，太空态不渲染 planetScene）
-    if (scenePrepQ && scenePrepQ.pid !== best.def.id) scenePrepQ = null;
-    if (bestD < 480 && worldLoadedFor === best.def.id && sceneFor !== best.def.id && !scenePrepQ){
+    if (scenePrepQ && scenePrepQ.pid !== best.def.id){
+      scenePrepQ = null;
+      deferredSkyBuild = null;   // 目标切换：废弃未消费的天空构建队列（场景重建时也会重置）
+    }
+    if (bestD < 1100 && worldLoadedFor === best.def.id && sceneFor !== best.def.id && !scenePrepQ){
       scenePrepQ = { pid: best.def.id, step: 0 };
     }
     if (scenePrepQ && worldLoadedFor === scenePrepQ.pid){
       const q = scenePrepQ;
       if (q.step === 0){
         currentPlanet = q.pid;
-        buildPlanetScene();
+        buildPlanetScene(true);   // 基础场景（天空重物入队分帧构建，消除接近星球单帧卡顿）
         q.step = 1;
       } else if (q.step === 1){
         const saved = visitedPlanets[q.pid];
@@ -1583,6 +1601,8 @@ const Game = (() => {
           shipPos.set(0, 40, 0);   // 占位：真实停泊点由降落写入
         }
         q.step = 2;
+      } else if (q.step === 2 && deferredSkyBuild && deferredSkyBuild.length){
+        deferredSkyBuild.shift()();   // 每帧构建一个天空元素（1100u 距离外完成，用户无感）
       } else {
         renderer.compile(planetScene, camera);
         scenePrepQ = null;

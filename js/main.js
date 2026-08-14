@@ -611,6 +611,7 @@ const Game = (() => {
   }
 
   // ---------- 指针锁定 ----------
+  let skipMouseJump = false;   // 指针锁定瞬间光标回中会触发一次超大 movementX/Y，需要跳过
   function lockPointer(){
     if (state === 'planet' || state === 'space' || state === 'atmo' || state === 'station'){
       try {
@@ -621,18 +622,18 @@ const Game = (() => {
   }
   document.addEventListener('pointerlockchange', () => {
     pointerLocked = document.pointerLockElement === renderer.domElement;
+    if (pointerLocked) skipMouseJump = true;   // 锁定成功：丢弃紧随其后的回中跳变
     if (!pointerLocked) Player.mineHeld = false;
   });
 
   // ---------- 输入 ----------
   const spaceInput = { mouseDX: 0, mouseDY: 0, thrust: false, brake: false, boost: false, pulse: false, rollLeft: false, rollRight: false };
-  const MAX_MOUSE_MOVE = 400;   // 单事件位移限幅：鼠标偶发大跳（驱动/浏览器异常）不再引起视角瞬转
   document.addEventListener('mousemove', e => {
     if (!pointerLocked) return;
-    let mx = Number.isFinite(e.movementX) ? e.movementX : 0;
-    let my = Number.isFinite(e.movementY) ? e.movementY : 0;
-    if (Math.abs(mx) > MAX_MOUSE_MOVE) mx = Math.sign(mx) * MAX_MOUSE_MOVE;
-    if (Math.abs(my) > MAX_MOUSE_MOVE) my = Math.sign(my) * MAX_MOUSE_MOVE;
+    if (skipMouseJump){ skipMouseJump = false; return; }   // 锁定瞬间的异常跳变，丢弃本帧
+    // 单帧增量防护：个别系统/浏览器会偶发超大 movementX/Y，导致视角瞬间跳到别的方向
+    const mx = THREE.MathUtils.clamp(Number.isFinite(e.movementX) ? e.movementX : 0, -300, 300);
+    const my = THREE.MathUtils.clamp(Number.isFinite(e.movementY) ? e.movementY : 0, -300, 300);
     if (state === 'planet' || (state === 'station' && Station.walking)){
       // station 行走与星球行走共用同一条被验证的视角通道（Player.yaw/pitch）
       const s = settings.mouseSens * 0.0024;

@@ -8,7 +8,7 @@ const Space = (() => {
   let scene = null, initialized = false;
   const SUN_POS = new THREE.Vector3(6000, 2400, 1800);   // 恒星方位（昼夜半球依据）
   const SUN_R = 450;                                      // 恒星半径（真实天体，可接近）
-  let sunBody = null, sunHeatT = 0;
+  let sunBody = null, sunGlow = null, sunCorona = null, sunHeatT = 0;
   const PLANET_DAY = 480;                                 // 与地面 DAY_LEN 同步（秒/自转周）
   let ship = null, shipGroup = null;
   let planets = [];          // {mesh, def, cloud}
@@ -555,7 +555,7 @@ const Space = (() => {
     flame1.position.set(-0.55, -0.05, 3.3);
     g.add(flame1);
     const flame2 = flame1.clone(); flame2.position.x = 0.55; g.add(flame2);
-    g.userData = { engines: [e1, e2], flames: [flame1, flame2] };
+    g.userData = { engines: [e1, e2], flames: [flame1, flame2], isGlb: !!glb };   // isGlb：销毁时几何体共享模板不可 dispose
     return g;
   }
 
@@ -589,7 +589,11 @@ const Space = (() => {
     return c;
   }
   function setGalaxySprites(list){
-    for (const g of galSprites) scene.remove(g.sprite);
+    for (const g of galSprites){
+      scene.remove(g.sprite);
+      if (g.sprite.material.map) g.sprite.material.map.dispose();   // 每张星系贴图独立 canvas
+      g.sprite.material.dispose();
+    }
     galSprites = [];
     for (const ent of list){
       const rnd = mulberry32(ent.seed >>> 0);
@@ -1283,6 +1287,7 @@ const Space = (() => {
   }
   function despawnPilot(v){
     if (v.userData.pilotFig){
+      disposeObject3D(v.userData.pilotFig);   // SVG 人形：几何/材质独立，全量处置
       scene.remove(v.userData.pilotFig);
       v.userData.pilotFig = null;
     }
@@ -1304,7 +1309,7 @@ const Space = (() => {
         yaw: name === 'ship' ? 0 : Math.PI,          // Quaternius 船头朝 +Z，转正为 -Z
         tint: name === 'ship' ? tint : undefined,    // 精模自带涂装，不染色
       });
-      if (m) g.add(m);
+      if (m){ g.add(m); g.userData = { isGlb: true }; }   // spawnOneVisitor 覆盖 userData 时保留该标记
     }
     if (!g.children.length){
       const M = {
@@ -1368,7 +1373,7 @@ const Space = (() => {
       pad: -1, path: null, pi: 0, wait: 0,
       cls, model,
       price: Math.round(SHIP_CLASSES[cls].price * (0.88 + r() * 0.28) / 100) * 100,
-      pilotFig: null,
+      pilotFig: null, isGlb: !!g.userData.isGlb,
       hp: VIS_HP[cls], aggro: 0, fireCd: 1.5, ctgt: null, strafeT: 0,
     };
     scene.add(g);
@@ -1392,6 +1397,8 @@ const Space = (() => {
       for (let i = visitors.length - 1; i >= 0 && visitors.length > visitorTarget; i--){
         const v = visitors[i];
         if (v.userData.st === 'cruise'){
+          if (v.userData.pilotFig){ disposeObject3D(v.userData.pilotFig); scene.remove(v.userData.pilotFig); v.userData.pilotFig = null; }
+          disposeObject3D(v, { skipGeo: !!v.userData.isGlb, skipTex: true });
           scene.remove(v);
           visitors.splice(i, 1);
         }
@@ -1549,7 +1556,7 @@ const Space = (() => {
         kill = true;
       }
       if (!kill && station && b.position.distanceToSquared(station.position) < 90 * 90) kill = true;   // 站体护盾拦截
-      if (kill){ scene.remove(b); hostiles.splice(i, 1); }
+      if (kill){ disposeBolt(b); scene.remove(b); hostiles.splice(i, 1); }
     }
     // 击毁补员（尊重期望舰队规模）
     for (let i = visRespawn.length - 1; i >= 0; i--){
@@ -1785,11 +1792,11 @@ const Space = (() => {
     sunBody = new THREE.Mesh(new THREE.SphereGeometry(SUN_R, 48, 24), new THREE.MeshBasicMaterial({ map: sunTex.surface }));
     sunBody.position.copy(SUN_POS);
     scene.add(sunBody);
-    const sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex.corona, transparent: true, depthWrite: false }));
+    sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex.corona, transparent: true, depthWrite: false }));
     sunGlow.scale.set(SUN_R * 8, SUN_R * 8, 1);
     sunGlow.position.copy(SUN_POS);
     scene.add(sunGlow);
-    const sunCorona = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex.corona, transparent: true, depthWrite: false, opacity: 0.85 }));
+    sunCorona = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex.corona, transparent: true, depthWrite: false, opacity: 0.85 }));
     sunCorona.scale.set(SUN_R * 3.2, SUN_R * 3.2, 1);
     sunCorona.position.copy(SUN_POS);
     scene.add(sunCorona);
@@ -1943,13 +1950,47 @@ const Space = (() => {
   }
   function disposeScene(){
     if (scene){
-      if (station) scene.remove(station);
-      for (const p of planets) if (p.mesh) scene.remove(p.mesh);
-      for (const a of asteroids) scene.remove(a);
+      // 行星：独立球体几何与贴图；云壳贴图共享缓存（skipTex）；LOD 地形块几何独立、材质共享 lodMat（不 dispose）
+      for (const p of planets){
+        if (!p.mesh) continue;
+        if (p.lodTiles){
+          for (const t of p.lodTiles.values()){ p.mesh.remove(t.mesh); t.mesh.geometry.dispose(); }
+          p.lodTiles = null;
+        }
+        if (p.tex) p.tex.dispose();   // 每颗星球独立 CanvasTexture
+        disposeObject3D(p.mesh, { skipTex: true });   // 球体+云壳+大气+扫描罩随遍历处置（holoGeo 共享重复 dispose 无害）
+        scene.remove(p.mesh);
+      }
+      // 小行星：几何独立；贴图共享 tileTexture 缓存
+      for (const a of asteroids){ disposeObject3D(a, { skipTex: true }); scene.remove(a); }
+      // 玩家飞船 / 访客舰队（GLB 克隆几何与贴图共享模板；体素回退全量）
+      disposeShipGroup(shipGroup);
+      if (shipGroup) scene.remove(shipGroup);
+      for (const v of visitors){
+        if (v.userData.pilotFig){ disposeObject3D(v.userData.pilotFig); scene.remove(v.userData.pilotFig); }
+        disposeObject3D(v, { skipGeo: !!v.userData.isGlb, skipTex: true });
+        scene.remove(v);
+      }
+      // 弹幕与闪光（几何/材质独立；日冕贴图共享缓存）
+      for (const b of lasers){ disposeBolt(b); scene.remove(b); }
+      for (const b of hostiles){ disposeBolt(b); scene.remove(b); }
+      for (const s of boltFx){ disposeObject3D(s, { skipTex: true }); scene.remove(s); }
+      // 空间站（材质每站独立；贴图共享 tileTexture 缓存；站内人员/环/穹顶为子件随遍历处置）
+      if (station){ disposeObject3D(station, { skipTex: true }); scene.remove(station); }
+      if (termTex){ termTex.dispose(); }   // 行情大屏独立 CanvasTexture
+      // 星空背景 / 恒星 / 星系贴图（恒星贴图共享 sunTextures 缓存）
+      if (starPoints){ disposeObject3D(starPoints); scene.remove(starPoints); }
+      if (sunBody){ disposeObject3D(sunBody, { skipTex: true }); scene.remove(sunBody); }
+      if (sunGlow){ disposeObject3D(sunGlow, { skipTex: true }); scene.remove(sunGlow); }
+      if (sunCorona){ disposeObject3D(sunCorona, { skipTex: true }); scene.remove(sunCorona); }
+      for (const g of galSprites){
+        scene.remove(g.sprite);
+        if (g.sprite.material.map) g.sprite.material.map.dispose();
+        g.sprite.material.dispose();
+      }
+      if (pulseLines){ disposeObject3D(pulseLines); scene.remove(pulseLines); }
+      if (scanRing){ disposeObject3D(scanRing); scene.remove(scanRing); }
       for (const n of npcShips) scene.remove(n);
-      for (const v of visitors) scene.remove(v);
-      scene.remove(shipGroup);
-      if (pulseLines) scene.remove(pulseLines);
     }
     planets = []; asteroids = []; npcShips = [];
     visitors = []; visPadOcc = [false, false, false];
@@ -1960,6 +2001,7 @@ const Space = (() => {
     galSprites = []; galSpritesReady = false;
     termCanvas = null; termCtx = null; termTex = null; termRows = null;
     lasers = [];
+    starPoints = null; pulseLines = null; sunBody = null; sunGlow = null; sunCorona = null;
     scanRing = null; spaceMarkers = []; scanRingT = 0;
     scanFxQ = [];
     initialized = false;
@@ -2123,6 +2165,7 @@ const Space = (() => {
   function removeVisitorShip(v){
     despawnPilot(v);
     if (v.userData.pad >= 0){ visPadOcc[v.userData.pad] = false; v.userData.pad = -1; }
+    disposeObject3D(v, { skipGeo: !!v.userData.isGlb, skipTex: true });
     scene.remove(v);
     const i = visitors.indexOf(v);
     if (i >= 0) visitors.splice(i, 1);
@@ -2135,6 +2178,7 @@ const Space = (() => {
     const pos = shipGroup.position.clone();
     const quat = shipGroup.quaternion.clone();
     scene.remove(shipGroup);
+    disposeShipGroup(shipGroup);
     shipGroup = buildShip(playerModelName);
     shipGroup.position.copy(pos);
     shipGroup.quaternion.copy(quat);
@@ -2150,6 +2194,16 @@ const Space = (() => {
     annihil: { c: 0xffd94d, w: 1.5,  l: 6,  halo: 5.5, dmg: 4, spd: 1.05 },
   };
   let boltFx = [];   // 枪口闪光/命中火花（短命精灵）
+  // 弹体销毁：几何/材质为弹体独立；光晕日冕贴图共享 sunTextures 缓存（skipTex）
+  function disposeBolt(b){ disposeObject3D(b, { skipTex: true }); }
+  // 玩家飞船销毁：引擎光斑/喷焰几何独立显式处置；GLB 船体几何共享模板（skipGeo）；贴图共享缓存
+  function disposeShipGroup(g){
+    if (!g) return;
+    const ud = g.userData || {};
+    for (const m of (ud.engines || [])) m.geometry.dispose();
+    for (const f of (ud.flames || [])) f.geometry.dispose();
+    disposeObject3D(g, { skipGeo: !!ud.isGlb, skipTex: true });
+  }
   function makeBoltMesh(wpn){
     const spec = BOLT_SPECS[wpn] || BOLT_SPECS.pulse;
     const g = new THREE.Group();
@@ -2184,7 +2238,7 @@ const Space = (() => {
       const k = Math.max(0, s.userData.life / s.userData.life0);
       s.material.opacity = k;
       s.scale.multiplyScalar(1 + dt * 6);
-      if (s.userData.life <= 0){ scene.remove(s); boltFx.splice(i, 1); }
+      if (s.userData.life <= 0){ disposeObject3D(s, { skipTex: true }); scene.remove(s); boltFx.splice(i, 1); }
     }
   }
   function fireBolt(fromPos, dir, wpn, hostile){
@@ -2241,6 +2295,10 @@ const Space = (() => {
   const _fwd = new THREE.Vector3();
   const _camRollQ = new THREE.Quaternion(), _zAxis = new THREE.Vector3(0, 0, 1);
   const _qAtt = new THREE.Quaternion(), _qDlt = new THREE.Quaternion(), _eAtt = new THREE.Euler();
+  const _qMov = new THREE.Quaternion(), _eMov = new THREE.Euler();          // 移动/机身朝向
+  const _shipQ = new THREE.Quaternion(), _eShip = new THREE.Euler();
+  const _camOff = new THREE.Vector3();
+  const _pl0 = new THREE.Vector3(), _pl1 = new THREE.Vector3();             // 脉冲星流点对
   let visBank = 0;   // 鼠标转向侧倾（纯视觉，不改变航向姿态）
   function update(dt, camera, input){
     // 姿态：NMS 式——鼠标俯仰/偏航作用于机体本地轴，A/D 绕前进轴真实滚转（太空不自动回正）
@@ -2274,8 +2332,8 @@ const Space = (() => {
     shipState.speed += (target - shipState.speed) * Math.min(1, dt * (shipState.pulsing ? 1.2 : 2.5));
 
     // 移动
-    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(shipState.pitch, shipState.yaw, 0, 'YXZ'));
-    _fwd.set(0, 0, -1).applyQuaternion(q);
+    _qMov.setFromEuler(_eMov.set(shipState.pitch, shipState.yaw, 0, 'YXZ'));
+    _fwd.set(0, 0, -1).applyQuaternion(_qMov);
     shipState.pos.addScaledVector(_fwd, shipState.speed * dt);
     if (dt > 0) resolveStationCollision(shipState.pos);   // 空间站实体碰撞（不可穿站）
 
@@ -2302,7 +2360,7 @@ const Space = (() => {
 
     // 飞船姿态与相机（第三人称追尾）：模型与相机整体携带换系滚转微调
     shipGroup.position.copy(shipState.pos);
-    const shipQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(shipState.pitch, shipState.yaw, shipState.roll, 'YXZ'));
+    const shipQ = _shipQ.setFromEuler(_eShip.set(shipState.pitch, shipState.yaw, shipState.roll, 'YXZ'));
     if (Math.abs(visBank) > 0.0004) shipQ.multiply(_camRollQ.setFromAxisAngle(_zAxis, visBank));
     if (shipState.camRoll && Math.abs(shipState.camRoll) > 0.0008){
       shipQ.multiply(_camRollQ.setFromAxisAngle(_zAxis, shipState.camRoll));
@@ -2313,8 +2371,8 @@ const Space = (() => {
     }
     shipGroup.quaternion.slerp(shipQ, Math.min(1, dt * 8));
 
-    const camOff = new THREE.Vector3(0, 3.2, 11).applyQuaternion(shipQ);
-    camera.position.copy(shipState.pos).add(camOff);
+    _camOff.set(0, 3.2, 11).applyQuaternion(shipQ);
+    camera.position.copy(shipState.pos).add(_camOff);
     camera.quaternion.copy(shipQ);
     // FOV 随速度（基准取画面设置）
     const targetFov = ((window.Game && Game.baseFov) || 75) - 5 + (shipState.speed / PULSE_SPEED) * 40 + (input.boost ? 6 : 0);
@@ -2359,7 +2417,7 @@ const Space = (() => {
       b.userData.life -= dt;
       _lp.copy(b.position);
       b.position.addScaledVector(b.userData.dir, 500 * (b.userData.speedMul || 1) * dt);
-      if (b.userData.life <= 0){ scene.remove(b); lasers.splice(i, 1); continue; }
+      if (b.userData.life <= 0){ disposeBolt(b); scene.remove(b); lasers.splice(i, 1); continue; }
       // NMS 式辅助瞄准（软制导）：弹道锥内最近的访客船会吸附弹道——大幅提升命中率
       {
         let steer = null, bestDot = 0.96, bestD = 1e9;
@@ -2380,7 +2438,7 @@ const Space = (() => {
         }
       }
       // 命中访客船（对方转入缠斗反击）——优先于站盾，站域内空战不受干扰
-      if (hitVisitorCheck(_lp, b)){ scene.remove(b); lasers.splice(i, 1); continue; }
+      if (hitVisitorCheck(_lp, b)){ disposeBolt(b); scene.remove(b); lasers.splice(i, 1); continue; }
       // 命中小行星（扫掠）
       let consumed = false;
       for (const a of asteroids){
@@ -2388,7 +2446,7 @@ const Space = (() => {
         if (segHit(_lp, b.position, a.position, 10)){
           a.userData.hp -= (b.userData.dmg || 1);
           Sound.play('laserHit');
-          scene.remove(b); lasers.splice(i, 1);
+          disposeBolt(b); scene.remove(b); lasers.splice(i, 1);
           consumed = true;
           if (a.userData.hp <= 0){
             a.visible = false;
@@ -2407,7 +2465,7 @@ const Space = (() => {
         stationShieldCenter(_shieldC);
         if (segHit(_lp, b.position, _shieldC, stationDefT > 0 ? 213 : 150)){
           raiseStationShield(b.position);
-          scene.remove(b); lasers.splice(i, 1);
+          disposeBolt(b); scene.remove(b); lasers.splice(i, 1);
           continue;
         }
       }
@@ -2417,11 +2475,11 @@ const Space = (() => {
       pulseLines.material.opacity = Math.min(0.8, (shipState.speed - 150) / 400);
       const posAttr = pulseLines.geometry.attributes.position;
       for (let i = 0; i < 200; i++){
-        const off = new THREE.Vector3((Math.random() - 0.5) * 120, (Math.random() - 0.5) * 70, (Math.random() - 0.5) * 120);
-        const p0 = shipState.pos.clone().add(off).addScaledVector(_fwd, 60 + Math.random() * 100);
-        const p1 = p0.clone().addScaledVector(_fwd, -6 - shipState.speed * 0.03);
-        posAttr.setXYZ(i * 2, p0.x, p0.y, p0.z);
-        posAttr.setXYZ(i * 2 + 1, p1.x, p1.y, p1.z);
+        _pl0.set((Math.random() - 0.5) * 120, (Math.random() - 0.5) * 70, (Math.random() - 0.5) * 120);
+        _pl0.add(shipState.pos).addScaledVector(_fwd, 60 + Math.random() * 100);
+        _pl1.copy(_pl0).addScaledVector(_fwd, -6 - shipState.speed * 0.03);
+        posAttr.setXYZ(i * 2, _pl0.x, _pl0.y, _pl0.z);
+        posAttr.setXYZ(i * 2 + 1, _pl1.x, _pl1.y, _pl1.z);
       }
       posAttr.needsUpdate = true;
     } else pulseLines.material.opacity = 0;

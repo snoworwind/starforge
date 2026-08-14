@@ -663,7 +663,7 @@ const Game = (() => {
       else UI.toggle('pausePanel');
     }
     if (e.code === 'F8'){ toggleErrPanel(); return; }   // F8 也可打开诊断面板
-    if (e.code === 'F5'){ e.preventDefault(); if (save()) UI.bigMessage('已快速存档', '', 1200); }
+    if (e.code === 'F5'){ e.preventDefault(); save().then(ok => { if (ok) UI.bigMessage('已快速存档', '', 1200); }); }
     if (e.code === 'KeyP' && creative && (state === 'planet' || state === 'space')){ UI.toggleCreative(); }
     if (e.code === 'KeyC' && state === 'planet' && !UI.anyPanelOpen()){ doScan(); }
     if (e.code === 'KeyC' && state === 'atmo' && !UI.anyPanelOpen()){ shipScanPOI(); }
@@ -2049,33 +2049,63 @@ const Game = (() => {
     };
   }
 
-  // ---------- 存档（多槽位）----------
+  // ---------- 存档（多槽位 · IndexedDB）----------
   const INDEX_KEY = 'starforge_index';
   const LEGACY_KEY = 'starforge_save1';
   let activeSaveKey = null;
+  let migrationPromise = null;   // 旧 localStorage 存档 → IDB 的一次性迁移
 
-  function listSaves(){
-    // 迁移旧版单存档
-    try {
-      const legacy = localStorage.getItem(LEGACY_KEY);
-      if (legacy){
-        const idx = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
-        const key = 'starforge_sv_legacy';
-        localStorage.setItem(key, legacy);
-        const d = JSON.parse(legacy);
-        idx.push({ key, name: '旧档案', time: Date.now(), creative: false,
-          planetName: SYSTEM_PLANETS[d.currentPlanet || 0].name,
-          credits: (d.player && d.player.credits) || 0, playMin: ((d.playTime || 0) / 60) | 0 });
-        localStorage.setItem(INDEX_KEY, JSON.stringify(idx));
-        localStorage.removeItem(LEGACY_KEY);
+  // 一次性迁移：旧版单存档 + 多槽位全部搬入 IndexedDB（幂等，中断自愈）
+  function migrateLegacy(){
+    migrationPromise = (async () => {
+      try {
+        await SaveStore.open();
+        if (!SaveStore.available) return;   // IDB 不可用（降级模式）：绝不触碰旧 localStorage 数据
+        if (await SaveStore.isMigrated()) return;
+        let idx = [];
+        try { idx = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]'); } catch(e){}
+        if (!Array.isArray(idx)) idx = [];
+        idx = idx.filter(e => e && e.key);
+        const legacy = localStorage.getItem(LEGACY_KEY);
+        if (legacy){
+          try {
+            const d = JSON.parse(legacy);
+            const key = 'starforge_sv_legacy';
+            await SaveStore.putSlot(key, d);
+            if (!idx.some(e => e.key === key)) idx.push({ key, name: '旧档案', time: Date.now(), creative: false,
+              planetName: SYSTEM_PLANETS[d.currentPlanet || 0].name,
+              credits: (d.player && d.player.credits) || 0, playMin: ((d.playTime || 0) / 60) | 0 });
+          } catch(e){ console.error('[save] 旧档迁移：legacy 档案损坏', e); }
+        }
+        const migratedKeys = [];
+        for (const e of idx){
+          const raw = localStorage.getItem(e.key);
+          if (!raw) continue;
+          try {
+            if (await SaveStore.putSlot(e.key, JSON.parse(raw))) migratedKeys.push(e.key);
+          } catch(err){ console.error('[save] 旧档迁移：槽位损坏', e.key, err); }
+        }
+        if (await SaveStore.putIndex(idx)){
+          migratedKeys.forEach(k => localStorage.removeItem(k));   // 只清已成功迁移的槽位
+          localStorage.removeItem(INDEX_KEY);
+          await SaveStore.setMigrated();                           // 最后才打标（starforge_save1 保留不删，安全网）
+        }
+      } catch(e){
+        console.error('[save] 旧档迁移失败', e);
+        UI.bigMessage('旧档迁移失败', '浏览器旧存储保留，下次启动重试', 5000);
       }
-    } catch(e){}
+    })();
+    return migrationPromise;
+  }
+
+  async function listSaves(){
+    if (migrationPromise) await migrationPromise;
     try {
-      const arr = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
-      return arr.sort((a, b) => b.time - a.time);
+      const arr = await SaveStore.getIndex();
+      return arr.slice().sort((a, b) => b.time - a.time);
     } catch(e){ return []; }
   }
-  function writeIndex(arr){ localStorage.setItem(INDEX_KEY, JSON.stringify(arr)); }
+  function writeIndex(arr){ return SaveStore.putIndex(arr); }
 
   function buildSaveData(){
     // 仅当内存中的地形/机器确属当前星球时才归档（跃迁后在太空存档时 worldLoadedFor 为 null）
@@ -2101,87 +2131,183 @@ const Game = (() => {
       } : null,
     };
   }
-  // saveTo(key)：覆盖指定槽位；saveTo(null, name)：新建槽位
+  // saveTo(key)：覆盖指定槽位；saveTo(null, name)：新建槽位（世界快照同步截取，写盘异步化）
+  let saveBusy = false, saveAgain = false, saveChain = null;
   function saveTo(key, name){
-    if (state === 'menu' || state === 'loading') return false;
+    if (state === 'menu' || state === 'loading') return Promise.resolve(false);
     if (state === 'atmo' || state === 'atmoland'){
       UI.bigMessage('飞行中无法存档', '请先降落', 1600);
-      return false;
+      return Promise.resolve(false);
     }
-    const idx = listSaves();
-    if (!key){
-      key = 'starforge_sv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-      idx.push({ key, name: name || ('档案 ' + (idx.length + 1)) });
-    }
-    const entry = idx.find(s => s.key === key);
-    if (!entry) return false;
-    if (name) entry.name = name;
-    entry.time = Date.now();
-    entry.creative = creative;
-    entry.planetName = SYSTEM_PLANETS[currentPlanet].name;
-    entry.credits = Player.credits;
-    entry.playMin = (playTime / 60) | 0;
-    try {
-      localStorage.setItem(key, JSON.stringify(buildSaveData()));
-      writeIndex(idx);
-      activeSaveKey = key;
-      return true;
-    } catch(e){ UI.bigMessage('存档失败', '浏览器存储空间不足，请删除旧档'); return false; }
+    if (saveBusy){ saveAgain = true; return saveChain; }   // 写入中：合并到收尾重写
+    saveBusy = true;
+    const payload = buildSaveData();   // 此刻的完整状态快照（可能触发 RLE 序列化）
+    saveChain = (async () => {
+      try {
+        const idx = await listSaves();
+        if (!key){
+          key = 'starforge_sv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+          idx.push({ key, name: name || ('档案 ' + (idx.length + 1)) });
+        }
+        const entry = idx.find(s => s.key === key);
+        if (!entry) return false;
+        if (name) entry.name = name;
+        entry.time = Date.now();
+        entry.creative = creative;
+        entry.planetName = SYSTEM_PLANETS[currentPlanet].name;
+        entry.credits = Player.credits;
+        entry.playMin = (playTime / 60) | 0;
+        const ok = await SaveStore.atomicWrite(key, payload, idx);
+        if (ok) activeSaveKey = key;
+        else UI.bigMessage('存档失败', '浏览器存储空间不足，请删除旧档');
+        return ok;
+      } catch(e){
+        console.error('[save] saveTo 失败', e);
+        UI.bigMessage('存档失败', '浏览器存储空间不足，请删除旧档');
+        return false;
+      } finally {
+        saveBusy = false;
+        if (saveAgain){ saveAgain = false; saveTo(activeSaveKey); }   // 补一次最新状态重写
+      }
+    })();
+    return saveChain;
   }
   // 快捷存档：存到当前槽位（没有则自动新建）
   function save(){
     return saveTo(activeSaveKey);
   }
   async function loadFrom(key){
-    const raw = localStorage.getItem(key);
-    if (!raw){ UI.bigMessage('读档失败', '档案数据丢失'); return false; }
-    Sound.begin();
-    const d = JSON.parse(raw);
-    $('boot').classList.add('hidden');
-    UI.closeAll();
-    activeSaveKey = key;
-    creative = !!d.creative;
-    dropMult = d.dropMult || 1;
-    galaxyCount = d.galaxyCount || 1;
-    Space.restoreGalaxy(d.galaxySeed !== undefined ? d.galaxySeed : HOME_GALAXY_SEED);
-    currentPlanet = d.currentPlanet; dayTime = d.dayTime; playTime = d.playTime || 0;
-    questIdx = d.questIdx; flags = d.flags; techState = d.techState; market = d.market;
-    fuelLoaded = d.fuelLoaded || 0;
-    for (const k in placedCount) delete placedCount[k];
-    Object.assign(placedCount, d.placedCount || {});
-    visitedPlanets = d.planets || {};
-    galaxyArchives = d.galaxyArchives || {};
-    mapMarks = d.mapMarks || {};
-    if (d.playerShip) playerShip = d.playerShip;
-    shipGarage = d.shipGarage || [];
-    warpLock = d.warpLock || null;
-    syncShipLoadout();   // 座驾模型/武器随档案恢复（太空未初始化时 setShipModel 自动跳过并记住型号）
-    Player.deserialize(d.player);
-    await genPlanet(currentPlanet, false, [Player.pos.x, Player.pos.z]);
-    if (d.state === 'space' && d.shipState){
-      savePlanetState();
-      Space.enter(currentPlanet);
-      Space.shipState.pos.fromArray(d.shipState.pos);
-      Space.shipState.yaw = d.shipState.yaw;
-      Space.shipState.pitch = d.shipState.pitch;
-      state = 'space';
-      $('spaceHud').classList.remove('hidden');
-      Sound.Music.setMode('space');
+    let d = null;
+    try { d = await SaveStore.getSlot(key); }
+    catch(e){ console.error('[save] getSlot 失败', e); }
+    if (!d){ UI.bigMessage('读档失败', '档案数据丢失'); return false; }
+    if (typeof d !== 'object' || d.v !== 2 || typeof d.currentPlanet !== 'number' || !d.player){
+      UI.bigMessage('读档失败', '档案数据损坏'); return false;
     }
-    $('hud').classList.remove('hidden');
-    $('quests').style.display = creative ? 'none' : '';
-    UI.buildHotbar();
-    UI.refreshAll();
-    UI.bigMessage('档案恢复', '欢迎回来，旅行者' + (creative ? ' · 创造模式' : ''));
-    lockPointer();
-    if (window.Net) Net.onWorldReady();   // 联机：主机世界就绪，同步给访客
-    return true;
+    try {
+      Sound.begin();
+      $('boot').classList.add('hidden');
+      UI.closeAll();
+      activeSaveKey = key;
+      creative = !!d.creative;
+      dropMult = d.dropMult || 1;
+      galaxyCount = d.galaxyCount || 1;
+      Space.restoreGalaxy(d.galaxySeed !== undefined ? d.galaxySeed : HOME_GALAXY_SEED);
+      currentPlanet = d.currentPlanet; dayTime = d.dayTime; playTime = d.playTime || 0;
+      questIdx = d.questIdx; flags = d.flags; techState = d.techState; market = d.market;
+      fuelLoaded = d.fuelLoaded || 0;
+      for (const k in placedCount) delete placedCount[k];
+      Object.assign(placedCount, d.placedCount || {});
+      visitedPlanets = d.planets || {};
+      galaxyArchives = d.galaxyArchives || {};
+      mapMarks = d.mapMarks || {};
+      if (d.playerShip) playerShip = d.playerShip;
+      shipGarage = d.shipGarage || [];
+      warpLock = d.warpLock || null;
+      syncShipLoadout();   // 座驾模型/武器随档案恢复（太空未初始化时 setShipModel 自动跳过并记住型号）
+      Player.deserialize(d.player);
+      await genPlanet(currentPlanet, false, [Player.pos.x, Player.pos.z]);
+      if (d.state === 'space' && d.shipState){
+        savePlanetState();
+        Space.enter(currentPlanet);
+        Space.shipState.pos.fromArray(d.shipState.pos);
+        Space.shipState.yaw = d.shipState.yaw;
+        Space.shipState.pitch = d.shipState.pitch;
+        state = 'space';
+        $('spaceHud').classList.remove('hidden');
+        Sound.Music.setMode('space');
+      }
+      $('hud').classList.remove('hidden');
+      $('quests').style.display = creative ? 'none' : '';
+      UI.buildHotbar();
+      UI.refreshAll();
+      UI.bigMessage('档案恢复', '欢迎回来，旅行者' + (creative ? ' · 创造模式' : ''));
+      lockPointer();
+      if (window.Net) Net.onWorldReady();   // 联机：主机世界就绪，同步给访客
+      return true;
+    } catch(e){
+      // 中途失败（星球生成/反序列化抛错）：复位到主菜单，否则 loading 态会永久卡死 saveTo 守卫
+      console.error('[save] loadFrom 失败', e);
+      activeSaveKey = null;
+      state = 'menu';
+      $('loading').classList.add('hidden');
+      $('hud').classList.add('hidden');
+      $('spaceHud').classList.add('hidden');
+      $('boot').classList.remove('hidden');
+      UI.bigMessage('读档失败', '档案数据损坏，无法读取', 5000);
+      return false;
+    }
   }
-  function deleteSave(key){
-    localStorage.removeItem(key);
-    writeIndex(listSaves().filter(s => s.key !== key));
+  async function deleteSave(key){
+    await SaveStore.deleteSlot(key);
+    const idx = await listSaves();
+    await writeIndex(idx.filter(s => s.key !== key));
     if (activeSaveKey === key) activeSaveKey = null;
-    $('btnContinue').disabled = listSaves().length === 0;
+    $('btnContinue').disabled = (await listSaves()).length === 0;
+  }
+
+  // ---------- 存档导出 / 导入（JSON 文件） ----------
+  function sanitizeName(n){
+    return String(n || '存档').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+  }
+  function readFileText(file){
+    return new Promise(resolve => {
+      try {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => resolve(null);
+        r.readAsText(file);
+      } catch(e){ resolve(null); }
+    });
+  }
+  function exportSave(key){
+    return SaveStore.getSlot(key).then(async d => {
+      if (!d){ UI.bigMessage('导出失败', '档案数据丢失'); return false; }
+      try {
+        const idx = await listSaves();
+        const e = idx.find(s => s.key === key);
+        const fn = 'STARFORGE-档案-' + sanitizeName(e ? e.name : key) + '-' + new Date().toISOString().slice(0, 10) + '.json';
+        const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = fn;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        UI.bigMessage('已导出', fn, 2500);
+        return true;
+      } catch(e){
+        console.error('[save] exportSave 失败', e);
+        UI.bigMessage('导出失败', '文件生成错误');
+        return false;
+      }
+    });
+  }
+  async function importSave(file){
+    if (!file) return false;
+    if (file.size > 50 * 1024 * 1024){ UI.bigMessage('导入失败', '存档文件过大（超过50MB）'); return false; }
+    const text = await readFileText(file);
+    if (text === null){ UI.bigMessage('导入失败', '文件读取错误'); return false; }
+    let d;
+    try { d = JSON.parse(text); } catch(e){ UI.bigMessage('导入失败', '不是有效的 JSON 存档文件'); return false; }
+    if (!d || d.v !== 2 || typeof d.currentPlanet !== 'number' || !d.player){
+      UI.bigMessage('导入失败', '存档文件格式不受支持'); return false;
+    }
+    try {
+      const key = 'starforge_sv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);   // 永远新槽位，绝不覆盖
+      const idx = await listSaves();
+      const name = (file.name || '导入档案').replace(/\.(json|txt)$/i, '').slice(0, 30) || '导入档案';
+      idx.push({ key, name, time: Date.now(), creative: !!d.creative,
+        planetName: (SYSTEM_PLANETS[d.currentPlanet] || {}).name || '未知星球',
+        credits: (d.player && d.player.credits) || 0, playMin: ((d.playTime || 0) / 60) | 0 });
+      const ok = await SaveStore.atomicWrite(key, d, idx);
+      if (ok){ UI.bigMessage('导入成功', name, 2000); return true; }
+      UI.bigMessage('导入失败', '写入存储失败');
+      return false;
+    } catch(e){
+      console.error('[save] importSave 失败', e);
+      UI.bigMessage('导入失败', '写入存储失败');
+      return false;
+    }
   }
 
   // ---------- 昼夜 ----------
@@ -2754,12 +2880,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v83-station';
+    bd.textContent = 'build v84-station';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v83';
+  window.__V_MAIN = 'v84';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3661,7 +3787,7 @@ const Game = (() => {
   $('btnResume').onclick = () => { Sound.play('uiClose'); UI.closeAll(); lockPointer(); };
   $('btnSave').onclick = () => { Sound.play('uiClick'); UI.openSavePanel('save'); };
   $('btnSettings').onclick = () => { Sound.play('uiOpen'); $('pausePanel').classList.add('hidden'); $('settingsPanel').classList.remove('hidden'); refreshSettingsUI(); };
-  $('btnQuit').onclick = () => { if (activeSaveKey) save(); location.reload(); };
+  $('btnQuit').onclick = async () => { if (activeSaveKey) await save(); location.reload(); };
   $('volSlider').oninput = e => Sound.setVolume(e.target.value / 100);
   $('dialogBox').addEventListener('mousedown', e => { e.stopPropagation(); advanceDialog(); });
 
@@ -3753,11 +3879,20 @@ const Game = (() => {
   };
   document.querySelectorAll('.boot-btn').forEach(b => b.addEventListener('mouseenter', () => Sound.play('hover')));
 
-  if (listSaves().length) $('btnContinue').disabled = false;
+  // 旧 localStorage 存档一次性迁移 → IndexedDB（完成后按列表启用继续按钮）
+  migrateLegacy().catch(() => {});
+  SaveStore.open().then(() => {
+    if (!SaveStore.available) UI.bigMessage('存档数据库不可用', '本会话存档仅存于内存', 8000);
+  });
+  listSaves().then(arr => { if (arr.length) $('btnContinue').disabled = false; }).catch(() => {});
 
   // 自动存档（星球上每60秒，仅当已有存档槽位）
   setInterval(() => { if (state === 'planet' && !paused && activeSaveKey) save(); }, 60000);
+  // 关页存档：beforeunload 尽力而为；visibilitychange 为可靠路径（IDB 异步写需要时间）
   window.addEventListener('beforeunload', () => { if ((state === 'planet' || state === 'space') && activeSaveKey) save(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && (state === 'planet' || state === 'space') && activeSaveKey) save();
+  });
 
   loop();
 
@@ -3800,7 +3935,7 @@ const Game = (() => {
     setWarpLock,
     get warpLockSeed(){ return warpLock ? warpLock.seed : null; },
     isGalaxyVisited(seed){ return seed === Space.getCurrentGalaxySeed() || seed === HOME_GALAXY_SEED || galaxyArchives[seed] !== undefined; },
-    save, saveTo, loadFrom, deleteSave, listSaves, doScan, warpTo, neighborSeeds,
+    save, saveTo, loadFrom, deleteSave, listSaves, exportSave, importSave, doScan, warpTo, neighborSeeds,
     saveBeaconState,
     get atmo(){ return atmo; },
     get scanMarkerCount(){ return scanMarkers.length; },

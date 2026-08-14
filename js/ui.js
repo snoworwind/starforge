@@ -1434,19 +1434,20 @@ const UI = (() => {
 
   // ---------- 存档管理 ----------
   // mode: 'load'（主菜单读档）| 'save'（游戏内存档）
-  function openSavePanel(mode){
+  async function openSavePanel(mode){
     const el = $('savePanel');
     ['invPanel','machinePanel','techPanel','tradePanel','helpPanel','creativePanel','pausePanel','settingsPanel'].forEach(id => $(id).classList.add('hidden'));
     el.classList.remove('hidden');
     $('saveTitle').textContent = mode === 'save' ? '◈ 存档 — 覆盖或新建' : '◈ 继续档案 — 选择存档';
     $('btnNewSave').style.display = mode === 'save' ? '' : 'none';
     Sound.play('uiOpen');
-    refreshSaveList(mode);
+    await refreshSaveList(mode);
   }
-  function refreshSaveList(mode){
+  async function refreshSaveList(mode){
     const list = $('saveList');
     list.innerHTML = '';
-    const saves = Game.listSaves();
+    let saves = [];
+    try { saves = await Game.listSaves(); } catch(e){ console.error('[ui] listSaves', e); }
     if (!saves.length){
       list.innerHTML = '<div class="save-empty">— 暂无档案 —</div>';
     }
@@ -1461,6 +1462,12 @@ const UI = (() => {
           <div class="sv-name">${s.name}</div>
           <div class="sv-meta">${s.creative ? '<span class="cr">创造</span>' : '生存'} · ${s.planetName} · ₪${s.credits} · 游玩${s.playMin}分钟<br>${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}</div>
         </div>`;
+      const exp = document.createElement('button');
+      exp.className = 'sv-btn';
+      exp.textContent = '导出';
+      exp.title = '下载存档文件（可分享给朋友）';
+      exp.onclick = () => { Sound.play('uiClick'); Game.exportSave(s.key); };
+      row.appendChild(exp);
       const act = document.createElement('button');
       act.className = 'sv-btn';
       act.textContent = mode === 'save' ? '覆盖' : '读取';
@@ -1468,10 +1475,12 @@ const UI = (() => {
         Sound.play('uiClick');
         if (mode === 'save'){
           if (!confirm(`覆盖存档「${s.name}」？`)) return;
-          Game.saveTo(s.key);
-          bigMessage('已存档', s.name, 1500);
-          $('savePanel').classList.add('hidden');
-          if (!anyPanelOpen()) Game.lockPointer();
+          Game.saveTo(s.key).then(ok => {
+            if (!ok) return;
+            bigMessage('已存档', s.name, 1500);
+            $('savePanel').classList.add('hidden');
+            if (!anyPanelOpen()) Game.lockPointer();
+          });
         } else {
           $('savePanel').classList.add('hidden');
           Game.loadFrom(s.key);
@@ -1482,23 +1491,32 @@ const UI = (() => {
       del.className = 'sv-btn danger';
       del.textContent = '✕';
       del.title = '删除存档';
-      del.onclick = () => {
+      del.onclick = async () => {
         if (!confirm(`删除存档「${s.name}」？不可恢复！`)) return;
-        Game.deleteSave(s.key);
+        await Game.deleteSave(s.key);
         Sound.play('breakBlk');
-        refreshSaveList(mode);
+        await refreshSaveList(mode);
       };
       row.appendChild(del);
       list.appendChild(row);
     }
   }
-  $('btnNewSave').onclick = () => {
-    const name = prompt('新存档名称：', '档案 ' + (Game.listSaves().length + 1));
+  $('btnNewSave').onclick = async () => {
+    const count = (await Game.listSaves()).length;
+    const name = prompt('新存档名称：', '档案 ' + (count + 1));
     if (name === null) return;
-    Game.saveTo(null, name.trim() || '未命名档案');
+    const ok = await Game.saveTo(null, name.trim() || '未命名档案');
+    if (!ok) return;
     Sound.play('craft');
     bigMessage('已创建存档', name, 1500);
-    refreshSaveList('save');
+    await refreshSaveList('save');
+  };
+  $('btnImportSave').onclick = () => { Sound.play('uiClick'); $('saveFileInput').click(); };
+  $('saveFileInput').onchange = async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (await Game.importSave(f)) await refreshSaveList('save');
+    e.target.value = '';
   };
 
   document.querySelectorAll('.pclose').forEach(b => {

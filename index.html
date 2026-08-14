@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>STARFORGE 星穹熔炉 — 体素星际工厂</title>
-<link rel="stylesheet" href="css/style.css?v=st85">
+<link rel="stylesheet" href="css/style.css?v=st86">
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -67,7 +67,8 @@
       <p><b>M</b> 星球地图（信标/飞船/我的位置）</p>
       <p><b>Tab</b> 背包与合成 · <b>T</b> 科技树</p>
       <p><b>P</b> 创造物品库（仅创造模式）</p>
-      <p><b>F5</b> 快速存档 · <b>Esc</b> 菜单（存档管理）</p></div>
+      <p><b>F5</b> 快速存档 · <b>Esc</b> 菜单（存档管理）</p>
+      <p style="color:#ffb37d;margin-top:6px">⚠ 若右键拖动触发浏览器「前进/后退」手势：请关闭浏览器自带鼠标手势（Opera/Vivaldi），或把本站加入鼠标手势扩展白名单。</p></div>
     <div class="help-col"><h3>飞船与太空</h3>
       <p><b>E</b> 登船入座 → <b>W</b> 点火起飞（自动加注燃料）</p>
       <p>大气层内：鼠标转向 · <b>A/D</b> 滚转 · <b>W/S</b> 油门 · <b>E</b> 就地降落</p>
@@ -352,28 +353,28 @@ window.addEventListener('unhandledrejection', e => {
   console.error('[GAME PROMISE ERROR]', e.reason && (e.reason.stack || e.reason.message || e.reason));
 });
 </script>
-<script src="js/three.min.js?v=st85"></script>
-<script src="js/GLTFLoader.js?v=st85"></script>
-<script src="js/SVGLoader.js?v=st85"></script>
-<script src="js/models.js?v=st85"></script>
-<script src="js/modellib.js?v=st85"></script>
-<script src="js/textures.js?v=st85"></script>
-<script src="js/audio.js?v=st85"></script>
-<script src="js/data.js?v=st85"></script>
-<script src="js/world.js?v=st85"></script>
-<script src="js/factory.js?v=st85"></script>
-<script src="js/creatures.js?v=st85"></script>
-<script src="js/player.js?v=st85"></script>
-<script src="js/space.js?v=st85"></script>
-<script src="js/station.js?v=st85"></script>
-<script src="js/savestore.js?v=st85"></script>
-<script src="js/ui.js?v=st85"></script>
-<script src="js/net.js?v=st85"></script>
-<script src="js/main.js?v=st85"></script>
+<script src="js/three.min.js?v=st86"></script>
+<script src="js/GLTFLoader.js?v=st86"></script>
+<script src="js/SVGLoader.js?v=st86"></script>
+<script src="js/models.js?v=st86"></script>
+<script src="js/modellib.js?v=st86"></script>
+<script src="js/textures.js?v=st86"></script>
+<script src="js/audio.js?v=st86"></script>
+<script src="js/data.js?v=st86"></script>
+<script src="js/world.js?v=st86"></script>
+<script src="js/factory.js?v=st86"></script>
+<script src="js/creatures.js?v=st86"></script>
+<script src="js/player.js?v=st86"></script>
+<script src="js/space.js?v=st86"></script>
+<script src="js/station.js?v=st86"></script>
+<script src="js/savestore.js?v=st86"></script>
+<script src="js/ui.js?v=st86"></script>
+<script src="js/net.js?v=st86"></script>
+<script src="js/main.js?v=st86"></script>
 <script>
 // 版本自检（内联于入口文档）：确认浏览器实际加载的模块版本；缺失/不匹配 = 在跑旧缓存或别的目录副本
 (function(){
-  var need = 'v85';
+  var need = 'v86';
   var got = {
     main: window.__V_MAIN || '旧版!',
     station: window.__V_STATION || (window.Station ? '旧版!' : '未加载!'),
@@ -393,7 +394,7 @@ window.addEventListener('unhandledrejection', e => {
 (function(){
   if (/\btest\b/.test(location.search + location.hash)){
     var s = document.createElement('script');
-    s.src = 'js/test-api.js?v=st85';
+    s.src = 'js/test-api.js?v=st86';
     document.body.appendChild(s);
   }
 })();

@@ -275,6 +275,9 @@ const Station = (() => {
         ship.position.z + Math.cos(a) * 10);
       camera.lookAt(ship.position.x, ship.position.y + 1.5, ship.position.z);
       camera.updateProjectionMatrix();
+      // 相机挂在 planetScene 下：站内态渲染的是 Space.scene，r128 仅当 camera.parent===null 才自动刷新相机世界矩阵，
+      // lookAt 只改 quaternion 不会刷新 matrixWorld，导致停机位环绕镜头用上一帧位姿渲染而「视角漂移」。这里显式强制刷新。
+      camera.updateMatrixWorld(true);
       UI.setInteractHint(UI.anyPanelOpen() ? null : '[停机] <b>E</b> 下船 · <b>W</b> 起飞离站');
     }
     else if (phase === 'walk'){

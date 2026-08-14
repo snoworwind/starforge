@@ -1168,6 +1168,8 @@ const UI = (() => {
     g3d.focus.set(0, 0, 0);
     g3d.focusCur.set(0, 0, 0);
     g3d.distT = g3d.dist = 135;
+    // 旧场景资源释放：约 1400 个点几何与数百 sprite 材质不再泄漏（贴图均来自缓存，跳过）
+    if (g3d.scene) disposeObject3D(g3d.scene, { skipTex: true });
     const scene = new THREE.Scene();
     g3d.scene = scene;
     g3d.cam = new THREE.PerspectiveCamera(55, 1, 0.1, 3000);

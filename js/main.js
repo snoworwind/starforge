@@ -895,10 +895,12 @@ const Game = (() => {
   }
 
   // ---------- 起飞 / 大气层飞行 / 降落 ----------
-  let launchAnim = null;
   const atmo = { yaw: 0, pitch: 0, speed: 0, roll: 0, camRoll: 0 };
   const _trimQ = new THREE.Quaternion(), _trimAxis = new THREE.Vector3(0, 0, 1);
   const _atQ = new THREE.Quaternion(), _atD = new THREE.Quaternion(), _atE = new THREE.Euler();
+  const _atFwd = new THREE.Vector3();
+  const _atShipQ = new THREE.Quaternion(), _atShipE = new THREE.Euler();
+  const _atCamQ = new THREE.Quaternion(), _atCamOff = new THREE.Vector3();
   let atmoLand = null;
   function launch(){
     if (fuelLoaded > 0) fuelLoaded--;
@@ -956,8 +958,8 @@ const Game = (() => {
     let target = spaceInput.thrust ? maxS : spaceInput.brake ? 3 : Math.min(atmo.speed, maxS);
     atmo.speed += (target - atmo.speed) * Math.min(1, dt * 2.2);
     // 位移
-    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(atmo.pitch, atmo.yaw, 0, 'YXZ'));
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+    _atQ.setFromEuler(_atE.set(atmo.pitch, atmo.yaw, 0, 'YXZ'));
+    const fwd = _atFwd.set(0, 0, -1).applyQuaternion(_atQ);
     shipMesh.position.addScaledVector(fwd, atmo.speed * dt);
     // 星球是圆的：飞越经度周界（≈1571格=环球一周）/纬度带边界从另一侧回来，一直向前必回原点
     {
@@ -977,8 +979,8 @@ const Game = (() => {
       if (atmo.pitch < 0) atmo.pitch += dt * (reentryT > 0 ? 2.6 : 1.2);
     }
     // 姿态与相机（机头朝 -Z，与运动方向一致）；换系继承的滚转微调整体携带、缓慢配平
-    const shipQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(atmo.pitch, atmo.yaw, -atmo.roll, 'YXZ'));
-    const camQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(atmo.pitch, atmo.yaw, 0, 'YXZ'));
+    const shipQ = _atShipQ.setFromEuler(_atShipE.set(atmo.pitch, atmo.yaw, -atmo.roll, 'YXZ'));
+    const camQ = _atCamQ.setFromEuler(_atShipE.set(atmo.pitch, atmo.yaw, 0, 'YXZ'));
     if (atmo.camRoll && Math.abs(atmo.camRoll) > 0.0008){
       _trimQ.setFromAxisAngle(_trimAxis, atmo.camRoll);
       shipQ.multiply(_trimQ);
@@ -996,8 +998,8 @@ const Game = (() => {
       blendE = k * k * (3 - 2 * k);
       backOff = THREE.MathUtils.lerp(camBlend.dist0, 11, blendE);
     }
-    const camOff = new THREE.Vector3(0, backOff * (3.2 / 11), backOff).applyQuaternion(camQ);
-    camera.position.copy(shipMesh.position).add(camOff);
+    _atCamOff.set(0, backOff * (3.2 / 11), backOff).applyQuaternion(camQ);
+    camera.position.copy(shipMesh.position).add(_atCamOff);
     // 再入震动 + 摩擦特效衰减
     if (reentryT > 0){
       reentryT -= dt;
@@ -1201,7 +1203,7 @@ const Game = (() => {
   // dayTime 存 x=0 处基准时间；当地时间 = 基准 + 当前位置经度偏移
   function refWorldX(){
     if (state === 'planet') return Player.pos.x;
-    if (shipMesh && (state === 'atmo' || state === 'atmoland' || state === 'launching' || state === 'seated')) return shipMesh.position.x;
+    if (shipMesh && (state === 'atmo' || state === 'atmoland' || state === 'seated')) return shipMesh.position.x;
     return shipPos.x;
   }
   function localDayTime(){
@@ -1741,7 +1743,6 @@ const Game = (() => {
   }
 
   // ---------- 空间站（重制版）：泊入/停机/行走/交易/离站全部收口在 station.js —— 主循环仅保留胶水 ----------
-  let __stFrames = 0;
   $('btnUndock').style.display = 'none';   // 旧「离站」按钮弃用：离站=停机位按 W
   Station.onDocked = () => {
     flags.docked = true;
@@ -2103,7 +2104,7 @@ const Game = (() => {
   // saveTo(key)：覆盖指定槽位；saveTo(null, name)：新建槽位
   function saveTo(key, name){
     if (state === 'menu' || state === 'loading') return false;
-    if (state === 'atmo' || state === 'atmoland' || state === 'launching'){
+    if (state === 'atmo' || state === 'atmoland'){
       UI.bigMessage('飞行中无法存档', '请先降落', 1600);
       return false;
     }
@@ -2797,20 +2798,6 @@ const Game = (() => {
     const now = performance.now();
     let dt = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
-    // 全帧仪表（在任何早退之前写入）：状态 | 阶段 | 帧数 | 门禁 | 数值体检（NaN 即刻现形）
-    if (window.__stDbg){
-      __stFrames = (__stFrames + 1) | 0;
-      let ext = '';
-      if (state === 'station' && window.Station && Station.walking){
-        ext = ' yaw:' + (+Player.yaw).toFixed(2) + ' pit:' + (+Player.pitch).toFixed(2) +
-          ' p:' + Player.pos.x.toFixed(1) + ',' + Player.pos.y.toFixed(1) + ',' + Player.pos.z.toFixed(1) +
-          ' c:' + camera.position.x.toFixed(1) + ',' + camera.position.y.toFixed(1) + ',' + camera.position.z.toFixed(1);
-      }
-      __stDbg.textContent = 'v82 st:' + state + ' ph:' + ((window.Station && Station.phase) || '-') +
-        ' f:' + __stFrames +
-        ' pn:' + (UI.anyPanelOpen() ? 1 : 0) + ' lk:' + (pointerLocked ? 1 : 0) + ' kW:' + (Player.keys['KeyW'] ? 1 : 0) +
-        ext + (window.__lastErr ? ' ⚠' + window.__lastErr : '');
-    }
     if (state === 'menu' || state === 'loading') return;
     if (paused) return;
     playTime += dt;
@@ -2902,29 +2889,11 @@ const Game = (() => {
       Player.tickParticles(dt);
       renderer.render(planetScene, camera);
     }
-    else if (state === 'launching'){
-      launchAnim.t += dt;
-      Player.setToolVisible(false);
-      const t = launchAnim.t;
-      shipMesh.position.y = shipPos.y + Math.pow(t, 2.2) * 14;
-      shipMesh.rotation.z = Math.sin(t * 3) * 0.02;
-      // 相机跟随仰望
-      camera.position.set(Player.pos.x, Player.pos.y + 1.6, Player.pos.z);
-      camera.lookAt(shipMesh.position);
-      if (t > 0.2) Player.spawnParticles(shipMesh.position.x - 0.5, shipMesh.position.y - 1.5, shipMesh.position.z - 0.5, 0xff8c1a, 3);
-      const day = updateDayNight(dt);
-      Factory.update(dt, day);
-      if (t > 1.8){
-        shipMesh.rotation.z = 0;
-        startAtmo();
-      }
-      renderer.render(planetScene, camera);
-    }
     else if (state === 'space'){
       Space.update(dt, camera, spaceInput);
       Space.tickSpaceScan(dt);
       // 机库入口/库内 → 空间站模块整体接管（station.js 重制版）
-      if (Station.tryBegin()){
+      if (Station.tryBegin(dt)){
         state = 'station';
         clearSpaceMarkers();   // 太空扫描标记是 HTML 元素：不清除会永远卡在屏幕上
         spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;

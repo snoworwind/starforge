@@ -974,7 +974,8 @@ const Game = (() => {
     const handoffLock = !!atmo.handoff && !atmo.handoff.done && shipMesh.position.y > EXIT_Y - HANDOFF_BUFFER_H;
     // 转向：NMS 式——鼠标俯仰/偏航 + A/D 绕前进轴滚转，均作用于机体本地轴
     // 滚转存入 camRoll（模型/相机整体携带，缓慢自动回正，与太空换系无缝衔接）
-    const dRoll = handoffLock ? 0 : (spaceInput.rollLeft ? -1.7 : spaceInput.rollRight ? 1.7 : 0) * dt;
+    // A/D 滚转：绕前进轴正转 = 右翼上升 = 向左滚转（A=rollLeft 正、D=rollRight 负）
+    const dRoll = handoffLock ? 0 : (spaceInput.rollLeft ? 1.7 : spaceInput.rollRight ? -1.7 : 0) * dt;
     _atQ.setFromEuler(_atE.set(atmo.pitch, atmo.yaw, atmo.camRoll || 0, 'YXZ'));
     const sAtmo = settings.mouseSens * 0.0022;
     _atQ.multiply(_atD.setFromEuler(_atE.set(handoffLock ? 0 : spaceInput.mouseDY * -sAtmo, handoffLock ? 0 : spaceInput.mouseDX * -sAtmo, dRoll, 'YXZ')));

@@ -2307,7 +2307,8 @@ const Space = (() => {
   let visBank = 0;   // 鼠标转向侧倾（纯视觉，不改变航向姿态）
   function update(dt, camera, input){
     // 姿态：NMS 式——鼠标俯仰/偏航作用于机体本地轴，A/D 绕前进轴真实滚转（太空不自动回正）
-    const dRoll = (input.rollLeft ? -1.7 : input.rollRight ? 1.7 : 0) * dt;
+    // A/D 滚转：绕前进轴正转 = 右翼上升 = 向左滚转（A=rollLeft 正、D=rollRight 负）
+    const dRoll = (input.rollLeft ? 1.7 : input.rollRight ? -1.7 : 0) * dt;
     _qAtt.setFromEuler(_eAtt.set(shipState.pitch, shipState.yaw, shipState.roll, 'YXZ'));
     const sens = ((window.Game && Game.mouseSens) || 1) * 0.0022;
     _qAtt.multiply(_qDlt.setFromEuler(_eAtt.set(input.mouseDY * -sens, input.mouseDX * -sens, dRoll, 'YXZ'))).normalize();

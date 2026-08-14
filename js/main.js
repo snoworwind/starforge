@@ -625,6 +625,11 @@ const Game = (() => {
     if (pointerLocked) skipMouseJump = true;   // 锁定成功：丢弃紧随其后的回中跳变
     if (!pointerLocked) Player.mineHeld = false;
   });
+  document.addEventListener('pointerlockerror', () => {
+    // 锁定失败：多为浏览器未授予（缺少用户手势 / 被扩展拦截）。未锁定时右键拖动
+    // 最容易被浏览器手势（Opera/Vivaldi 原生、鼠标手势扩展）劫持，给出明确提示。
+    UI.bigMessage('⚠ 指针锁定失败', '浏览器未授予鼠标锁定：请再点一下画面，或关闭浏览器鼠标手势功能', 4200);
+  });
 
   // ---------- 输入 ----------
   const spaceInput = { mouseDX: 0, mouseDY: 0, thrust: false, brake: false, boost: false, pulse: false, rollLeft: false, rollRight: false };
@@ -657,6 +662,9 @@ const Game = (() => {
     }
   });
   document.addEventListener('mousedown', e => {
+    // 拦截非主键按下默认行为：中键自动滚动、右键菜单兜底。
+    // 配合 pointer lock 一起，可显著降低被浏览器手势/扩展劫持的概率。
+    if (e.button === 1 || e.button === 2) e.preventDefault();
     if (state === 'menu' || UI.anyPanelOpen()) return;
     if (dialogActive()){ advanceDialog(); return; }   // 对话中：点击推进，不触发挖掘
     if (!pointerLocked){ lockPointer(); return; }
@@ -669,6 +677,7 @@ const Game = (() => {
   });
   document.addEventListener('mouseup', e => { if (e.button === 0) Player.mineHeld = false; });
   document.addEventListener('contextmenu', e => e.preventDefault());
+  document.addEventListener('auxclick', e => { if (e.button !== 0) e.preventDefault(); });   // 中/右键非主键点击默认行为兜底
   document.addEventListener('wheel', e => {
     if (state !== 'planet' || UI.anyPanelOpen()) return;
     // 循环：1..9 → 激光(-1) → 1（激光排在 9 号之后）
@@ -2959,12 +2968,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v85-station';
+    bd.textContent = 'build v86-station';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v85';
+  window.__V_MAIN = 'v86';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

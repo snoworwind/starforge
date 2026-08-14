@@ -596,6 +596,7 @@ const Game = (() => {
   }
 
   // ---------- 指针锁定 ----------
+  let skipMouseJump = false;   // 指针锁定瞬间光标回中会触发一次超大 movementX/Y，需要跳过
   function lockPointer(){
     if (state === 'planet' || state === 'space' || state === 'atmo' || state === 'station'){
       try {
@@ -606,6 +607,7 @@ const Game = (() => {
   }
   document.addEventListener('pointerlockchange', () => {
     pointerLocked = document.pointerLockElement === renderer.domElement;
+    if (pointerLocked) skipMouseJump = true;   // 锁定成功：丢弃紧随其后的回中跳变
     if (!pointerLocked) Player.mineHeld = false;
   });
 
@@ -613,18 +615,22 @@ const Game = (() => {
   const spaceInput = { mouseDX: 0, mouseDY: 0, thrust: false, brake: false, boost: false, pulse: false, rollLeft: false, rollRight: false };
   document.addEventListener('mousemove', e => {
     if (!pointerLocked) return;
+    if (skipMouseJump){ skipMouseJump = false; return; }   // 锁定瞬间的异常跳变，丢弃本帧
+    // 单帧增量防护：个别系统/浏览器会偶发超大 movementX/Y，导致视角瞬间跳到别的方向
+    const mx = THREE.MathUtils.clamp(e.movementX || 0, -300, 300);
+    const my = THREE.MathUtils.clamp(e.movementY || 0, -300, 300);
     if (state === 'planet' || (state === 'station' && Station.walking)){
       // station 行走与星球行走共用同一条被验证的视角通道（Player.yaw/pitch）
       const s = settings.mouseSens * 0.0024;
-      Player.yaw -= e.movementX * s;
-      Player.pitch = THREE.MathUtils.clamp(Player.pitch - e.movementY * s, -1.55, 1.55);
+      Player.yaw -= mx * s;
+      Player.pitch = THREE.MathUtils.clamp(Player.pitch - my * s, -1.55, 1.55);
     } else if (state === 'station'){
       // 站内行走视角：复用太空飞行同一条输入管线（spaceInput 累积 → station.js 消费）
-      spaceInput.mouseDX += e.movementX;
-      spaceInput.mouseDY += e.movementY;
+      spaceInput.mouseDX += mx;
+      spaceInput.mouseDY += my;
     } else if (state === 'space' || state === 'atmo'){
-      spaceInput.mouseDX += e.movementX;
-      spaceInput.mouseDY += e.movementY;
+      spaceInput.mouseDX += mx;
+      spaceInput.mouseDY += my;
     }
   });
   document.addEventListener('mousedown', e => {

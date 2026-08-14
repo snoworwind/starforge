@@ -2304,10 +2304,11 @@ const Space = (() => {
     // 姿态：NMS 式——鼠标俯仰/偏航作用于机体本地轴，A/D 绕前进轴真实滚转（太空不自动回正）
     const dRoll = (input.rollLeft ? -1.7 : input.rollRight ? 1.7 : 0) * dt;
     _qAtt.setFromEuler(_eAtt.set(shipState.pitch, shipState.yaw, shipState.roll, 'YXZ'));
-    _qAtt.multiply(_qDlt.setFromEuler(_eAtt.set(input.mouseDY * -0.0022, input.mouseDX * -0.0022, dRoll, 'YXZ'))).normalize();
+    const sens = ((window.Game && Game.mouseSens) || 1) * 0.0022;
+    _qAtt.multiply(_qDlt.setFromEuler(_eAtt.set(input.mouseDY * -sens, input.mouseDX * -sens, dRoll, 'YXZ'))).normalize();
     _eAtt.setFromQuaternion(_qAtt, 'YXZ');
     shipState.pitch = _eAtt.x; shipState.yaw = _eAtt.y; shipState.roll = _eAtt.z;
-    visBank += (input.mouseDX * -0.045 - visBank) * Math.min(1, dt * 5);
+    visBank += (input.mouseDX * -0.045 * ((window.Game && Game.mouseSens) || 1) - visBank) * Math.min(1, dt * 5);
 
     // 速度
     let target = 0;

@@ -126,8 +126,9 @@ const Station = (() => {
   function mouse(mx, my){
     // 兼容入口（当前视角由 mousemove 的 planet 分支直接驱动 Player.yaw/pitch，此处仅保底）
     if (phase !== 'walk') return;
-    Player.yaw -= mx * 0.0024;
-    Player.pitch = THREE.MathUtils.clamp(Player.pitch - my * 0.0024, -1.55, 1.55);
+    const sens = ((window.Game && Game.mouseSens) || 1) * 0.0024;
+    Player.yaw -= mx * sens;
+    Player.pitch = THREE.MathUtils.clamp(Player.pitch - my * sens, -1.55, 1.55);
   }
 
   // ---------- 下船 / 登船 / 离站 ----------
@@ -228,8 +229,9 @@ const Station = (() => {
     const ship = Space.shipGroup;
     // 行走视角：消费太空飞行同款输入管线的鼠标增量（无任何门禁——面板打开也允许转视角）
     if (phase === 'walk' && input){
-      Player.yaw -= input.mouseDX * 0.0024;
-      Player.pitch = THREE.MathUtils.clamp(Player.pitch - input.mouseDY * 0.0024, -1.55, 1.55);
+      const sens = ((window.Game && Game.mouseSens) || 1) * 0.0024;
+      Player.yaw -= input.mouseDX * sens;
+      Player.pitch = THREE.MathUtils.clamp(Player.pitch - input.mouseDY * sens, -1.55, 1.55);
     }
 
     if (phase === 'dock'){

@@ -20,7 +20,7 @@ const Game = (() => {
 
   // ---------- 画面设置（ESC → 画面设置；持久化到 localStorage）----------
   const SETTINGS_KEY = 'starforge_settings';
-  const settings = { fov: 75, chunkDist: 16, farDist: 1536, quality: 'mid', planetLod: 'mid', clouds: 'on', realAtmo: 'on', npcShips: 7 };
+  const settings = { fov: 75, chunkDist: 16, farDist: 1536, quality: 'mid', planetLod: 'mid', clouds: 'on', realAtmo: 'on', npcShips: 7, mouseSens: 1 };
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch(e){}
   let lastQuality = null;
   function baseFov(){ return settings.fov; }
@@ -615,8 +615,9 @@ const Game = (() => {
     if (!pointerLocked) return;
     if (state === 'planet' || (state === 'station' && Station.walking)){
       // station 行走与星球行走共用同一条被验证的视角通道（Player.yaw/pitch）
-      Player.yaw -= e.movementX * 0.0024;
-      Player.pitch = THREE.MathUtils.clamp(Player.pitch - e.movementY * 0.0024, -1.55, 1.55);
+      const s = settings.mouseSens * 0.0024;
+      Player.yaw -= e.movementX * s;
+      Player.pitch = THREE.MathUtils.clamp(Player.pitch - e.movementY * s, -1.55, 1.55);
     } else if (state === 'station'){
       // 站内行走视角：复用太空飞行同一条输入管线（spaceInput 累积 → station.js 消费）
       spaceInput.mouseDX += e.movementX;
@@ -944,14 +945,15 @@ const Game = (() => {
     // 滚转存入 camRoll（模型/相机整体携带，缓慢自动回正，与太空换系无缝衔接）
     const dRoll = (spaceInput.rollLeft ? -1.7 : spaceInput.rollRight ? 1.7 : 0) * dt;
     _atQ.setFromEuler(_atE.set(atmo.pitch, atmo.yaw, atmo.camRoll || 0, 'YXZ'));
-    _atQ.multiply(_atD.setFromEuler(_atE.set(spaceInput.mouseDY * -0.0022, spaceInput.mouseDX * -0.0022, dRoll, 'YXZ')));
+    const sAtmo = settings.mouseSens * 0.0022;
+    _atQ.multiply(_atD.setFromEuler(_atE.set(spaceInput.mouseDY * -sAtmo, spaceInput.mouseDX * -sAtmo, dRoll, 'YXZ')));
     _atE.setFromQuaternion(_atQ, 'YXZ');
     // 动态俯仰上限：无缝再入时可暂超 ±1.2，随后缓收回常规范围（无clamp跳变）
     atmo.pitchLim = Math.max(1.2, (atmo.pitchLim || 1.2) - dt * 0.45);
     atmo.pitch = THREE.MathUtils.clamp(_atE.x, -atmo.pitchLim, atmo.pitchLim);
     atmo.yaw = _atE.y;
     atmo.camRoll = _atE.z;
-    const targetRoll = spaceInput.mouseDX * -0.04;
+    const targetRoll = spaceInput.mouseDX * -0.04 * settings.mouseSens;
     atmo.roll += (targetRoll - atmo.roll) * Math.min(1, dt * 5);
     const steer = Math.abs(spaceInput.mouseDX) + Math.abs(spaceInput.mouseDY);
     spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;
@@ -3808,6 +3810,8 @@ const Game = (() => {
     $('setFarVal').textContent = settings.farDist + ' 格';
     $('setNpc').value = settings.npcShips;
     $('setNpcVal').textContent = settings.npcShips + ' 艘';
+    $('setMouseSens').value = settings.mouseSens;
+    $('setMouseSensVal').textContent = settings.mouseSens.toFixed(2) + '×';
     document.querySelectorAll('#setQuality button').forEach(b =>
       b.classList.toggle('on', b.dataset.q === settings.quality));
     document.querySelectorAll('#setPlanetLod button').forEach(b =>
@@ -3821,6 +3825,7 @@ const Game = (() => {
   $('setChunk').oninput = e => { settings.chunkDist = +e.target.value; applySettings(); refreshSettingsUI(); };
   $('setFar').oninput = e => { settings.farDist = +e.target.value; applySettings(); refreshSettingsUI(); };
   $('setNpc').oninput = e => { settings.npcShips = +e.target.value; applySettings(); refreshSettingsUI(); };
+  $('setMouseSens').oninput = e => { settings.mouseSens = +e.target.value; applySettings(); refreshSettingsUI(); };
   document.querySelectorAll('#setQuality button').forEach(b => {
     b.onclick = () => { Sound.play('uiClick'); settings.quality = b.dataset.q; applySettings(); refreshSettingsUI(); };
   });
@@ -3911,6 +3916,7 @@ const Game = (() => {
     get creative(){ return creative; },
     get dropMult(){ return dropMult; },
     get baseFov(){ return settings.fov; },
+    get mouseSens(){ return settings.mouseSens; },
     get currentPlanet(){ return currentPlanet; },
     get dayTime(){ return dayTime; },
     get planetScene(){ return planetScene; },

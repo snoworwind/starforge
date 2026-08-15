@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>STARFORGE 星穹熔炉 — 体素星际工厂</title>
-<link rel="stylesheet" href="css/style.css?v=st95">
+<link rel="stylesheet" href="css/style.css?v=st96">
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -190,7 +190,8 @@
       <div id="invGrid" class="slot-grid"></div>
       <div class="inv-bottom">
         <div id="trashSlot" title="回收站：手持物品点击销毁（右键销毁1个）">🗑</div>
-        <div id="invHint" class="inv-hint">左键：选取/放下 · 右键：拆半 · Shift+左键：快速移动 · G：丢出 · 🗑：销毁手持</div>
+        <div id="invSortBtn" class="inv-sort" title="整理储存舱：合并同类物品并压实（快捷栏不动）">🧹 整理</div>
+        <div id="invHint" class="inv-hint">左键：选取/放下 · 右键：拆半 · Shift+左键：快速移动 · G：丢出 · 🗑：销毁手持 · 🧹：整理</div>
       </div>
       <div class="inv-sec" id="chargeSec" style="margin-top:10px">⚡ 系统充能</div>
       <div id="chargeList"></div>
@@ -443,25 +444,25 @@ window.addEventListener('unhandledrejection', e => {
   console.error('[GAME PROMISE ERROR]', e.reason && (e.reason.stack || e.reason.message || e.reason));
 });
 </script>
-<script src="js/three.min.js?v=st95"></script>
-<script src="js/GLTFLoader.js?v=st95"></script>
-<script src="js/SVGLoader.js?v=st95"></script>
-<script src="js/models.js?v=st95"></script>
-<script src="js/modellib.js?v=st95"></script>
-<script src="js/humanoid.js?v=st95"></script>
-<script src="js/textures.js?v=st95"></script>
-<script src="js/audio.js?v=st95"></script>
-<script src="js/data.js?v=st95"></script>
-<script src="js/world.js?v=st95"></script>
-<script src="js/factory.js?v=st95"></script>
-<script src="js/creatures.js?v=st95"></script>
-<script src="js/player.js?v=st95"></script>
-<script src="js/space.js?v=st95"></script>
-<script src="js/station.js?v=st95"></script>
-<script src="js/savestore.js?v=st95"></script>
-<script src="js/ui.js?v=st95"></script>
-<script src="js/net.js?v=st95"></script>
-<script src="js/main.js?v=st95"></script>
+<script src="js/three.min.js?v=st96"></script>
+<script src="js/GLTFLoader.js?v=st96"></script>
+<script src="js/SVGLoader.js?v=st96"></script>
+<script src="js/models.js?v=st96"></script>
+<script src="js/modellib.js?v=st96"></script>
+<script src="js/humanoid.js?v=st96"></script>
+<script src="js/textures.js?v=st96"></script>
+<script src="js/audio.js?v=st96"></script>
+<script src="js/data.js?v=st96"></script>
+<script src="js/world.js?v=st96"></script>
+<script src="js/factory.js?v=st96"></script>
+<script src="js/creatures.js?v=st96"></script>
+<script src="js/player.js?v=st96"></script>
+<script src="js/space.js?v=st96"></script>
+<script src="js/station.js?v=st96"></script>
+<script src="js/savestore.js?v=st96"></script>
+<script src="js/ui.js?v=st96"></script>
+<script src="js/net.js?v=st96"></script>
+<script src="js/main.js?v=st96"></script>
 <script>
 // 版本自检（内联于入口文档）：确认浏览器实际加载的模块版本；缺失/不匹配 = 在跑旧缓存或别的目录副本
 (function(){
@@ -485,7 +486,7 @@ window.addEventListener('unhandledrejection', e => {
 (function(){
   if (/\btest\b/.test(location.search + location.hash)){
     var s = document.createElement('script');
-    s.src = 'js/test-api.js?v=st95';
+    s.src = 'js/test-api.js?v=st96';
     document.body.appendChild(s);
   }
 })();

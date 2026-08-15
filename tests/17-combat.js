@@ -135,7 +135,62 @@ __SF_TEST__.suite('combat', function (t, api) {
     var s = window.Creatures.serialize();
     var phantoms = s.herds.filter(function (h) { return h[3] === 0 && h[4] === 0; });
     A.eq(phantoms.length, 0, 'no herd at invalid (0,0) spawn point');
-    // 复位位置：后续套件不依赖本测试的淹水区域
-    api.setPos(96, 80, 96);
+    // 复位：重建干净世界（本测试淹水的区域不污染后续用例/套件）
+    return api.reboot('normal');
+  });
+
+  t.test('读档恢复兽群行为参数由 nid 确定性派生（联机两端一致）', function () {
+    // 在出生点（地形必然有效）恢复一个兽群，步进物化后断言
+    // speed/dir/timer/animT 全部等于 nid 派生值——修复前 animT 用 Math.random、
+    // speed/dir 用 1/0 占位，各客户端相位漂移、行为不一致
+    // 清空活跃生物（避免 CRE_CAP 卡住物化；不能用 reset()——它重置 lastInfoType，
+    // 下一次 update 的 clearBatches 会把刚恢复的兽群清掉）
+    var alive = window.Creatures.debugList().slice();
+    for (var q = 0; q < alive.length; q++) window.Creatures.kill(alive[q]);
+    // 出生点可能压在树冠下（topAt 顶块为 leaves → 物化校验拒绝），
+    // 从出生点向外确定性搜索一块可站立的实心地面放置兽群
+    var sp = window.World.findSpawn();
+    var x = 0, z = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var gx = Math.floor(sp.x) + dx, gz = Math.floor(sp.z) + dz;
+          var gy2 = window.World.topAt(gx, gz);
+          var dd2 = window.World.getDef(gx, gy2, gz);
+          if (dd2 && !dd2.liquid && dd2.key !== 'log' && dd2.key !== 'leaves'){ x = gx; z = gz; ok = true; }
+        }
+      }
+    }
+    A.ok(ok, 'found a valid standing spot near spawn');
+    var cx = Math.floor(x / 24), cz = Math.floor(z / 24);
+    window.Creatures.restore({ herds: [[cx, cz, 0, (x + 0.5) * 10, (z + 0.5) * 10, 4, (x + 0.5) * 10, (z + 0.5) * 10]], removed: [] });
+    var found = null;
+    for (var i = 0; i < 10 && !found; i++){
+      window.Creatures.update(1 / 30, window.Player.pos, window.World.biome);
+      var list = window.Creatures.debugList();
+      for (var j = 0; j < list.length; j++){
+        var u = list[j].userData;
+        if (u.herd && u.herd.cx === cx && u.herd.cz === cz){ found = u; break; }
+      }
+    }
+    A.ok(found, 'restored herd materialized near player');
+    // 对当前所有已物化兽群逐一断言「行为参数 = nid 派生值」：
+    // 该不变式对恢复/新建/补全三条路径同时成立，且不依赖单个兽群的候选索引
+    var td = api.defs.CREATURE_TYPES[window.World.biome.animal.type] || {};
+    var checked = 0;
+    for (var k = 0; k < window.Creatures.debugList().length; k++){
+      var uu = window.Creatures.debugList()[k].userData;
+      if (!uu.herd) continue;   // 守卫无人机等非兽群实体跳过
+      checked++;
+      var rnd2 = api.mulberry32(uu.nid);
+      var expSpeed = 0.5 + rnd2() * 0.5, expDir = rnd2() * Math.PI * 2;
+      var expTimer = 1 + rnd2() * 3, expAnimT = rnd2() * 10;
+      A.ok(Math.abs(uu.speed - (td.speed || 1) * expSpeed) < 1e-9, 'speed deterministic (got ' + uu.speed + ', want ' + ((td.speed || 1) * expSpeed) + ')');
+      A.ok(Math.abs(uu.dir - expDir) < 1e-9, 'dir deterministic (got ' + uu.dir + ', want ' + expDir + ')');
+      A.ok(Math.abs(uu.timer - expTimer) < 1e-9, 'timer deterministic (got ' + uu.timer + ', want ' + expTimer + ')');
+      A.ok(Math.abs(uu.animT - expAnimT) < 1e-9, 'animT deterministic (got ' + uu.animT + ', want ' + expAnimT + ')');
+    }
+    A.ok(checked > 0, 'at least one herd checked (' + checked + ')');
   });
 });

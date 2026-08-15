@@ -20,7 +20,7 @@ const Game = (() => {
 
   // ---------- 画面设置（ESC → 画面设置；持久化到 localStorage）----------
   const SETTINGS_KEY = 'starforge_settings';
-  const settings = { fov: 75, chunkDist: 16, farDist: 1536, quality: 'mid', planetLod: 'mid', clouds: 'on', realAtmo: 'on', npcShips: 7, mouseSens: 1, style: 'modern' };
+  const settings = { fov: 75, chunkDist: 16, farDist: 1536, quality: 'mid', planetLod: 'mid', clouds: 'on', realAtmo: 'on', npcShips: 7, mouseSens: 1, style: 'modern', weather: 'on' };
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch(e){}
   let lastQuality = null;
   function baseFov(){ return settings.fov; }
@@ -54,6 +54,8 @@ const Game = (() => {
     $('game').style.filter = q === 'high' ? 'saturate(1.14) contrast(1.04)' : '';
     // 像素风：外部模型（生物/飞船）贴图改用最邻近采样，与方块像素纹理风格统一
     if (window.ModelLib && ModelLib.setPixel) ModelLib.setPixel(settings.style === 'pixel');
+    // 天气开关：行星场景存在时重建/清除粒子
+    if (planetScene) buildWeather();
     World.setShadows(q === 'high');
     Space.setLodQuality(settings.planetLod);
     Space.setClouds(settings.clouds === 'on');
@@ -169,6 +171,66 @@ const Game = (() => {
       // 逼真大气层：天穹散射穹顶（画面设置可开关）
       if (settings.realAtmo === 'on') buildSkyDome();
     }
+    buildWeather();   // 天气粒子（按生态：雨/雪/灰烬/火星）
+  }
+  // ---------- 天气粒子（按生态：雨/雪/灰烬/火星，单 Points 实例 CPU 更新）----------
+  const WEATHER_DEFS = {
+    lush:     { color: 0x7fb8e0, speed: 22, size: 0.06, count: 260, opacity: 0.5 },
+    ocean:    { color: 0x8fc4e8, speed: 20, size: 0.06, count: 300, opacity: 0.45 },
+    murk:     { color: 0x9ad8b0, speed: 14, size: 0.07, count: 240, opacity: 0.4 },
+    fungal:   { color: 0xd8b8f0, speed: 12, size: 0.07, count: 220, opacity: 0.4 },
+    frozen:   { color: 0xf0f6fa, speed: 5,  size: 0.08, count: 240, opacity: 0.75 },
+    crystal:  { color: 0xd8f4f8, speed: 5,  size: 0.08, count: 220, opacity: 0.65 },
+    ashen:    { color: 0x8a8a8a, speed: 7,  size: 0.07, count: 200, opacity: 0.55 },
+    volcanic: { color: 0xff8a3a, speed: 6,  size: 0.09, count: 160, opacity: 0.75 },
+  };
+  let weather = null;   // { def, points, pos:Float32Array, floors:Float32Array, n }
+  function buildWeather(){
+    disposeWeather();
+    if (settings.weather === 'off' || state !== 'planet' || !planetScene) return;
+    const key = World.biome && World.biome.key;
+    const def = WEATHER_DEFS[key];
+    if (!def) return;
+    const n = def.count;
+    const pos = new Float32Array(n * 3);
+    const floors = new Float32Array(n);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({
+      color: def.color, size: def.size, transparent: true, opacity: def.opacity,
+      sizeAttenuation: true, depthWrite: false,
+    });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    weather = { def, points, pos, floors, n };
+    for (let i = 0; i < n; i++) respawnWeather(i, true);
+    planetScene.add(points);
+  }
+  function respawnWeather(i, anywhere){
+    const x = Player.pos.x + (Math.random() - 0.5) * 90;
+    const z = Player.pos.z + (Math.random() - 0.5) * 90;
+    const gy = World.topAtNoGen(Math.floor(x), Math.floor(z));
+    weather.pos[i * 3] = x;
+    weather.pos[i * 3 + 1] = (gy === null ? Player.pos.y + 24 : gy + 20) + Math.random() * 22;
+    weather.pos[i * 3 + 2] = z;
+    weather.floors[i] = gy === null ? -9999 : gy + 1;
+  }
+  function tickWeather(dt){
+    if (!weather) return;
+    const sp = weather.def.speed * dt;
+    for (let i = 0; i < weather.n; i++){
+      let y = weather.pos[i * 3 + 1] - sp;
+      if (y < weather.floors[i]) respawnWeather(i, false);
+      else weather.pos[i * 3 + 1] = y;
+    }
+    weather.points.geometry.attributes.position.needsUpdate = true;
+  }
+  function disposeWeather(){
+    if (!weather) return;
+    if (planetScene) planetScene.remove(weather.points);
+    weather.points.geometry.dispose();
+    weather.points.material.dispose();
+    weather = null;
   }
   // ---------- 逼真大气层（地面）：程序化天穹散射 + 晨昏霞光 ----------
   let skyDome = null, skyDomeU = null;
@@ -1605,6 +1667,7 @@ const Game = (() => {
       if (worldLoadedFor !== null){
         savePlanetState();
         flushPendingWorldChunks(worldLoadedFor, worldLoadedGalaxy, 2000);
+        disposeWeather();      // 旧星球天气粒子释放
         World.dispose();   // 旧星球区块数据彻底清空——残留 block ID 与新星球 biome 冲突的根源
       }
       const pd = SYSTEM_PLANETS[pid];
@@ -3469,12 +3532,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v99-sidequest';
+    bd.textContent = 'build v100-weather';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v99';
+  window.__V_MAIN = 'v100';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3544,6 +3607,7 @@ const Game = (() => {
       updateMarkers(dt);
       checkQuestCollect(dt);
       updateGroundClouds(dt, Player.pos.x, Player.pos.z);
+      tickWeather(dt);
       tickDialog(dt);
       tickMapPanel();
       renderer.render(planetScene, camera);
@@ -4410,6 +4474,8 @@ const Game = (() => {
       b.classList.toggle('on', b.dataset.q === settings.realAtmo));
     document.querySelectorAll('#setStyle button').forEach(b =>
       b.classList.toggle('on', b.dataset.q === settings.style));
+    document.querySelectorAll('#setWeather button').forEach(b =>
+      b.classList.toggle('on', b.dataset.q === settings.weather));
   }
   $('setFov').oninput = e => { settings.fov = +e.target.value; applySettings(); refreshSettingsUI(); };
   $('setChunk').oninput = e => { settings.chunkDist = +e.target.value; applySettings(); refreshSettingsUI(); };
@@ -4430,6 +4496,9 @@ const Game = (() => {
   });
   document.querySelectorAll('#setStyle button').forEach(b => {
     b.onclick = () => { Sound.play('uiClick'); settings.style = b.dataset.q; applySettings(); refreshSettingsUI(); };
+  });
+  document.querySelectorAll('#setWeather button').forEach(b => {
+    b.onclick = () => { Sound.play('uiClick'); settings.weather = b.dataset.q; applySettings(); refreshSettingsUI(); };
   });
   $('btnSettingsBoot').onclick = () => {
     Sound.begin(); Sound.play('uiOpen');
@@ -4648,6 +4717,8 @@ const Game = (() => {
       return sideQuest ? { ...sideQuest } : null;
     },
     debugCloseDialog(){ dlg = null; const b = $('dialogBox'); if (b) b.classList.add('hidden'); },
+    // 天气诊断（测试用）
+    get debugWeather(){ return weather ? { on: true, kind: World.biome && World.biome.key, n: weather.n } : { on: false }; },
   };
   window.Game = api;
   return api;

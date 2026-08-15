@@ -50,4 +50,22 @@ __SF_TEST__.suite('world', function (t, api) {
     A.ok(s.seed != null, 'serialize seed');
     A.ok(typeof s.mods === 'object', 'serialize mods object');
   });
+
+  t.test('stream 生成预算：单帧含邻块不超过 4，多帧后视距内无破洞', function () {
+    var p = api.pos();
+    // 传送 512 格外（远超视距）：旧区块全部卸载，触发全新流式生成
+    api.setPos(p[0] + 512, p[1], p[2]);
+    var g0 = window.World.genCount;
+    window.World.stream(api.pos()[0], api.pos()[2]);
+    var d1 = window.World.genCount - g0;
+    // 修复前：网格化时无视预算同步生成最多 8 个邻块 → 单帧可达 12 次 genChunk
+    A.ok(d1 <= 4, '单帧生成（含邻块）不超过预算 4，实际 ' + d1);
+    // 迭代足够多帧后收敛：视距内区块全部网格化，没有被预算永久跳过的破洞
+    var i;
+    for (i = 0; i < 300; i++) window.World.stream(api.pos()[0], api.pos()[2]);
+    var st = window.World.stats();
+    A.ok(st.chunks > 0, '区块已生成, stats=' + JSON.stringify(st));
+    A.eq(st.pending, 0, '视距内无待网格化区块（破洞=0）, stats=' + JSON.stringify(st));
+    A.ok(st.meshed > 0, '视距内已有网格化区块, stats=' + JSON.stringify(st));
+  });
 });

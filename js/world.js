@@ -58,6 +58,8 @@ const World = (() => {
   }
 
   let chunks = new Map();       // 整数键 -> {cx,cz,data,mesh,waterMesh,dirty,modified}
+  let genCount = 0;             // 诊断：实际生成区块总数（含邻块生成，测试断言每帧预算）
+  let lastStreamP = [0, 0];     // 诊断：最近一次 stream 的玩家区块中心
   let savedMods = null;         // 存档中被修改过的区块 {key: rle}
   let savedChunks = null;       // 完整区块快照 Map "cx,cz" -> Uint16Array（v4 区块落盘）
   let group = null;
@@ -598,6 +600,7 @@ const World = (() => {
     const k = ckey(cx, cz);
     let c = chunks.get(k);
     if (c) return c;
+    genCount++;   // 诊断计数：测试断言每帧生成预算（含邻块）不被绕过
     c = { cx, cz, data: new Uint8Array(CHUNK_CELLS), mesh: null, waterMesh: null, dirty: true, modified: false };
     chunks.set(k, c);
     streamDirty = true;   // 新区块（外部触发时）需要下一帧扫描建网格
@@ -944,11 +947,17 @@ const World = (() => {
           const cx = pcx + ox, cz = pcz + oz;
           let c = chunks.get(ckey(cx, cz));
           if (!c && genBudget > 0){ c = genChunk(cx, cz); genBudget--; }
-          if (c && r <= MESH_R && (!c.mesh && c.dirty || c.dirty) && meshBudget > 0){
-            // 确保周围数据存在，避免边界破洞
+          if (c && r <= MESH_R && c.dirty && meshBudget > 0){
+            // 确保周围数据存在，避免边界破洞——邻块生成同样纳入每帧预算：
+            // 原实现无视 genBudget 同步生成最多 8 个邻块，单帧可触发 8 次完整 genChunk
+            // （最重路径），是移动时"区块加载卡顿"的主要来源。
+            let ready = true;
             for (const [ax, az] of [[1,0],[-1,0],[0,1],[0,-1]]){
-              if (!chunks.get(ckey(cx + ax, cz + az))) genChunk(cx + ax, cz + az);
+              if (chunks.get(ckey(cx + ax, cz + az))) continue;
+              if (genBudget > 0){ genChunk(cx + ax, cz + az); genBudget--; }
+              else { ready = false; }   // 预算耗尽：本帧跳过网格化，下帧补齐后再建（无破洞）
             }
+            if (!ready) continue;
             buildChunkMesh(c);
             meshBudget--;
           }
@@ -965,7 +974,20 @@ const World = (() => {
       }
     }
     // 本轮未生成/重建任何区块 → 进入空闲，等待脏标记或玩家移动再唤醒
+    lastStreamP = [pcx, pcz];   // 诊断：记录扫描中心（stats 据此统计视距内网格化进度）
     if (genBudget === 4 && meshBudget === 2){ streamDirty = false; lastScCx = pcx; lastScCz = pcz; }
+  }
+
+  // 诊断统计（测试用）：chunks=已生成区块数 · meshed=视距内已网格化 · pending=视距内待网格化 · genCount=累计生成数
+  function stats(){
+    const [pcx, pcz] = lastStreamP;
+    let meshed = 0, pending = 0;
+    for (const c of chunks.values()){
+      if (Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) <= MESH_R){
+        if (c.mesh) meshed++; else pending++;
+      }
+    }
+    return { chunks: chunks.size, meshed, pending, genCount };
   }
 
   // 载入屏预生成
@@ -1354,6 +1376,7 @@ const World = (() => {
     pendingSaveCount, takePendingSave, requeueSave, chunkIsSaved,
     setViewDist, setFarDist, setShadows,
     get structures(){ return structures; },
+    stats, get genCount(){ return genCount; },
   };
 })();
 window.World = World;

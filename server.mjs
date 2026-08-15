@@ -173,6 +173,27 @@ function loadWorld(){
     w.warpLock = w.warpLock && typeof w.warpLock === 'object' ? w.warpLock : null;
     w.players = w.players && typeof w.players === 'object' ? w.players : {};
     w.hostKey = (typeof w.hostKey === 'string' && w.hostKey.length > 0 && w.hostKey.length <= 64) ? w.hostKey : '';
+    // 坏档防护：逐星球校验区块 RLE 与机器记录，丢弃损坏条目（防 rleDecode 越界/异常数据注入）
+    let dropped = 0;
+    for (const [pid, p] of Object.entries(w.planets)){
+      if (!p || typeof p !== 'object'){ delete w.planets[pid]; dropped++; continue; }
+      if (p.mods && typeof p.mods === 'object'){
+        for (const [key, rle] of Object.entries(p.mods)){
+          if (!validRle(rle)){ delete p.mods[key]; dropped++; }
+        }
+      } else p.mods = {};
+      if (Array.isArray(p.machines)){
+        p.machines = p.machines.slice(0, 20000).filter(m =>
+          m && Number.isInteger(m.x) && Number.isInteger(m.y) && Number.isInteger(m.z)
+          && typeof m.type === 'string' && m.type.length >= 1 && m.type.length <= 20
+        ).map(m => ({ x: m.x, y: m.y, z: m.z, type: m.type, dir: Number.isInteger(m.dir) ? m.dir : 0, data: (m.data && typeof m.data === 'object') ? m.data : {} }));
+      } else p.machines = [];
+      if (!Array.isArray(p.shipPos) || p.shipPos.length < 3 || !p.shipPos.every(Number.isFinite)) p.shipPos = [0, 40, 0];
+      if (!Number.isFinite(p.seed)) p.seed = 0;
+      if (typeof p.biome !== 'string') p.biome = 'green';
+    }
+    if (dropped) console.warn(`[world] 存档损坏条目 ${dropped} 个，已丢弃`);
+    if (!Object.keys(w.planets).length) w.planets['0'] = { mods: {}, machines: [], shipPos: [0, 40, 0], seed: 0, biome: 'green' };
     w.v = 4;
     w.dayAt = Date.now();
     world = w;

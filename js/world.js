@@ -119,6 +119,20 @@ const World = (() => {
   }
   applyCurve(solidMat);
   applyCurve(waterMat);
+  // 水面波浪：只让法线朝上的水面顶点随时间起伏（侧壁保持静止，不扰动水岸衔接）
+  const waterWaveU = { t: { value: 0 } };
+  function applyWaterWaves(mat){
+    const prev = mat.onBeforeCompile;
+    mat.onBeforeCompile = shader => {
+      if (prev) prev(shader);
+      shader.uniforms.uWTime = waterWaveU.t;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nuniform float uWTime;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\n  if (normal.y > 0.5){ transformed.y += sin(transformed.x * 0.85 + uWTime * 2.2) * 0.035 + cos(transformed.z * 0.7 + uWTime * 1.6) * 0.035; }');
+    };
+    mat.customProgramCacheKey = () => 'curveWater2';
+  }
+  applyWaterWaves(waterMat);
   // 发光注入：仅 solidMat 与其淡入克隆（水面/远景材质无 aEm 属性，不注入）
   function applyGlow(mat){
     const prev = mat.onBeforeCompile;
@@ -957,7 +971,8 @@ const World = (() => {
   function startFadeIn(mesh, sharedMat, targetOpacity){
     const mat = sharedMat.clone();
     applyCurve(mat);               // clone 不携带 onBeforeCompile，需重新注入曲率
-    if (sharedMat === solidMat) applyGlow(mat);   // 发光注入同样需要重建
+    if (sharedMat === solidMat) applyGlow(mat);        // 发光注入同样需要重建
+    if (sharedMat === waterMat) applyWaterWaves(mat);  // 水面波浪注入同样需要重建
     mat.opacity = 0;
     mesh.material = mat;
     fadeIns.push({ mesh, sharedMat, mat, targetOpacity, t: 0 });
@@ -1088,6 +1103,7 @@ const World = (() => {
   }
   function update(dt, cx, cz){
     tickFade(dt || 0.016);
+    waterWaveU.t.value += dt || 0.016;   // 水面波浪计时（停摆无影响：水面只是不再起伏）
     if (cx !== undefined){
       tickFar(cx, cz);
       updateLampLights(dt || 0.016, cx, cz);
@@ -1441,6 +1457,8 @@ const World = (() => {
     stats, get genCount(){ return genCount; },
     // 测试钩子：点光源池快照（on/光色/位置）
     get debugLamps(){ return lampPool ? lampPool.map(l => ({ on: l.intensity > 0, color: l.color.getHex(), pos: [l.position.x, l.position.y, l.position.z] })) : []; },
+    // 测试钩子：水面波浪计时（update 推进，用于断言水面动画运行）
+    get debugWaterTime(){ return waterWaveU.t.value; },
   };
 })();
 window.World = World;

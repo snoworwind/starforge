@@ -151,6 +151,15 @@ __SF_TEST__.suite('style', function (t, api) {
     A.ok(bright >= 8, 'titanium ore has bright pixels (n=' + bright + ')');
   });
 
+  t.test('水面波浪动画：注入链正确 + 计时推进', function () {
+    var mats = window.World.materials;
+    A.eq(mats[0].customProgramCacheKey(), 'curveGlow3', 'solid material uses glow shader key');
+    A.eq(mats[1].customProgramCacheKey(), 'curveWater2', 'water material uses wave shader key');
+    var t0 = window.World.debugWaterTime;
+    window.World.update(0.5, api.pos()[0], api.pos()[2]);
+    A.ok(window.World.debugWaterTime > t0, 'water wave clock advances with update()');
+  });
+
   t.test('天气粒子按生态生成且可开关', function () {
     var w = window.Game.debugWeather;
     A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));

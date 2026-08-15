@@ -117,6 +117,40 @@ __SF_TEST__.suite('style', function (t, api) {
     A.ok(uniform, 'each source pixel row expands to an exact 2-row block');
   });
 
+  t.test('矿石贴图：矿斑成簇 + 深色描边 + 钛矿对比度', function () {
+    var ores = {
+      coal_ore: '#2b2b2b', iron_ore: '#d8af93', copper_ore: '#d17f4a',
+      titanium_ore: '#e6eef4', uranium_ore: '#69d436', gold_ore: '#f5cd3a',
+    };
+    var outlines = {
+      coal_ore: '#1a1a1a', iron_ore: '#a87a5e', copper_ore: '#9a5a2e',
+      titanium_ore: '#7a8a94', uranium_ore: '#3a8a18', gold_ore: '#b8921a',
+    };
+    function hexOf(r, g, b){
+      return '#' + [r, g, b].map(function (v) { return ('0' + v.toString(16)).slice(-2); }).join('');
+    }
+    for (var name in ores){
+      var cv = Tex.tileCanvas(name);
+      var d = cv.getContext('2d').getImageData(0, 0, 16, 16).data;
+      var body = 0, outline = 0;
+      for (var i = 0; i < 256; i++){
+        var r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+        if (hexOf(r, g, b) === ores[name]) body++;
+        if (hexOf(r, g, b) === outlines[name]) outline++;
+      }
+      A.ok(body >= 4, name + ' has ore body pixels (n=' + body + ')');
+      A.ok(outline >= 3, name + ' has outline pixels (n=' + outline + ')');
+    }
+    // 钛矿本体必须明显亮于石底（此前 #cdd6dd 与 #8c8c8c 几乎同色）
+    var ti = Tex.tileCanvas('titanium_ore');
+    var d2 = ti.getContext('2d').getImageData(0, 0, 16, 16).data;
+    var bright = 0;
+    for (var j = 0; j < 256; j++){
+      if (d2[j * 4] >= 200 && d2[j * 4 + 1] >= 210 && d2[j * 4 + 2] >= 220) bright++;
+    }
+    A.ok(bright >= 8, 'titanium ore has bright pixels (n=' + bright + ')');
+  });
+
   t.test('天气粒子按生态生成且可开关', function () {
     var w = window.Game.debugWeather;
     A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));

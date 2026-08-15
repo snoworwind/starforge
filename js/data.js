@@ -254,7 +254,18 @@ const CREATURE_TYPES = {
   strider: { w: 0.35, h: 1.1, d: 0.35, headW: 0.22, speed: 1.8, jump: true },
   blob:    { w: 0.7, h: 0.5, d: 0.7, headW: 0.0, speed: 0.35, jump: false },
   drone:   { w: 0.3, h: 0.3, d: 0.6, headW: 0.15, speed: 2.4, jump: true, fly: true },
+  // 遗迹守卫：敌对悬浮无人机，追击玩家撞击攻击，掉落电路板（fly:true 此前是死配置，现已实装飞行 AI）
+  sentinel: { w: 0.5, h: 0.5, d: 0.5, headW: 0.0, speed: 2.4, jump: false, fly: true, hostile: true,
+    hp: 10, drops: [{ item: 'circuit', n: 1 }, { item: 'plate', n: 1, chance: 0.5 }] },
+  // 天空浮翼：高空盘旋的被动飞行生物（环境点缀，不参与兽群/存档）
+  skywing: { w: 0.4, h: 0.3, d: 0.75, headW: 0.12, speed: 2.8, jump: false, fly: true },
 };
+// 部分生态的高空飞行生物配色（环境点缀：每 30~70s 在玩家上空生成一小群，盘旋远去）
+BIOMES.lush.sky    = { body: 0xe8e8dc, wing: 0x7ab8d8 };
+BIOMES.ocean.sky   = { body: 0xd8e8f0, wing: 0x5a9ac0 };
+BIOMES.crystal.sky = { body: 0xe0f8f4, wing: 0x8ad8e0 };
+BIOMES.fungal.sky  = { body: 0xe8d0f0, wing: 0xb08ad8 };
+BIOMES.murk.sky    = { body: 0xc8f0d8, wing: 0x5ac88a };
 // 每个生态一种特色生物（所有星球都有生物）
 BIOMES.lush.animal    = { body: 0x8a9e56, legs: 0x5e7038, eye: 0x2a2a2a, count: 10, name: '草原跳羚', type: 'strider' };
 BIOMES.desert.animal  = { body: 0xd8b878, legs: 0xa8895a, eye: 0x442200, count: 7, name: '沙壳甲虫', type: 'crab' };

@@ -20,6 +20,10 @@ const Creatures = (() => {
   let vGroup = null, villagers = [];        // 村民（独立分组：不参与刷新清理，不可被攻击）
   const dying = [];                         // 播放死亡动画中的精模生物
   const spawnedVillages = new Set();
+  // ---------- 遗迹守卫（敌对飞行无人机）与天空浮翼（环境点缀）----------
+  const ruinGuards = new Map();             // 'x,z' -> { alive:[Group], dead:n }
+  const skyFlock = [];                      // 高空盘旋的浮翼群（纯环境，不参与兽群/存档/联机同步）
+  let skyTimer = 10;
   // ---------- Minecraft 式（Java 版）生成与持久化 ----------
   const cellStates = new Map();    // 'cx,cz' -> { cx, cz, cands: [候选出生点], mask: 已占用位图, herdCount: 引用本格的兽群数 }
   const herds = new Map();         // nid -> 兽群记录（自然生成生物的世界状态：生成后永不消失，仅卸载/重载）
@@ -73,6 +77,61 @@ const Creatures = (() => {
   };
 
   // ---------- 模型构建 ----------
+  // 遗迹守卫：体素四旋翼无人机（暗色机体 + 红色独眼 + 旋转桨叶）
+  function buildSentinel(){
+    const g = new THREE.Group();
+    const bodyM = new THREE.MeshLambertMaterial({ color: 0x2c333f });
+    const darkM = new THREE.MeshLambertMaterial({ color: 0x1a2129 });
+    const eyeM = new THREE.MeshBasicMaterial({ color: 0xff5533 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.26, 0.5), bodyM);
+    g.add(body);
+    // 两条交叉旋翼臂
+    const armGeo = new THREE.BoxGeometry(0.78, 0.05, 0.05);
+    for (const ang of [Math.PI / 4, -Math.PI / 4]){
+      const arm = new THREE.Mesh(armGeo, darkM);
+      arm.position.y = 0.05;
+      arm.rotation.y = ang;
+      g.add(arm);
+    }
+    // 四片半透明桨叶（动画：旋转）
+    const rotors = new THREE.Group();
+    const bladeM = new THREE.MeshBasicMaterial({ color: 0x9fb2c8, transparent: true, opacity: 0.8 });
+    for (const [sx, sz] of [[-0.33,-0.33],[0.33,-0.33],[-0.33,0.33],[0.33,0.33]]){
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.014, 0.06), bladeM);
+      blade.position.set(sx, 0.13, sz);
+      rotors.add(blade);
+    }
+    g.add(rotors);
+    g.userData.rotors = rotors;
+    // 红色独眼 + 底部探头
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.07, 0.03), eyeM);
+    eye.position.set(0, 0.03, -0.26);
+    g.add(eye);
+    const under = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, 0.1), darkM);
+    under.position.set(0, -0.21, 0);
+    g.add(under);
+    return g;
+  }
+  // 天空浮翼：体素滑翔生物（双翼 + 尾翼）
+  function buildSkywing(colors){
+    const g = new THREE.Group();
+    const bodyM = new THREE.MeshLambertMaterial({ color: colors.body });
+    const wingM = new THREE.MeshLambertMaterial({ color: colors.wing });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.7), bodyM);
+    g.add(body);
+    for (const s of [-1, 1]){
+      const wing = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.025, 0.3), wingM);
+      wing.position.set(s * 0.42, 0.04, -0.05);
+      g.add(wing);
+    }
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.05, 0.14), wingM);
+    tail.position.set(0, 0.04, 0.38);
+    g.add(tail);
+    const beak = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.14), new THREE.MeshLambertMaterial({ color: 0xd8a040 }));
+    beak.position.set(0, -0.02, -0.4);
+    g.add(beak);
+    return g;
+  }
   function buildCreature(typeDef, colors, typeKey){
     // 优先使用外部模型（按生态色染色），失败回退程序化体素生物
     const mm = GLB_MAP[typeKey];
@@ -92,6 +151,15 @@ const Creatures = (() => {
     // 躯干
     const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bodyM);
     g.add(body);
+    // 飞行型：无腿，加一对侧翼（children[1..2]，动画拍打）
+    if (typeDef.fly){
+      for (const s of [-1, 1]){
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(w * 1.9, 0.03, d * 0.55), legM);
+        wing.position.set(s * w * 0.95, 0.02, 0);
+        g.add(wing);
+      }
+      return g;
+    }
     // 腿（髋关节在腿顶：绕髋部前后摆动）
     for (const [lx, lz] of [[-w * 0.35, -d * 0.4], [w * 0.35, -d * 0.4], [-w * 0.35, d * 0.4], [w * 0.35, d * 0.4]]){
       const hip = new THREE.Group();
@@ -127,6 +195,8 @@ const Creatures = (() => {
     dying.length = 0;
     spawnedVillages.clear();
     ghosts.clear();
+    skyFlock.length = 0;
+    ruinGuards.clear();
     cellStates.clear();
     herds.clear();
     removedMasks.clear();
@@ -215,6 +285,144 @@ const Creatures = (() => {
     return best ? { g: best, dist: bestD } : null;
   }
 
+  // ---------- 遗迹守卫：敌对飞行无人机（营地式重生：离开 150m 再回来重新部署）----------
+  function sentinelNid(rx, rz, i){
+    let h = (World.seed ^ 0x5E171) >>> 0;
+    h = Math.imul(h ^ rx, 374761393);
+    h = Math.imul(h ^ rz, 668265263);
+    h = Math.imul(h ^ i, 2246822519);
+    h = (h ^ (h >>> 13)) >>> 0;
+    return h;
+  }
+  function materializeSentinel(x, z, nid, rnd, ruinKey){
+    const g = buildSentinel();
+    const rotors = g.userData.rotors;
+    const gy = World.topAt(Math.floor(x), Math.floor(z));
+    g.position.set(x, gy + 1 + 5, z);
+    g.userData = {
+      nid, rnd,
+      sentinel: true, hostile: true, aggroR: 16, sentinelKey: ruinKey,
+      typeDef: CREATURE_TYPES.sentinel,
+      hp: CREATURE_TYPES.sentinel.hp || 10,
+      hoverAlt: 4.5 + rnd() * 1.5,
+      dir: rnd() * Math.PI * 2,
+      state: 'idle', timer: 2 + rnd() * 3,
+      jumpVel: 0, onGround: false, fly: true,
+      speed: 2.4, radius: 0.55, foot: 0.5,
+      animT: rnd() * 10,
+      home: { x, z },
+      atkCd: 0, backoff: 0, aggro: false,
+      rotors,
+      spawnT: FADE_IN_T,
+    };
+    g.scale.setScalar(0.01);
+    group.add(g);
+    list.push(g);
+    return g;
+  }
+  function spawnRuinGuards(plyPos){
+    if (!group || !World.structures) return;
+    for (const st of World.structures){
+      if (st.type !== 'ruin') continue;
+      const key = st.x + ',' + st.z;
+      const dx = plyPos.x - st.x, dz = plyPos.z - st.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < 60 * 60){
+        let rec = ruinGuards.get(key);
+        if (!rec){ rec = { alive: [], dead: 0 }; ruinGuards.set(key, rec); }
+        rec.alive = rec.alive.filter(g => list.includes(g));   // 清掉已死亡/已卸载的引用
+        // 营地式重生：被清剿后（dead>0）玩家停留在区域内不复活；离开 150m 再回来重新部署
+        if (!rec.alive.length && rec.dead === 0){
+          const rnd = mulberry32(((st.x * 7 + st.z * 13) ^ 0x5E171) >>> 0);
+          const n = 1 + ((rnd() * 2) | 0);   // 1~2 台
+          for (let i = 0; i < n; i++){
+            const ang = rnd() * Math.PI * 2;
+            const gx = st.x + Math.cos(ang) * (4 + rnd() * 6);
+            const gz = st.z + Math.sin(ang) * (4 + rnd() * 6);
+            rec.alive.push(materializeSentinel(gx, gz, sentinelNid(st.x, st.z, i), mulberry32(sentinelNid(st.x, st.z, i)), key));
+          }
+        }
+      } else if (d2 > 150 * 150){
+        const rec = ruinGuards.get(key);
+        if (rec){
+          rec.dead = 0;   // 离开区域：营地重置，下次接近重新部署
+          rec.alive = rec.alive.filter(g => list.includes(g));
+        }
+      }
+    }
+  }
+
+  // ---------- 天空浮翼群：高空环境点缀（纯本地，不联机同步）----------
+  function spawnSkyFlock(plyPos, sky){
+    const n = 3 + ((Math.random() * 3) | 0);
+    const ang0 = Math.random() * Math.PI * 2;
+    for (let i = 0; i < n; i++){
+      const g = buildSkywing(sky);
+      const ang = ang0 + (i - n / 2) * 0.35;
+      const dist = 26 + Math.random() * 30;
+      const gy = World.topAt(Math.floor(plyPos.x), Math.floor(plyPos.z));
+      g.position.set(
+        plyPos.x + Math.cos(ang) * dist,
+        gy + 1 + 26 + Math.random() * 14,
+        plyPos.z + Math.sin(ang) * dist);
+      g.userData = {
+        skywing: true, fly: true, typeDef: CREATURE_TYPES.skywing,
+        dir: ang0 + Math.PI / 2 + (Math.random() - 0.5) * 0.8,
+        speed: 2.2 + Math.random() * 1.2,
+        animT: Math.random() * 10,
+        hoverAlt: 24 + Math.random() * 12,
+        life: 75 + Math.random() * 45,
+        wings: [g.children[1], g.children[2]],
+        radius: 0.5,
+      };
+      group.add(g);
+      skyFlock.push(g);
+    }
+  }
+  function updateSky(dt, plyPos, biome){
+    const sky = biome && biome.sky;
+    if (!sky){
+      // 生态无高空生物（或换到无天空群的星球）：清空旧群
+      if (skyFlock.length){
+        for (const g of skyFlock){ group.remove(g); disposeObject3D(g, { skipGeo: true, skipTex: true, skipMat: true }); }
+        skyFlock.length = 0;
+      }
+      return;
+    }
+    skyTimer -= dt;
+    if (skyTimer <= 0){
+      skyTimer = 30 + Math.random() * 40;
+      if (skyFlock.length < 14) spawnSkyFlock(plyPos, sky);
+    }
+    for (let i = skyFlock.length - 1; i >= 0; i--){
+      const g = skyFlock[i];
+      const u = g.userData;
+      u.animT += dt;
+      u.life -= dt;
+      if (u.life <= 0){
+        group.remove(g);
+        disposeObject3D(g, { skipGeo: true, skipTex: true, skipMat: true });
+        skyFlock.splice(i, 1);
+        continue;
+      }
+      // 缓慢盘旋 + 轻微转向漂移
+      u.dir += Math.sin(u.animT * 0.35) * 0.22 * dt;
+      g.position.x += Math.cos(u.dir) * u.speed * dt;
+      g.position.z += Math.sin(u.dir) * u.speed * dt;
+      const gy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
+      const targetY = gy + 1 + u.hoverAlt + Math.sin(u.animT * 0.8) * 1.2;
+      g.position.y += (targetY - g.position.y) * Math.min(1, dt * 1.5);
+      g.rotation.y = -u.dir - Math.PI / 2;
+      g.rotation.z = Math.sin(u.animT * 0.8) * 0.12;
+      // 拍翼
+      const flap = Math.sin(u.animT * 5) * 0.5;
+      for (const w of u.wings){ if (w) w.rotation.z = flap * (w.position.x > 0 ? -1 : 1); }
+      // 距离终点渐隐
+      if (u.life < 4) g.scale.setScalar(Math.max(0.01, u.life / 4));
+      else g.scale.setScalar(Math.min(1, g.scale.x + dt * 3));
+    }
+  }
+
   // 地形判断：地面列顶是否是树木/液体（生物不生成在树上/水里）
   function solidDefAt(x, y, z){ return World.getDef(Math.floor(x), Math.floor(y), Math.floor(z)); }
 
@@ -222,6 +430,8 @@ const Creatures = (() => {
   function update(dt, plyPos, biome){
     if (!group) return;
     spawnVillages(plyPos);   // 靠近村庄时生成村民（每村一次）
+    spawnRuinGuards(plyPos); // 靠近遗迹时部署守卫无人机（营地式重生）
+    updateSky(dt, plyPos, biome);   // 高空浮翼群（环境点缀）
     const info = biome.animal;
     if (!info) return;
 
@@ -514,6 +724,8 @@ const Creatures = (() => {
     list = [];
     dying.length = 0;
     fadingOut.length = 0;
+    skyFlock.length = 0;
+    ruinGuards.clear();
     cellStates.clear();
     herds.clear();
     removedMasks.clear();
@@ -632,6 +844,76 @@ const Creatures = (() => {
     u.dir += (u.rnd() < 0.5 ? 1 : -1) * (Math.PI * 0.55 + u.rnd() * 0.9);
   }
 
+  // ---------- 飞行移动（无人机/浮翼）：悬浮高度保持 + 空中避障 + 敌对追击 ----------
+  function flyMove(g, u, dt, plyPos){
+    let moving = false;
+    if (u.hostile){
+      const dx = plyPos.x - g.position.x, dz = plyPos.z - g.position.z;
+      const d = Math.hypot(dx, dz);
+      if (d < u.aggroR && !u.aggro){
+        u.aggro = true;
+        u.dir = Math.atan2(dz, dx);
+      }
+      if (u.aggro && d > u.aggroR + 6){
+        u.aggro = false;   // 玩家脱离警戒 → 回巢巡逻
+      }
+      if (u.aggro){
+        // 追击：俯冲贴近（高度压低），命中后后撤再冲
+        u.dir = Math.atan2(dz, dx);
+        const spd = Math.min(u.speed * 2.6, 9);
+        const back = u.backoff > 0;
+        const mv = back ? -spd * 0.7 : spd;
+        u.backoff -= dt;
+        g.position.x += Math.cos(u.dir) * mv * dt;
+        g.position.z += Math.sin(u.dir) * mv * dt;
+        moving = true;
+        if (!back && d < 1.15){
+          u.atkCd -= dt;
+          if (u.atkCd <= 0){
+            u.atkCd = 1.15;
+            u.backoff = 0.55;
+            if (window.Player && !Player.dead) Player.damage(2);
+          }
+        }
+      } else {
+        // 归巢巡逻：锚定遗迹（30 格外折返）
+        const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
+        if (hx * hx + hz * hz > 30 * 30) u.dir = Math.atan2(hz, hx);
+        if (u.state === 'walk'){
+          g.position.x += Math.cos(u.dir) * u.speed * 0.5 * dt;
+          g.position.z += Math.sin(u.dir) * u.speed * 0.5 * dt;
+          moving = true;
+        }
+      }
+    } else {
+      if (u.state === 'walk'){
+        g.position.x += Math.cos(u.dir) * u.speed * 0.5 * dt;
+        g.position.z += Math.sin(u.dir) * u.speed * 0.5 * dt;
+        moving = true;
+      }
+    }
+    // 悬浮高度：贴地形（+hoverAlt）+ 轻微浮动；追击时压低 1.5 格
+    const gy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
+    const alt = u.hoverAlt + Math.sin(u.animT * 1.3) * 0.45 + (u.aggro ? -1.5 : 0);
+    const targetY = gy + 1 + alt;
+    g.position.y += (targetY - g.position.y) * Math.min(1, dt * 3);
+    // 空中避障：机身高度有实心方块 → 快速爬升
+    const by = Math.floor(g.position.y);
+    for (let y = by; y <= by + 1; y++){
+      const d = World.getDef(Math.floor(g.position.x), y, Math.floor(g.position.z));
+      if (d && d.id !== 0 && !d.cross && !d.liquid && !d.lowbox){ g.position.y += 9 * dt; break; }
+    }
+    // 朝向 + 侧倾（转向时倾斜机身）
+    const wantYaw = -u.dir - Math.PI / 2;
+    let dy = wantYaw - g.rotation.y;
+    dy = ((dy + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    g.rotation.y += dy * Math.min(1, dt * 5);
+    const turn = THREE.MathUtils.clamp(dy * 2, -0.5, 0.5);
+    g.rotation.z += (turn - g.rotation.z) * Math.min(1, dt * 4);
+    // 桨叶旋转（无人机） / 拍翼（浮翼）
+    if (u.rotors) u.rotors.rotation.y += dt * (18 + (moving ? 12 : 0));
+  }
+
   function tickOne(g, dt, plyPos){
     {
       const u = g.userData;
@@ -680,7 +962,9 @@ const Creatures = (() => {
         }
       }
       // 移动
-      if (u.state === 'walk'){
+      if (u.typeDef && u.typeDef.fly){
+        flyMove(g, u, dt, plyPos);   // 飞行型：悬浮/追击，不走地面寻路与重力
+      } else if (u.state === 'walk'){
         let nx = g.position.x + Math.cos(u.dir) * u.speed * dt;
         let nz = g.position.z + Math.sin(u.dir) * u.speed * dt;
         const curGy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
@@ -731,16 +1015,18 @@ const Creatures = (() => {
           u.jumpCd = 1.2;
         }
       }
-      // 重力：空中自由落体 + 落地吸附（跳跃不再被当帧抵消）
-      if (!u.onGround){
-        u.jumpVel -= 20 * dt;
-        g.position.y += u.jumpVel * dt;
-        const below = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
-        const floorY = below + 1 + u.foot;
-        if (g.position.y <= floorY && u.jumpVel <= 0){
-          g.position.y = floorY;
-          u.jumpVel = 0;
-          u.onGround = true;
+      // 重力：空中自由落体 + 落地吸附（跳跃不再被当帧抵消）；飞行型无重力
+      if (!u.typeDef || !u.typeDef.fly){
+        if (!u.onGround){
+          u.jumpVel -= 20 * dt;
+          g.position.y += u.jumpVel * dt;
+          const below = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
+          const floorY = below + 1 + u.foot;
+          if (g.position.y <= floorY && u.jumpVel <= 0){
+            g.position.y = floorY;
+            u.jumpVel = 0;
+            u.onGround = true;
+          }
         }
       }
       if (u.isGlb && u.clips && u.clips.length){
@@ -779,16 +1065,30 @@ const Creatures = (() => {
         // ---- 村民：人形关节动画（四肢随行走摆动）----
         Humanoid.animate(g, dt, u.state === 'walk', u.speed);
       } else {
-        // ---- 体素回退：腿绕髋关节摆动（children: 0=躯干, 1..4=腿关节）----
-        const legBob = u.state === 'walk' ? Math.sin(u.animT * (2 + u.speed * 3)) * 0.55 : 0;
-        for (let i = 1; i <= 4 && i < g.children.length; i++){
-          const leg = g.children[i];
-          if (leg && leg.isGroup) leg.rotation.x = (i % 2 ? 1 : -1) * legBob;
-        }
-        // 行走时躯干起伏 / 待机呼吸
-        if (g.children[0]){
-          g.children[0].position.y = u.state === 'walk' ? Math.abs(Math.sin(u.animT * (2 + u.speed * 3))) * 0.04 : 0;
-          g.children[0].scale.y = u.state === 'idle' ? 1 + Math.sin(u.animT * 2) * 0.03 : 1;
+        // ---- 体素回退 ----
+        if (u.rotors){
+          // 无人机：桨叶在 flyMove 中旋转，机体轻微悬浮起伏
+          if (g.children[0]) g.children[0].position.y = Math.sin(u.animT * 2) * 0.04;
+        } else if (u.typeDef && u.typeDef.fly){
+          // 浮翼/飞行体素生物：拍翼（children[1..2] 为侧翼）
+          const flap = Math.sin(u.animT * (4 + u.speed * 2)) * 0.5;
+          for (let i = 1; i <= 2 && i < g.children.length; i++){
+            const w = g.children[i];
+            if (w) w.rotation.z = flap * (w.position.x > 0 ? -1 : 1);
+          }
+          if (g.children[0]) g.children[0].position.y = Math.sin(u.animT * 2) * 0.05;
+        } else {
+          // 地面生物：腿绕髋关节摆动（children: 0=躯干, 1..4=腿关节）
+          const legBob = u.state === 'walk' ? Math.sin(u.animT * (2 + u.speed * 3)) * 0.55 : 0;
+          for (let i = 1; i <= 4 && i < g.children.length; i++){
+            const leg = g.children[i];
+            if (leg && leg.isGroup) leg.rotation.x = (i % 2 ? 1 : -1) * legBob;
+          }
+          // 行走时躯干起伏 / 待机呼吸
+          if (g.children[0]){
+            g.children[0].position.y = u.state === 'walk' ? Math.abs(Math.sin(u.animT * (2 + u.speed * 3))) * 0.04 : 0;
+            g.children[0].scale.y = u.state === 'idle' ? 1 + Math.sin(u.animT * 2) * 0.03 : 1;
+          }
         }
       }
     }
@@ -799,11 +1099,14 @@ const Creatures = (() => {
       for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
       for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
       for (const f of fadingOut) disposeObject3D(f.g, { skipGeo: !!f.g.userData.isGlb, skipTex: true });
+      for (const g of skyFlock) disposeObject3D(g, { skipGeo: true, skipTex: true, skipMat: true });
       group.clear();
     }
     list = [];
     dying.length = 0;
     fadingOut.length = 0;
+    skyFlock.length = 0;
+    ruinGuards.clear();
     cellStates.clear();
     herds.clear();
     removedMasks.clear();
@@ -841,12 +1144,14 @@ const Creatures = (() => {
     const u = g.userData;
     if (u.hp === undefined) u.hp = 4;
     u.hp -= dmg;
-    // 受击逃窜：背向攻击者加速跑
-    u.state = 'walk';
-    u.timer = 2.5 + u.rnd() * 2;
-    if (fromPos) u.dir = Math.atan2(g.position.z - fromPos.z, g.position.x - fromPos.x);
-    if (u.baseSpeed === undefined) u.baseSpeed = u.speed;   // 记录原速，逃窜结束后恢复
-    u.speed = Math.max(u.speed, (u.typeDef.speed || 1) * 2.4);
+    // 受击逃窜：背向攻击者加速跑（敌对守卫无人机不逃，继续战斗）
+    if (!u.hostile){
+      u.state = 'walk';
+      u.timer = 2.5 + u.rnd() * 2;
+      if (fromPos) u.dir = Math.atan2(g.position.z - fromPos.z, g.position.x - fromPos.x);
+      if (u.baseSpeed === undefined) u.baseSpeed = u.speed;   // 记录原速，逃窜结束后恢复
+      u.speed = Math.max(u.speed, (u.typeDef.speed || 1) * 2.4);
+    }
     if (u.hp <= 0){ kill(g, opts); return true; }
     return false;
   }
@@ -855,6 +1160,11 @@ const Creatures = (() => {
     const u = g.userData;
     // 兽群记录立即删除（死亡动画只是视觉收尾；动画期间存档也记作已击杀，不会复活）
     removeHerdObject(g);
+    // 遗迹守卫：营地死亡计数（玩家停留区域内不复活，离开再回来重新部署）
+    if (u.sentinel && u.sentinelKey){
+      const rec = ruinGuards.get(u.sentinelKey);
+      if (rec){ rec.dead++; rec.alive = rec.alive.filter(x => x !== g); }
+    }
     // 有死亡动画的精模：原地播放倒地动画后移除
     if (u.mixer && u.clips && u.clips.death){
       u.dying = { t: u.clips.death.duration + 0.1 };
@@ -871,7 +1181,12 @@ const Creatures = (() => {
     }
     if (window.Player && (!opts || !opts.noDrop)){
       Player.spawnParticles(g.position.x, g.position.y + 0.3, g.position.z, 0xd4544a, 14);
-      Player.spawnDrop(g.position.x, g.position.y + 0.6, g.position.z, 'carbon', 1 + (Math.random() * 2 | 0));
+      // 掉落表：按类型定义（守卫无人机掉电路板/装甲板，其余生物掉碳）
+      const drops = (u.typeDef && u.typeDef.drops) || [{ item: 'carbon', n: 1 + ((Math.random() * 2) | 0) }];
+      for (const dr of drops){
+        if (dr.chance !== undefined && Math.random() > dr.chance) continue;
+        Player.spawnDrop(g.position.x, g.position.y + 0.6, g.position.z, dr.item, dr.n || 1);
+      }
     }
     Sound.play('breakBlk', 0.55);
   }
@@ -882,7 +1197,7 @@ const Creatures = (() => {
     for (const g of villagers){ if (g.userData.nid === nid) return g; }
     return null;
   }
-  // 快照：[nid, x×10, y×10, z×10, dir×100, walk?, hp, 村民?]
+  // 快照：[nid, x×10, y×10, z×10, dir×100, walk?, hp, 村民?, 种类(0普通/1村民/2守卫)]
   function snapshot(plyPos, maxD = 90){
     if (!group) return null;
     const out = [];
@@ -896,6 +1211,7 @@ const Creatures = (() => {
         g.userData.state === 'walk' ? 1 : 0,
         Math.round(g.userData.hp || 0),
         g.userData.villager ? 1 : 0,
+        g.userData.sentinel ? 2 : 0,
       ]);
     };
     for (const g of list) push(g);
@@ -906,12 +1222,18 @@ const Creatures = (() => {
     // entry 与 snapshot 同构
     const nid = entry[0];
     const isV = entry[7] === 1;
+    const isS = entry[8] === 2;
     let g;
     if (isV){
       g = buildVillager(Math.abs(nid) % 5);
       const grig = rigFromClone(g);
       g.userData = { ghost: true, isGlb: true, rig: grig, nid };
       vGroup.add(g);
+    } else if (isS){
+      g = buildSentinel();
+      const rotors = g.userData.rotors;
+      g.userData = { ghost: true, nid, isGlb: false, typeDef: CREATURE_TYPES.sentinel, rotors, sentinel: true };
+      group.add(g);
     } else {
       const info = (World.biome && World.biome.animal) || { type: 'strider', body: 0x888888, legs: 0x666666, eye: 0xffffff };
       const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
@@ -975,6 +1297,15 @@ const Creatures = (() => {
 
   return { init, update, tick, reset, rayHit, damage, kill, nearestVillager,
     snapshot, applyRemote, remoteHit, remoteKill, serialize, restore,
+    // 测试钩子：在指定坐标部署一台守卫无人机（返回 Group；不入兽群/营地体系）
+    debugSpawnSentinel(x, z){
+      const g = materializeSentinel(x, z, sentinelNid(x | 0, z | 0, 0), mulberry32(sentinelNid(x | 0, z | 0, 0)), 'debug');
+      g.userData.sentinelKey = null;   // 不参与营地重生计数
+      g.userData.spawnT = 0;          // 免淡入
+      g.scale.setScalar(1);
+      return g;
+    },
+    debugSkyFlock(){ return skyFlock; },
     debugList(){ return list; },
     debugVillagers(){ return villagers; },
     debugCap(){ return CRE_CAP; },

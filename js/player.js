@@ -1003,6 +1003,7 @@ const Player = (() => {
     keys, update, initVisuals, tryPlace, lookTarget, recharge, damage, setToolVisible,
     chargeStat, canCharge, CHARGE_DEFS, cycleRot,
     addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop,
+    get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
     serialize, deserialize, spawnParticles,
     tickParticles(dt){ updateParticles(dt); }
   };

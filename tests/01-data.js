@@ -82,4 +82,13 @@ __SF_TEST__.suite('data', function (t, api) {
     A.ok(a.station && a.station.length === 3, 'station 3d');
     A.ok(a.market && Object.keys(a.market).length > 0, 'market populated');
   });
+
+  t.test('像素图集使用最近 mip 采样（近距硬边 / 远距消闪）', function () {
+    A.eq(Tex.texture.magFilter, THREE.NearestFilter, 'atlas magFilter nearest');
+    A.eq(Tex.texture.minFilter, THREE.NearestMipmapNearestFilter, 'atlas minFilter nearest-mipmap');
+    A.eq(Tex.texture.generateMipmaps, true, 'atlas mipmaps enabled');
+    var t = Tex.tileTexture('stone');
+    A.eq(t.magFilter, THREE.NearestFilter, 'tile magFilter nearest');
+    A.eq(t.minFilter, THREE.NearestMipmapNearestFilter, 'tile minFilter nearest-mipmap');
+  });
 });

@@ -162,10 +162,16 @@ function loadWorld(){
   try {
     const raw = fs.readFileSync(worldFilePath(), 'utf8');
     const w = JSON.parse(raw);
-    if (!w || typeof w !== 'object' || w.v !== 2 || typeof w.planets !== 'object'){
+    // 存档版本：v2/v3（旧版）与 v4（当前）均可读取；缺省字段按当前格式补齐后统一升为 v4
+    if (!w || typeof w !== 'object' || ![2, 3, 4].includes(w.v) || typeof w.planets !== 'object'){
       throw new Error('世界存档格式无效');
     }
+    const base = freshWorld();
+    for (const k of ['galaxyArchives', 'market', 'mapMarks', 'flags']) if (w[k] === undefined) w[k] = base[k];
+    w.terrainV = Number.isFinite(w.terrainV) ? Math.max(1, w.terrainV | 0) : 1;
+    w.warpLock = w.warpLock && typeof w.warpLock === 'object' ? w.warpLock : null;
     w.players = w.players && typeof w.players === 'object' ? w.players : {};
+    w.v = 4;
     w.dayAt = Date.now();
     world = w;
     console.log(`[world] 已载入世界「${w.name}」（${Object.keys(w.planets).length} 颗已访星球）`);
@@ -190,7 +196,13 @@ async function saveWorld(){
       await fsp.mkdir(CFG.saveDir, { recursive: true });
       const tmp = worldFilePath() + '.tmp';
       await fsp.writeFile(tmp, snapshot, 'utf8');
-      await fsp.rename(tmp, worldFilePath());
+      try {
+        await fsp.rename(tmp, worldFilePath());
+      } catch (re){
+        // Windows 上目标文件被短暂占用时 rename 可能失败 → 直接覆写兜底
+        await fsp.writeFile(worldFilePath(), snapshot, 'utf8');
+        await fsp.rm(tmp, { force: true });
+      }
     } catch (e){
       console.error(`[!] 世界保存失败：${e.message}`);
     }
@@ -367,6 +379,28 @@ function sendInit(c){
   }));
 }
 
+// 兽群存档清洗：herds=[cx,cz,idx,x×10,z×10,hp,homeX×10,homeZ×10]，removed=['cx,cz',mask]
+function sanitizeCreatures(raw){
+  if (!raw || typeof raw !== 'object') return null;
+  const out = { herds: [], removed: [] };
+  if (Array.isArray(raw.herds)){
+    for (const e of raw.herds.slice(0, 8192)){
+      if (!Array.isArray(e) || e.length < 8) continue;
+      if (!Number.isInteger(e[0]) || !Number.isInteger(e[1]) || !Number.isInteger(e[2])) continue;
+      const ok = e.slice(3, 8).every(Number.isFinite);
+      if (!ok) continue;
+      out.herds.push([e[0], e[1], e[2], Math.round(e[3]), Math.round(e[4]), Math.max(0, Math.round(e[5])), Math.round(e[6]), Math.round(e[7])]);
+    }
+  }
+  if (Array.isArray(raw.removed)){
+    for (const e of raw.removed.slice(0, 4096)){
+      if (!Array.isArray(e) || e.length < 2 || typeof e[0] !== 'string' || !/^-?\d+,-?\d+$/.test(e[0]) || !Number.isInteger(e[1])) continue;
+      out.removed.push([e[0], e[1] | 0]);
+    }
+  }
+  return (out.herds.length || out.removed.length) ? out : null;
+}
+
 function sanitizeUpload(raw){
   if (!raw || typeof raw !== 'object') return null;
   const w = freshWorld();
@@ -404,6 +438,8 @@ function sanitizeUpload(raw){
       if (Array.isArray(p.shipPos) && p.shipPos.length >= 3 && p.shipPos.every(Number.isFinite)) out.shipPos = p.shipPos.slice(0, 3);
       if (Number.isFinite(p.seed)) out.seed = p.seed | 0;
       if (typeof p.biome === 'string') out.biome = p.biome.slice(0, 24);
+      const cr = sanitizeCreatures(p.creatures);
+      if (cr) out.creatures = cr;
       w.planets[pid] = out;
     }
   }

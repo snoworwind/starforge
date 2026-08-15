@@ -436,6 +436,7 @@ const Game = (() => {
     buildPlanetScene();
     if (saved && !fresh){
       Factory.deserialize(saved.machines);
+      if (saved.creatures) Creatures.restore(saved.creatures);   // 恢复兽群：位置/血量/击杀记录（农场跨存档保留）
       shipPos.fromArray(saved.shipPos);
       // 停船位贴地保护（修复悬空飞船）
       shipPos.y = World.topAt(Math.floor(shipPos.x), Math.floor(shipPos.z)) + 1;
@@ -471,6 +472,7 @@ const Game = (() => {
       shipPos: shipPos.toArray(),
       seed: w.seed,
       biome: SYSTEM_PLANETS[p].biome,
+      creatures: window.Creatures ? Creatures.serialize() : null,   // 兽群世界状态（位置/血量/击杀记录）
     };
     persistModsToStore(p, worldLoadedGalaxy);   // 立即把修改区块写入完整快照库（防 World.dispose 丢失）
   }
@@ -2466,7 +2468,7 @@ const Game = (() => {
     for (const k in src){
       const p = src[k];
       if (!p) continue;
-      out[k] = { machines: p.machines, shipPos: p.shipPos, seed: p.seed, biome: p.biome };
+      out[k] = { machines: p.machines, shipPos: p.shipPos, seed: p.seed, biome: p.biome, creatures: p.creatures || null };
     }
     return out;
   }

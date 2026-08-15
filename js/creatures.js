@@ -5,8 +5,13 @@
    · 体素回退模型腿关节在髋部旋转摆动
    · AI：锚定领地（野生生物守巢、村民守村）、矮跳不爬树、
      前方障碍转向（不再穿树穿墙）、不朝玩家聚集
-   · 批次持久化：按 24m 网格多批次共存；出生点离玩家太近时暂缓
-     生成、远处淡出回收——生物不会当着玩家的面突然消失/刷出
+   · Minecraft（Java 版）式生成与持久化：
+     - 世界生成：首次踏入区域时按确定性几率建立「兽群」（≈ 区块生成生物）
+     - 自然生成的生物一旦生成永不消失（被动生物不 despawm）：
+       距玩家 >128m 时只是卸载休眠（保留位置/血量），回来时原样重载
+       → 可以围栏圈养、建设农场
+     - 生成环 24~128m + 活跃数量上限（mob cap）+ 被杀后周期性补足
+     - 淡入/淡出过渡——生物既不密集也不会当着玩家的面消失/刷出
    ============================================================ */
 'use strict';
 
@@ -15,17 +20,26 @@ const Creatures = (() => {
   let vGroup = null, villagers = [];        // 村民（独立分组：不参与刷新清理，不可被攻击）
   const dying = [];                         // 播放死亡动画中的精模生物
   const spawnedVillages = new Set();
-  // ---------- 批次持久化：多批次共存，跨网格不再整体清空/重生 ----------
-  const batches = new Map();       // 'cx,cz' -> { cx, cz, list: [], pendingCount: 0 }
-  const pendingSpawns = [];        // 出生点离玩家太近而暂缓生成的生物（等玩家走远再淡入）
+  // ---------- Minecraft 式（Java 版）生成与持久化 ----------
+  const cellStates = new Map();    // 'cx,cz' -> { cx, cz, cands: [候选出生点], mask: 已占用位图, herdCount: 引用本格的兽群数 }
+  const herds = new Map();         // nid -> 兽群记录（自然生成生物的世界状态：生成后永不消失，仅卸载/重载）
+  const removedMasks = new Map();  // 'cx,cz' -> 被杀候选位图（存档持久化：被杀动物不复活，读档后同样不重生）
+  const registerQueue = [];        // 待注册候选细胞（分帧补齐，避免集中生成地形卡顿）
   const fadingOut = [];            // 淡出中的生物（已移出活跃列表，只做视觉收尾）
-  const createQueue = [];          // 待创建批次（分帧补齐，避免跨界时集中生成地形卡顿）
   let lastCenter = null;           // 玩家当前网格（快速路径）
-  let lastInfoType = null;         // 生态动物类型变化 → 重建批次
+  let lastInfoType = null;         // 生态动物类型变化 → 重建
   let tickFrame = 0;               // 帧计数：远处生物降频 tick
-  const SPAWN_MIN = 34;            // 出生点距玩家 < 此距离 → 暂缓生成（避免当着玩家的面刷出）
-  const DESPAWN_D = 150;           // 距玩家 > 此距离 → 淡出移除（避免当着玩家的面消失）
-  const FADE_IN_T = 1.2, FADE_OUT_T = 2.4;
+  let spawnTimer = 0;              // 周期性生成计时器
+  let pruneFrame = 0;              // 候选细胞回收帧计数
+  const CRE_CAP = 16;              // 活跃生物上限（安全阀；正常密度下不会触发）
+  const HERD_CHANCE = 0.18;        // 首次踏入一格时建立兽群的几率（≈ MC 区块生成生物的 1/10）
+  const TARGET_DENSITY = 12;       // 玩家 128m 范围内兽群数量目标（低于此值才周期补足 → 被杀后缓慢恢复）
+  const SPAWN_MIN = 24;            // 生成环内径：距玩家 < 24m 不生成（Minecraft 同款规则）
+  const SPAWN_MAX = 128;           // 生成环外径（Minecraft 同款 128m）
+  const UNLOAD_D = 128;            // 距玩家 > 128m：兽群卸载休眠（保留位置/血量，不删除）
+  const RELOAD_D = 96;             // 距玩家 < 96m：休眠兽群重载（迟滞带，避免边界抖动）
+  const SPAWN_INTERVAL = 1.2;      // 周期生成间隔（秒），每次最多补 1 个兽群
+  const FADE_IN_T = 1.0, FADE_OUT_T = 0.8;
   function easeInOut(t){ return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t); }
 
   // ---------- 联机：确定性 ID / 批次 ----------
@@ -113,12 +127,14 @@ const Creatures = (() => {
     dying.length = 0;
     spawnedVillages.clear();
     ghosts.clear();
-    batches.clear();
-    pendingSpawns.length = 0;
+    cellStates.clear();
+    herds.clear();
+    removedMasks.clear();
+    registerQueue.length = 0;
     fadingOut.length = 0;
-    createQueue.length = 0;
     lastCenter = null;
     lastInfoType = null;
+    spawnTimer = 0;
   }
 
   // ---------- 村民：统一人形管线（Humanoid），四肢关节可动 ----------
@@ -209,62 +225,59 @@ const Creatures = (() => {
     const info = biome.animal;
     if (!info) return;
 
-    // 生态动物类型变化（换星球）→ 旧批次全部清掉重建
+    // 生态动物类型变化（换星球）→ 旧生物全部清掉重建
     if (lastInfoType !== info.type){
       lastInfoType = info.type;
       clearBatches();
     }
 
-    // 玩家所在 24m 网格：跨网格时把 3×3 邻域缺失批次加入创建队列（已有批次保持不动）
+    spawnTimer += dt;
     const cx = Math.floor(plyPos.x / CRE_CELL), cz = Math.floor(plyPos.z / CRE_CELL);
     const key = cx + ',' + cz;
     if (lastCenter !== key){
       lastCenter = key;
-      const order = [[0,0],[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
-      for (const [dx, dz] of order){
-        const k = (cx + dx) + ',' + (cz + dz);
-        if (!batches.has(k) && !createQueue.includes(k)) createQueue.push(k);
+      // 本格候选立即注册（世界生成式兽群掷骰），7×7 邻域其余细胞入队分帧注册
+      registerCell(cx, cz, info);
+      for (let dx = -3; dx <= 3; dx++){
+        for (let dz = -3; dz <= 3; dz++){
+          if (dx === 0 && dz === 0) continue;
+          const k = (cx + dx) + ',' + (cz + dz);
+          if (!cellStates.has(k) && !registerQueue.includes(k)) registerQueue.push(k);
+        }
       }
     }
 
-    // 分帧创建批次（每帧最多 2 个，避免跨界时集中生成地形造成卡顿）
-    for (let n = 0; n < 2 && createQueue.length; n++){
-      const k = createQueue.shift();
-      if (batches.has(k)) continue;
+    // 分帧注册候选细胞（每帧最多 3 个，避免集中生成地形造成卡顿）
+    for (let n = 0; n < 3 && registerQueue.length; n++){
+      const k = registerQueue.shift();
       const parts = k.split(',');
-      spawnBatch(+parts[0], +parts[1], info, plyPos);
+      registerCell(+parts[0], +parts[1], info);
     }
 
-    // 暂缓生成的生物：玩家离出生点足够远 → 淡入生成；走得太远 → 直接放弃（出生也看不见）
-    for (let i = pendingSpawns.length - 1; i >= 0; i--){
-      const p = pendingSpawns[i];
-      const dx = p.x - plyPos.x, dz = p.z - plyPos.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= DESPAWN_D * DESPAWN_D){
-        p.batch.pendingCount--;
-        pendingSpawns.splice(i, 1);
-        continue;
-      }
-      if (d2 >= SPAWN_MIN * SPAWN_MIN){
-        p.batch.pendingCount--;
-        pendingSpawns.splice(i, 1);
-        materialize(p.batch, p, CREATURE_TYPES[info.type] || CREATURE_TYPES.strider, info, p.cx, p.cz, false);
-      }
+    // 休眠兽群重载 / 首次物化（每帧最多 3 个，避免集中卡顿）
+    materializePass(plyPos, info);
+
+    // Minecraft 式周期补足：128m 内兽群少于目标密度时，在生成环 24~128m 内补 1 个
+    //（玩家击杀动物后缓慢恢复；兽群本身永不消失，只增不减直到被击杀）
+    if (spawnTimer >= SPAWN_INTERVAL){
+      spawnTimer = 0;
+      spawnCycle(plyPos, info);
     }
 
-    // 空批次回收（下次靠近再按确定性种子重建）
-    for (const [k, b] of batches){
-      if (b.list.length === 0 && b.pendingCount === 0) batches.delete(k);
-    }
+    // 定期回收远处已无兽群引用的候选细胞（返回时按确定性种子重建）
+    pruneFrame = (pruneFrame + 1) & 63;
+    if (pruneFrame === 0) pruneCells(plyPos);
   }
 
-  // 生成一个网格批次：出生点与行为参数全部确定性（联机跨客户端一致）
-  function spawnBatch(cx, cz, info, plyPos){
+  // 注册一个候选细胞：出生点与行为参数全部确定性（联机跨客户端一致），
+  // 并做一次「世界生成式」兽群掷骰（≈ Minecraft 区块生成生物：被动动物在此诞生）
+  function registerCell(cx, cz, info){
+    const key = cx + ',' + cz;
+    if (cellStates.has(key)) return;
     const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
     const rnd = mulberry32(batchSeedOf(cx, cz));
-    const batch = { cx, cz, list: [], pendingCount: 0 };
-    batches.set(cx + ',' + cz, batch);
     const ccx = cx * CRE_CELL + CRE_CELL / 2, ccz = cz * CRE_CELL + CRE_CELL / 2;
+    const cands = [];
     for (let i = 0; i < Math.min(info.count, 22); i++){
       // 出生点选择：细胞中心 12~92 格随机环（确定性），避开水体与树木顶端
       let wx = 0, wz = 0, gy = 0, ok = false;
@@ -281,51 +294,214 @@ const Creatures = (() => {
       const dir = rnd() * Math.PI * 2;
       const timer = 1 + rnd() * 3;
       const animT = rnd() * 10;
-      const desc = { i, x: wx, z: wz, gy, speed, dir, timer, animT, batch, cx, cz };
-      const dx = wx - plyPos.x, dz = wz - plyPos.z;
-      if (dx * dx + dz * dz < SPAWN_MIN * SPAWN_MIN){
-        // 离玩家太近：暂缓生成，等玩家走远再淡入（不会当着玩家的面刷出）
-        batch.pendingCount++;
-        pendingSpawns.push(desc);
+      cands.push({ i, x: wx, z: wz, gy, speed, dir, timer, animT });
+    }
+    // 世界生成式兽群（确定性掷骰：跨客户端一致）；被杀候选（removed 掩码）与
+    // 存档恢复的既有兽群均保持占用，不重复生成
+    const roll = rnd();
+    const herdIdx = (rnd() * cands.length) | 0;
+    const rm = removedMasks.get(key) || 0;
+    const st = { cx, cz, cands, mask: rm, herdCount: 0 };
+    cellStates.set(key, st);
+    if (cands.length && roll < HERD_CHANCE && !(rm & (1 << herdIdx))){
+      const nid = creatureNid(cx, cz, herdIdx);
+      const existing = herds.get(nid);
+      if (existing){
+        // 存档恢复的兽群：用确定性参数补全行为数据，并标记占用
+        st.mask |= (1 << herdIdx);
+        const c = cands[herdIdx];
+        existing.speed = c.speed; existing.dir = c.dir; existing.timer = c.timer; existing.animT = c.animT;
       } else {
-        materialize(batch, desc, typeDef, info, cx, cz, true);
+        createHerd(st, cands[herdIdx]);
       }
     }
   }
-  // 实例化一只生物（fresh=true 直接信任批次算好的地形，false 重新校验地形）
-  function materialize(batch, desc, typeDef, info, cx, cz, fresh){
-    let gy = desc.gy;
-    if (!fresh){
-      // 暂缓出生点重新校验（期间玩家可能挖/填了地形）
-      gy = World.topAt(Math.floor(desc.x), Math.floor(desc.z));
-      const dd = solidDefAt(desc.x, gy, desc.z);
-      if (!dd || dd.liquid || dd.key === 'log' || dd.key === 'leaves') return;
+
+  // ---------- 存档序列化（兽群世界状态随世界记录落盘）----------
+  // herds:  [cx, cz, candIdx, x×10, z×10, hp, homeX×10, homeZ×10]
+  // removed: ['cx,cz', 被杀候选位图]
+  function serialize(){
+    const herdsArr = [];
+    for (const h of herds.values()){
+      if (h.g){ h.x = h.g.position.x; h.z = h.g.position.z; h.hp = h.g.userData.hp || 4; }
+      herdsArr.push([h.cx, h.cz, h.candIdx, Math.round(h.x * 10), Math.round(h.z * 10), Math.round(h.hp || 0), Math.round(h.homeX * 10), Math.round(h.homeZ * 10)]);
     }
+    const removed = [];
+    for (const [k, mask] of removedMasks) if (mask) removed.push([k, mask]);
+    return { herds: herdsArr, removed };
+  }
+  // 读档恢复：兽群（位置/血量/领地）与击杀记录全部还原；被杀动物不会复活
+  function restore(data){
+    herds.clear();
+    removedMasks.clear();
+    if (!data || typeof data !== 'object') return;
+    if (Array.isArray(data.removed)){
+      for (const e of data.removed){
+        if (!Array.isArray(e) || e.length < 2 || typeof e[0] !== 'string' || !Number.isInteger(e[1])) continue;
+        removedMasks.set(e[0], e[1] | 0);
+      }
+    }
+    if (Array.isArray(data.herds)){
+      for (const e of data.herds){
+        if (!Array.isArray(e) || e.length < 8) continue;
+        if (!Number.isInteger(e[0]) || !Number.isInteger(e[1]) || !Number.isInteger(e[2])) continue;
+        const x = Number.isFinite(e[3]) ? e[3] / 10 : 0, z = Number.isFinite(e[4]) ? e[4] / 10 : 0;
+        const hx = Number.isFinite(e[6]) ? e[6] / 10 : x, hz = Number.isFinite(e[7]) ? e[7] / 10 : z;
+        const nid = creatureNid(e[0], e[1], e[2]);
+        herds.set(nid, {
+          nid, cx: e[0], cz: e[1], candIdx: e[2],
+          x, z, hp: e[5] | 0, homeX: hx, homeZ: hz, g: null, first: false,
+          speed: 1, dir: 0, timer: 1, animT: Math.random() * 10,   // 注册时由确定性候选补全
+        });
+      }
+    }
+  }
+
+  // 建立兽群记录：自然生成的生物一旦生成永不消失（Java 版被动生物不 despawm），
+  // 距玩家 >128m 只是卸载休眠，回来时原样重载 → 可围栏圈养、建设农场
+  function createHerd(st, c){
+    const nid = creatureNid(st.cx, st.cz, c.i);
+    herds.set(nid, {
+      nid, cx: st.cx, cz: st.cz, candIdx: c.i,
+      x: c.x, z: c.z, homeX: c.x, homeZ: c.z, hp: 4, g: null, first: true,
+      speed: c.speed, dir: c.dir, timer: c.timer, animT: c.animT,
+    });
+    st.mask |= (1 << c.i);
+    st.herdCount++;
+    return nid;
+  }
+
+  // 物化兽群（首次生成或卸载后重载）：重校验地形，淡入出场，保留血量
+  function materializeHerd(herd, info){
+    const gy = World.topAt(Math.floor(herd.x), Math.floor(herd.z));
+    const dd = solidDefAt(herd.x, gy, herd.z);
+    if (!dd || dd.liquid || dd.key === 'log' || dd.key === 'leaves') return false;   // 地形被破坏 → 保持休眠，等恢复
+    const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
     const g = buildCreature(typeDef, { body: info.body, legs: info.legs, eye: info.eye }, info.type);
     // 贴地偏移：模型原点(躯干中心)到最低点（腿底）的距离，站在方块顶面(gy+1)上
     const foot = footOffset(g, typeDef);
-    g.position.set(desc.x, gy + 1 + foot, desc.z);
+    g.position.set(herd.x, gy + 1 + foot, herd.z);
     const glbClips = g.userData.clips || null;
-    const nid = creatureNid(cx, cz, desc.i);
     g.userData = {
-      nid, rnd: mulberry32(nid),            // 联机：确定性行为随机源（跨客户端一致）
-      speed: desc.speed,
-      dir: desc.dir,
-      state: 'idle', timer: desc.timer,
+      nid: herd.nid, rnd: mulberry32(herd.nid),   // 联机：确定性行为随机源（跨客户端一致）
+      speed: herd.speed,
+      dir: herd.dir,
+      state: 'idle', timer: herd.timer,
       jumpVel: 0, onGround: true, jumpCd: 0,
-      typeDef, animT: desc.animT, foot,
-      hp: 4, isGlb: !!g.userData.isGlb,
+      typeDef, animT: herd.animT, foot,
+      hp: herd.hp || 4, isGlb: !!g.userData.isGlb,
       clips: glbClips,
-      home: { x: desc.x, z: desc.z },       // 领地锚点：野生生物守巢，不再向玩家聚集
+      home: { x: herd.homeX, z: herd.homeZ },     // 领地锚点：兽群出生地，不向玩家聚集
       radius: Math.max(0.55, Math.max(typeDef.w, typeDef.h, typeDef.d) * 1.3),
-      batch, spawnT: FADE_IN_T,             // 淡入计时（0.01 → 1）
+      herd, spawnT: FADE_IN_T,                    // 淡入计时（0.01 → 1）
     };
     g.scale.setScalar(0.01);
     group.add(g);
     list.push(g);
-    batch.list.push(g);
+    herd.g = g;
+    herd.first = false;
+    // 若远端投影（其他玩家快照）仍在 → 本地实体已出现，移除投影避免双影
+    const gh = ghosts.get(herd.nid);
+    if (gh){
+      disposeObject3D(gh.g, { skipGeo: !!gh.g.userData.isGlb, skipTex: true, skipMat: !!gh.g.userData.isGlb });
+      group.remove(gh.g);
+      ghosts.delete(herd.nid);
+    }
+    return true;
   }
-  // 清空所有批次（换星球/换生态时调用）
+
+  // 卸载兽群：保留世界状态（位置/血量），距玩家回到 96m 内时原样重载
+  function unloadHerd(g){
+    const u = g.userData, herd = u.herd;
+    if (herd){
+      herd.x = g.position.x; herd.z = g.position.z;
+      herd.hp = u.hp || 4;
+      herd.g = null;
+      u.herd = null;
+    }
+  }
+
+  // 删除兽群记录（击杀后：动物真的死了，不会复活；周期补足会另建新兽群）
+  function removeHerdRecord(herd){
+    herds.delete(herd.nid);
+    const key = herd.cx + ',' + herd.cz;
+    // 被杀候选永久移除（Java 式）：占用位保持、并记入 removed 掩码随存档持久化
+    removedMasks.set(key, (removedMasks.get(key) || 0) | (1 << herd.candIdx));
+    const st = cellStates.get(key);
+    if (st){
+      st.herdCount = Math.max(0, st.herdCount - 1);
+      st.mask |= (1 << herd.candIdx);
+    }
+  }
+  function removeHerdObject(g){
+    const u = g.userData, herd = u.herd;
+    u.herd = null;
+    if (herd){
+      herd.g = null;
+      removeHerdRecord(herd);
+    }
+  }
+
+  // 休眠兽群的重载/首次物化扫描（距玩家 96m 内才物化，活跃上限内每帧最多 3 个）
+  function materializePass(plyPos, info){
+    const pcx = Math.floor(plyPos.x / CRE_CELL), pcz = Math.floor(plyPos.z / CRE_CELL);
+    let budget = 3;
+    for (const herd of herds.values()){
+      if (budget <= 0) return;
+      if (herd.g) continue;                                          // 已活跃
+      if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;   // 远格快速跳过
+      const dx = herd.x - plyPos.x, dz = herd.z - plyPos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= RELOAD_D * RELOAD_D) continue;                       // 尚未进入重载半径
+      if (herd.first && d2 < SPAWN_MIN * SPAWN_MIN) continue;        // 首次生成：距玩家太近不物化（防当面刷出）
+      if (list.length >= CRE_CAP) return;                            // 活跃上限安全阀（逐只检查，绝不超限）
+      if (materializeHerd(herd, info)) budget--;
+    }
+  }
+
+  // 周期补足：128m 内兽群少于目标密度时，在生成环 24~128m 内新建 1 个兽群
+  function spawnCycle(plyPos, info){
+    if (list.length >= CRE_CAP) return;
+    const pcx = Math.floor(plyPos.x / CRE_CELL), pcz = Math.floor(plyPos.z / CRE_CELL);
+    let local = 0;
+    for (const herd of herds.values()){
+      if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;
+      const dx = herd.x - plyPos.x, dz = herd.z - plyPos.z;
+      if (dx * dx + dz * dz < UNLOAD_D * UNLOAD_D) local++;
+    }
+    if (local >= TARGET_DENSITY) return;
+    const cells = [];
+    for (const st of cellStates.values()){
+      const dx = (st.cx * CRE_CELL + CRE_CELL / 2) - plyPos.x;
+      const dz = (st.cz * CRE_CELL + CRE_CELL / 2) - plyPos.z;
+      cells.push([dx * dx + dz * dz, st]);
+    }
+    cells.sort((a, b) => a[0] - b[0]);
+    for (let ci = 0; ci < cells.length; ci++){
+      const st = cells[ci][1];
+      for (const c of st.cands){
+        if (st.mask & (1 << c.i)) continue;   // 候选已被兽群占用
+        const dx = c.x - plyPos.x, dz = c.z - plyPos.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < SPAWN_MIN * SPAWN_MIN || d2 >= SPAWN_MAX * SPAWN_MAX) continue;
+        const nid = createHerd(st, c);
+        materializeHerd(herds.get(nid), info);
+        return;
+      }
+    }
+  }
+
+  // 回收远处已无兽群引用的候选细胞（返回时按确定性种子重建）
+  function pruneCells(plyPos){
+    for (const [k, st] of cellStates){
+      if (st.herdCount > 0) continue;
+      const dx = (st.cx * CRE_CELL + CRE_CELL / 2) - plyPos.x;
+      const dz = (st.cz * CRE_CELL + CRE_CELL / 2) - plyPos.z;
+      if (dx * dx + dz * dz > 220 * 220) cellStates.delete(k);
+    }
+  }
+
+  // 清空所有生物（换星球/换生态时调用）
   function clearBatches(){
     for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
     for (const g of list) group.remove(g);
@@ -338,20 +514,17 @@ const Creatures = (() => {
     list = [];
     dying.length = 0;
     fadingOut.length = 0;
-    batches.clear();
-    pendingSpawns.length = 0;
-    createQueue.length = 0;
+    cellStates.clear();
+    herds.clear();
+    removedMasks.clear();
+    registerQueue.length = 0;
     lastCenter = null;
+    spawnTimer = 0;
   }
-  // 从活跃列表与所属批次中移除（击杀/淡出移除共用）
+  // 从活跃列表移除（击杀/淡出移除共用）
   function removeFromList(g){
     const i = list.indexOf(g);
     if (i >= 0) list.splice(i, 1);
-    const b = g.userData.batch;
-    if (b){
-      const j = b.list.indexOf(g);
-      if (j >= 0) b.list.splice(j, 1);
-    }
   }
   // 模型原点到最低点的距离（含微小离地悬浮，避免脚底穿插）
   const _fBox = new THREE.Box3();
@@ -373,10 +546,10 @@ const Creatures = (() => {
         u.spawnT -= dt;
         g.scale.setScalar(Math.max(0.01, easeInOut(1 - u.spawnT / FADE_IN_T)));
       }
-      // 距玩家过远 → 淡出移除（不在玩家眼前凭空消失）
+      // 距玩家过远 → 淡出后卸载休眠（兽群不消失：保留位置/血量，回来时重载）
       const dx = g.position.x - plyPos.x, dz = g.position.z - plyPos.z;
       const d2 = dx * dx + dz * dz;
-      if (d2 > DESPAWN_D * DESPAWN_D){
+      if (d2 > UNLOAD_D * UNLOAD_D){
         removeFromList(g);
         fadingOut.push({ g, t: FADE_OUT_T });
         continue;
@@ -385,11 +558,12 @@ const Creatures = (() => {
       if (!u.remote && d2 > 70 * 70 && ((tickFrame + (u.nid || 0)) & 3) !== 0) continue;
       tickOne(g, dt, plyPos);
     }
-    // 淡出收尾：缩到最小后释放
+    // 淡出收尾：缩到最小后卸载休眠（兽群记录保留位置/血量，回来时重载）
     for (let i = fadingOut.length - 1; i >= 0; i--){
       const f = fadingOut[i];
       f.t -= dt;
       if (f.t <= 0){
+        unloadHerd(f.g);
         disposeObject3D(f.g, { skipGeo: !!f.g.userData.isGlb, skipTex: true });
         group.remove(f.g);
         fadingOut.splice(i, 1);
@@ -412,6 +586,7 @@ const Creatures = (() => {
       u.dying.t -= dt;
       if (u.mixer) u.mixer.update(dt);
       if (u.dying.t <= 0){
+        removeHerdObject(g);   // 死亡动画播完 → 兽群记录删除（被杀动物不复活）
         disposeObject3D(g, { skipGeo: !!u.isGlb, skipTex: true });
         group.remove(g);
         dying.splice(i, 1);
@@ -629,11 +804,13 @@ const Creatures = (() => {
     list = [];
     dying.length = 0;
     fadingOut.length = 0;
-    batches.clear();
-    pendingSpawns.length = 0;
-    createQueue.length = 0;
+    cellStates.clear();
+    herds.clear();
+    removedMasks.clear();
+    registerQueue.length = 0;
     lastCenter = null;
     lastInfoType = null;
+    spawnTimer = 0;
     if (vGroup){
       for (const g of villagers) disposeObject3D(g, { skipGeo: true, skipTex: true, skipMat: true });   // 村民克隆共享模板几何/材质
       vGroup.clear();
@@ -676,6 +853,8 @@ const Creatures = (() => {
   function kill(g, opts){
     removeFromList(g);
     const u = g.userData;
+    // 兽群记录立即删除（死亡动画只是视觉收尾；动画期间存档也记作已击杀，不会复活）
+    removeHerdObject(g);
     // 有死亡动画的精模：原地播放倒地动画后移除
     if (u.mixer && u.clips && u.clips.death){
       u.dying = { t: u.clips.death.duration + 0.1 };
@@ -779,6 +958,12 @@ const Creatures = (() => {
       kill(g, { noDrop: true, remote: true });
       return true;
     }
+    const herd = herds.get(nid);
+    if (herd){
+      // 休眠中的兽群被远程击杀 → 删除记录（重载时不再出现）
+      removeHerdRecord(herd);
+      return true;
+    }
     const gh = ghosts.get(nid);
     if (gh){
       disposeObject3D(gh.g, { skipGeo: !!gh.g.userData.isGlb, skipTex: true, skipMat: !!gh.g.userData.isGlb });
@@ -789,9 +974,11 @@ const Creatures = (() => {
   }
 
   return { init, update, tick, reset, rayHit, damage, kill, nearestVillager,
-    snapshot, applyRemote, remoteHit, remoteKill,
+    snapshot, applyRemote, remoteHit, remoteKill, serialize, restore,
     debugList(){ return list; },
     debugVillagers(){ return villagers; },
+    debugCap(){ return CRE_CAP; },
+    debugHerds(){ return herds.size; },
   };
 })();
 window.Creatures = Creatures;

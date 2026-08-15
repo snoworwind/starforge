@@ -191,4 +191,47 @@ __SF_TEST__.suite('charworld', function (t, api) {
     }
     A.ok(rigged > 0, 'skeletal walk/idle clips active on ' + rigged + ' creatures');
   });
+
+  t.test('crossing a 24m batch cell keeps nearby creatures alive', function () {
+    // 等全部 3×3 批次补齐（每帧最多建 2 个批次）
+    for (var f = 0; f < 30; f++){
+      window.Creatures.update(0.016, window.Player.pos, window.World.biome);
+      window.Creatures.tick(0.016, window.Player.pos);
+    }
+    var before = window.Creatures.debugList();
+    A.ok(before.length > 0, 'creatures spawned');
+    var nearIds = [];
+    for (var i = 0; i < before.length; i++){
+      var g = before[i];
+      if (Math.hypot(g.position.x - window.Player.pos.x, g.position.z - window.Player.pos.z) < 60) nearIds.push(g.userData.nid);
+    }
+    A.ok(nearIds.length > 0, 'some creatures near player before crossing (' + before.length + ' total)');
+    // 玩家跨过 24m 批次边界：近处生物不能被整体清空（旧逻辑会在这里全部销毁）
+    window.Player.pos.x += 24;
+    for (var f2 = 0; f2 < 30; f2++){
+      window.Creatures.update(0.016, window.Player.pos, window.World.biome);
+      window.Creatures.tick(0.016, window.Player.pos);
+    }
+    var after = window.Creatures.debugList();
+    var ids = {};
+    for (var j = 0; j < after.length; j++) ids[after[j].userData.nid] = true;
+    var kept = 0;
+    for (var k = 0; k < nearIds.length; k++) if (ids[nearIds[k]]) kept++;
+    A.eq(kept, nearIds.length, 'all nearby creatures survived the cell crossing (' + kept + '/' + nearIds.length + ')');
+    window.Player.pos.x -= 24;   // 复位，避免影响其他用例
+  });
+
+  t.test('creatures never materialize right in front of the player', function () {
+    // 瞬移到全新区域：新批次里出生点离玩家近的一律暂缓生成（距离门控 + 淡入）
+    window.Player.pos.x += 600;
+    window.Creatures.update(0.016, window.Player.pos, window.World.biome);
+    var list = window.Creatures.debugList();
+    var tooClose = 0;
+    for (var i = 0; i < list.length; i++){
+      var g = list[i];
+      if (Math.hypot(g.position.x - window.Player.pos.x, g.position.z - window.Player.pos.z) < 33) tooClose++;
+    }
+    A.eq(tooClose, 0, 'no creature materialized within 33m of the player (' + list.length + ' total)');
+    window.Player.pos.x -= 600;
+  });
 });

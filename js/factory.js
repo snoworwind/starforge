@@ -611,8 +611,14 @@ const Factory = (() => {
         d.prog = 0;
         d.in.n -= need;
         if (d.in.n <= 0) d.in = null;
-        if (!d.out) d.out = { item: Object.keys(r.out)[0], n: 0 };
-        if (d.out.item === Object.keys(r.out)[0]) d.out.n += r.out[Object.keys(r.out)[0]];
+        const outKey = Object.keys(r.out)[0];
+        if (d.out && d.out.item !== outKey){
+          // 产出槽被旧产物占用（换料后未取走）：旧产物掉落，避免新产物被静默丢弃
+          if (window.Player) Player.spawnDrop(m.x + 0.5, m.y + 1.2, m.z + 0.5, d.out.item, d.out.n);
+          d.out = null;
+        }
+        if (!d.out) d.out = { item: outKey, n: 0 };
+        d.out.n += r.out[outKey];
       }
     } else {
       // 无火/原料不足：燃烧暂停（不空耗燃料），进度冷却回退
@@ -902,8 +908,13 @@ const Factory = (() => {
       if (d.prog >= 1){
         d.prog = 0;
         const outItem = Object.keys(r.out)[0];
+        if (d.out && d.out.item !== outItem){
+          // 配方切换后旧产出未取走：旧产出掉落，避免新产出被静默丢弃
+          if (window.Player) Player.spawnDrop(m.x + 0.5, m.y + 1.2, m.z + 0.5, d.out.item, d.out.n);
+          d.out = null;
+        }
         if (!d.out) d.out = { item: outItem, n: 0 };
-        if (d.out.item === outItem) d.out.n += r.out[outItem];
+        d.out.n += r.out[outItem];
       }
     }
     if (d.out && d.out.n > 0 && tryOutput(m, d.out.item)){

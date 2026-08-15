@@ -8,6 +8,7 @@ const UI = (() => {
   const $ = id => document.getElementById(id);
   let cursorStack = null;        // 鼠标携带的物品
   let openMachine = null;
+  let machSig = null;   // 机器面板状态签名：仅当数据真正变化才重建 DOM
   let craftCat = 'all';
   let craftQueue = [];           // {recipe, t}
 
@@ -409,6 +410,7 @@ const UI = (() => {
     $('machinePanel').classList.remove('hidden');
     Sound.play(m.type === 'chest' || m.type === 'collector' ? 'openChest' : 'uiOpen');
     document.exitPointerLock && document.exitPointerLock();
+    machSig = null;           // 重置签名：面板打开时全量构建
     buildMachineBody();
   }
   function mslot(labelText, getStack, setStack, acceptFilter){
@@ -485,6 +487,7 @@ const UI = (() => {
     $('machineTitle').textContent = '◈ ' + (titles[m.type] || m.type);
     body.innerHTML = '';
     const d = m.data;
+    machSig = machSignature(m);   // 记录本次构建对应的状态签名（供节流重建比较）
 
     if (m.type === 'furnace'){
       const flow = document.createElement('div'); flow.className = 'mach-flow';
@@ -1886,15 +1889,39 @@ const UI = (() => {
     };
   });
 
-  // 机器面板实时刷新（进度/状态）
+  // 机器面板实时刷新（进度/状态）——按数据签名节流：状态未变不重建 DOM，
+  // 修复每 0.4s 全量重建打断点击/拖拽交互的问题（空闲机器/静止箱子不再重建）
   let machTickT = 0;
+  function machSignature(m){
+    const d = m.data;
+    switch (m.type){
+      case 'furnace':
+        return [m.active ? 1 : 0, d.in ? d.in.item + ':' + d.in.n : '-', d.fuel ? d.fuel.item + ':' + d.fuel.n : '-', d.out ? d.out.item + ':' + d.out.n : '-', (d.prog * 100) | 0, (d.burn * 10) | 0].join('|');
+      case 'miner':
+        return [d.out ? d.out.item + ':' + d.out.n : '-', d.deposit, Factory.power.sat.toFixed(2), World.getDef(m.x, m.y - 1, m.z).id].join('|');
+      case 'assembler': case 'refinery': {
+        const r = d.recipe ? RECIPE_BY_ID[d.recipe] : null;
+        const inSig = r ? Object.keys(r.in).map(k => k + ':' + (d.in[k] || 0)).join(',') : '';
+        return [d.recipe || '-', inSig, d.out ? d.out.item + ':' + d.out.n : '-', (d.prog * 100) | 0, Factory.power.sat.toFixed(2)].join('|');
+      }
+      case 'chest': case 'collector':
+        return d.slots.map(s => s ? s.item + ':' + s.n : '-').join(',');
+      case 'reactor': return String(d.fuel | 0);
+      case 'burner':
+        return [m.active ? 1 : 0, d.fuel ? d.fuel.item + ':' + d.fuel.n : '-', (d.burn * 10) | 0].join('|');
+      case 'wind': return (d.out || 0).toFixed(1);
+      case 'lumberbot': return [m.bot ? m.bot.state : 'init', d.cargo || 0].join('|');
+      default: return 'static';
+    }
+  }
   function tickMachinePanel(dt){
     if (!openMachine || $('machinePanel').classList.contains('hidden')) return;
     if (openMachine.type === 'beacon') return;   // 静态面板：自动重建会打断输入框输入
     machTickT += dt;
     if (machTickT < 0.4) return;
     machTickT = 0;
-    buildMachineBody();
+    const sig = machSignature(openMachine);
+    if (sig !== machSig){ machSig = sig; buildMachineBody(); }
   }
 
   // 回收站：手持物品点击销毁（右键销毁1个）

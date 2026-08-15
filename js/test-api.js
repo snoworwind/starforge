@@ -62,7 +62,7 @@
       S.play = function () {};
       S.begin = function () {};
       S.resume = function () {};
-      S.setVolume = function () {};
+      // setVolume 保留真实实现：仅设置 master 增益（无 ctx 时跳过）+ localStorage 持久化，无音频依赖
       if (S.Music) { S.Music.start = function () {}; S.Music.stop = function () {}; S.Music.setMode = function () {}; }
       if (S.loops) for (const k in S.loops) {
         const l = S.loops[k];

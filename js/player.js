@@ -88,6 +88,31 @@ const Player = (() => {
     UI.refreshAll();
     return true;
   }
+  // 整理背包（储存舱 10~36 格；快捷栏 0~8 保持玩家排布不动）：
+  // 同类物品合并堆叠（按物品上限拆分）+ 前移压实，空位沉底
+  function sortInventory(){
+    const totals = new Map();   // item -> 总数
+    const order = [];
+    for (let i = 9; i < inv.length; i++){
+      const s = inv[i];
+      if (!s) continue;
+      if (!totals.has(s.item)) order.push(s.item);
+      totals.set(s.item, (totals.get(s.item) || 0) + s.n);
+    }
+    const out = [];
+    for (const item of order){
+      const max = (ITEMS[item] && ITEMS[item].stack) || 250;
+      let n = totals.get(item);
+      while (n > 0){
+        const t = Math.min(n, max);
+        out.push({ item, n: t });
+        n -= t;
+      }
+    }
+    for (let i = 9; i < inv.length; i++) inv[i] = out[i - 9] || null;
+    UI.refreshAll();
+    return true;
+  }
   function hasItems(costs){ return Object.keys(costs).every(k => countItem(k) >= costs[k]); }
   function payItems(costs){
     if (!hasItems(costs)) return false;
@@ -1023,7 +1048,7 @@ const Player = (() => {
     get dead(){ return dead; },
     keys, update, initVisuals, tryPlace, lookTarget, recharge, damage, setToolVisible,
     chargeStat, canCharge, CHARGE_DEFS, cycleRot,
-    addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop,
+    addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop, sortInventory,
     get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
     serialize, deserialize, spawnParticles,
     tickParticles(dt){ updateParticles(dt); }

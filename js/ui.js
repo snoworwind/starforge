@@ -1951,6 +1951,16 @@ const UI = (() => {
     refreshAll();
     flashTrash();
   };
+  // 整理背包：合并储存舱同类物品并压实（快捷栏保持排布）
+  {
+    const sbtn = $('invSortBtn');
+    if (sbtn) sbtn.onclick = () => {
+      if (!window.Player || !Player.sortInventory) return;
+      Sound.play('uiClick');
+      Player.sortInventory();
+      refreshAll();
+    };
+  }
   $('trashSlot').oncontextmenu = e => {
     e.preventDefault();
     if (!cursorStack) return;

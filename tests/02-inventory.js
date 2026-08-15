@@ -56,4 +56,33 @@ __SF_TEST__.suite('inventory', function (t, api) {
     api.give('stone', 50);
     A.eq(api.count('stone'), 550, 'count across 3 stacks');
   });
+
+  t.test('sortInventory merges storage stacks and compacts, hotbar untouched', function () {
+    api.clearInv();
+    // 快捷栏排布：格子 0 = 铁，格子 2 = 碳（整理后必须原样）
+    window.Player.inv[0] = { item: 'iron', n: 5 };
+    window.Player.inv[2] = { item: 'carbon', n: 7 };
+    // 储存舱：分散的同类堆叠 + 空位（9=碳200, 12=碳80, 13=铁3, 17=土4）
+    window.Player.inv[9]  = { item: 'carbon', n: 200 };
+    window.Player.inv[12] = { item: 'carbon', n: 80 };
+    window.Player.inv[13] = { item: 'iron', n: 3 };
+    window.Player.inv[17] = { item: 'dirt', n: 4 };
+    A.ok(window.Player.sortInventory(), 'sort ok');
+    // 快捷栏保持
+    A.eq(window.Player.inv[0].item, 'iron', 'hotbar slot 0 untouched');
+    A.eq(window.Player.inv[0].n, 5, 'hotbar slot 0 count untouched');
+    A.eq(window.Player.inv[2].item, 'carbon', 'hotbar slot 2 untouched');
+    A.eq(window.Player.inv[2].n, 7, 'hotbar slot 2 count untouched');
+    // 储存舱合并：碳 280 → 250 + 30 两格；铁 3 一格；土 4 一格；其余空
+    A.eq(window.Player.inv[9].item, 'carbon', 'first storage stack carbon');
+    A.eq(window.Player.inv[9].n, 250, 'capped at 250');
+    A.eq(window.Player.inv[10].item, 'carbon', 'spill stack carbon');
+    A.eq(window.Player.inv[10].n, 30, 'spill 30');
+    A.eq(window.Player.inv[11].item, 'iron', 'iron consolidated');
+    A.eq(window.Player.inv[11].n, 3, 'iron 3');
+    A.eq(window.Player.inv[12].item, 'dirt', 'dirt moved up');
+    A.eq(window.Player.inv[12].n, 4, 'dirt 4');
+    A.ok(window.Player.inv.slice(13).every(function (s) { return s === null; }), 'rest compacted empty');
+    api.clearInv();
+  });
 });

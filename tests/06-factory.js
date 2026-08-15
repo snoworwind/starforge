@@ -314,4 +314,23 @@ __SF_TEST__.suite('factory', function (t, api) {
     api.removeMachine(X, y, Z);
     api.removeMachine(X, y, Z + 2);
   });
+
+  t.test('miner: 矿脉耗尽后缓存矿石仍可送出（不再永久卡死）', function () {
+    var y = groundY() + 1;
+    api.setBlock(X, y - 1, Z, 'iron_ore');
+    api.placeMachine('solar', X, y, Z + 2, 0);   // 满电全速：2 秒/矿
+    api.placeMachine('miner', X, y, Z, 0);
+    api.tickFactory(7.0, 1);   // 无输出邻居 → 矿石积压缓存
+    var m = api.machineAt(X, y, Z);
+    A.ok(m.data.out && m.data.out.n > 0, 'miner buffered ore (out=' + JSON.stringify(m.data.out) + ')');
+    api.placeMachine('chest', X + 1, y, Z, 0);
+    api.setBlock(X, y - 1, Z, 'stone');   // 矿脉耗尽（下方变岩石）
+    api.tickFactory(4.0, 1);
+    var chest = api.machineAt(X + 1, y, Z);
+    A.ok(chest.data.slots.some(function (s) { return s && s.item === 'iron_ore'; }), 'buffered ore drained to chest (slots=' + JSON.stringify(chest.data.slots) + ')');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 2);
+    api.removeMachine(X + 1, y, Z);
+    api.setBlock(X, y - 1, Z, 'air');
+  });
 });

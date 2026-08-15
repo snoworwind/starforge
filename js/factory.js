@@ -866,6 +866,12 @@ const Factory = (() => {
     const d = m.data;
     const below = World.getDef(m.x, m.y - 1, m.z);
     m.active = false;
+    // 缓存排空不依赖矿脉：矿脉耗尽（deposit 挖完变岩石 / 下方被换块）后最后一批矿石仍须送出，
+    // 否则卡死在机器缓存里永远取不出（原实现把排空放在 !below.ore 早退之后，耗尽即永久堵塞）
+    if (d.out && d.out.n > 0 && tryOutput(m, d.out.item)){
+      d.out.n--;
+      if (d.out.n <= 0) d.out = null;
+    }
     if (!below.ore) return;    // 无电力时以 35% 低速运行（应急手摇模式），有电则全速
     const eff = Math.max(sat, 0.35);
     m.active = true;
@@ -878,10 +884,6 @@ const Factory = (() => {
       d.out.n++;
       d.deposit++;
       if (d.deposit >= 300){ World.set(m.x, m.y - 1, m.z, BLOCKS.stone.id); d.deposit = 0; }
-    }
-    if (d.out && d.out.n > 0 && tryOutput(m, d.out.item)){
-      d.out.n--;
-      if (d.out.n <= 0) d.out = null;
     }
   }
   function crafterTick(m, dt, sat, where){

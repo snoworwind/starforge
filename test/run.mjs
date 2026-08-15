@@ -188,6 +188,49 @@ try {
   console.error(`[net-server] 重置竞态自检失败：${e.message}`);
   process.exit(1);
 }
+// 位置持久化自检：pos 消息必须把世界标脏（节流后落盘）——否则崩溃丢全部移动、prune 误踢活跃玩家
+try {
+  const wsOpen = () => new Promise((res, rej) => {
+    const s = net.connect(NET_WS, '127.0.0.1');
+    const key = crypto.randomBytes(16).toString('base64');
+    let hs = false, acc = Buffer.alloc(0);
+    const to = setTimeout(() => { s.destroy(); rej(new Error('WS 握手超时')); }, 5000);
+    s.on('connect', () => s.write('GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\nSec-WebSocket-Version: 13\r\n\r\n'));
+    s.on('data', d => {
+      if (hs) return;
+      acc = Buffer.concat([acc, d]);
+      if (acc.includes(Buffer.from('\r\n\r\n'))){ hs = true; clearTimeout(to); res(s); }
+    });
+    s.on('error', e => { clearTimeout(to); rej(e); });
+  });
+  const wsSend = (s, obj) => {
+    const payload = Buffer.from(JSON.stringify(obj));
+    const len = payload.length;
+    let hdr;
+    if (len < 126){ hdr = Buffer.alloc(2); hdr[0] = 0x81; hdr[1] = len; }
+    else if (len < 65536){ hdr = Buffer.alloc(4); hdr[0] = 0x81; hdr[1] = 126; hdr.writeUInt16BE(len, 2); }
+    else { hdr = Buffer.alloc(10); hdr[0] = 0x81; hdr[1] = 127; hdr.writeBigUInt64BE(BigInt(len), 2); }
+    s.write(Buffer.concat([hdr, payload]));
+  };
+  const s = await wsOpen();
+  s.on('error', () => {});
+  wsSend(s, { t: 'hello', v: 4, name: '位置落盘自检', role: 'host' });
+  await new Promise(r => setTimeout(r, 300));
+  wsSend(s, { t: 'world-upload', world: { name: 'P', planets: { '0': { mods: {}, machines: [], seed: 1, biome: 'green' } }, market: {}, flags: {} } });
+  await new Promise(r => setTimeout(r, 400));   // 等上传存档完成
+  wsSend(s, { t: 'pos', planet: 0, st: 'planet', p: [12, 34, 56], yaw: 0.5 });
+  await new Promise(r => setTimeout(r, 4500));  // 2s 节流 debounce + 写盘
+  const wj = JSON.parse(await readFile(join(NET_SAVE, 'world.json'), 'utf8'));
+  const rec = (wj.players || {})['位置落盘自检'];
+  if (!rec || !rec.pos || rec.pos.p[0] !== 12 || rec.pos.p[2] !== 56) throw new Error('pos 未落盘：players 记录缺失或坐标不符');
+  console.log('[net-server] 位置落盘自检 OK（pos 节流标脏并写入存档）');
+  wsSend(s, { t: 'reset-world' });   // 清理：还给浏览器套件一个空世界
+  await new Promise(r => setTimeout(r, 2500));
+  s.destroy();
+} catch (e){
+  console.error(`[net-server] 位置落盘自检失败：${e.message}`);
+  process.exit(1);
+}
 
 function arg(name, fallback) {
   // 支持 --name=value 与 --name value 两种写法

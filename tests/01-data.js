@@ -83,6 +83,24 @@ __SF_TEST__.suite('data', function (t, api) {
     A.ok(a.market && Object.keys(a.market).length > 0, 'market populated');
   });
 
+  t.test('biome sky 是天空色数组（不被浮翼配色覆盖），浮翼配色在 skywings', function () {
+    var B = api.defs.BIOMES;
+    var bad = [], noWing = [];
+    for (var k in B){
+      var s = B[k].sky;
+      if (!Array.isArray(s) || s.length !== 3 || !s.every(function (v) { return typeof v === 'number' && isFinite(v); })){
+        bad.push(k);
+      }
+    }
+    A.eq(bad.length, 0, 'every biome.sky is a numeric [r,g,b] array, bad: ' + bad.join(','));
+    // 5 个有高空浮翼的生态：配色挂在 skywings
+    var winged = ['lush', 'ocean', 'crystal', 'fungal', 'murk'];
+    for (var i = 0; i < winged.length; i++){
+      A.ok(B[winged[i]].skywings && B[winged[i]].skywings.body, 'skywings palette for ' + winged[i]);
+    }
+    A.eq(B.lush.sky.join(','), '0.48,0.72,0.95', 'lush sky array restored to original values');
+  });
+
   t.test('像素图集使用最近 mip 采样（近距硬边 / 远距消闪）', function () {
     A.eq(Tex.texture.magFilter, THREE.NearestFilter, 'atlas magFilter nearest');
     A.eq(Tex.texture.minFilter, THREE.NearestMipmapNearestFilter, 'atlas minFilter nearest-mipmap');

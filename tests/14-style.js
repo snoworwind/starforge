@@ -160,6 +160,16 @@ __SF_TEST__.suite('style', function (t, api) {
     A.ok(window.World.debugWaterTime > t0, 'water wave clock advances with update()');
   });
 
+  t.test('真实大气穹顶：开启后颜色 uniform 非黑（sky 字段不再被浮翼配色覆盖）', function () {
+    document.querySelector('#setRealAtmo button[data-q="on"]').onclick();
+    var d = window.Game.debugSkyDome;
+    A.ok(d && d.visible, 'sky dome built and visible');
+    A.ok(d.uZenith !== 0, 'uZenith color nonzero (was NaN-black), got 0x' + d.uZenith.toString(16));
+    A.ok(d.uHorizon !== 0, 'uHorizon color nonzero, got 0x' + d.uHorizon.toString(16));
+    document.querySelector('#setRealAtmo button[data-q="off"]').onclick();
+    A.ok(!window.Game.debugSkyDome.visible, 'dome hidden after off');
+  });
+
   t.test('天气粒子按生态生成且可开关', function () {
     var w = window.Game.debugWeather;
     A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));

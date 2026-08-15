@@ -3548,12 +3548,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v109';
+    bd.textContent = 'build v110';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v109';
+  window.__V_MAIN = 'v110';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4738,6 +4738,10 @@ const Game = (() => {
     // 天气诊断（测试用）
     get debugWeather(){ return weather ? { on: true, kind: World.biome && World.biome.key, n: weather.n } : { on: false }; },
     get weatherDefs(){ return WEATHER_DEFS; },
+    // 昼夜/大气穹顶诊断（测试用）
+    get debugDayTime(){ return dayTime; },
+    debugSetDayTime(v){ if (Number.isFinite(v)) dayTime = ((v % 1) + 1) % 1; },
+    get debugSkyDome(){ return skyDome ? { visible: skyDome.visible, uDay: skyDomeU.uDay.value, uSpace: skyDomeU.uSpace.value, uZenith: skyDomeU.uZenith.value.getHex(), uHorizon: skyDomeU.uHorizon.value.getHex() } : null; },
   };
   window.Game = api;
   return api;

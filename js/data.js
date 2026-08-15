@@ -273,11 +273,13 @@ const CREATURE_TYPES = {
   skywing: { w: 0.4, h: 0.3, d: 0.75, headW: 0.12, speed: 2.8, jump: false, fly: true },
 };
 // 部分生态的高空飞行生物配色（环境点缀：每 30~70s 在玩家上空生成一小群，盘旋远去）
-BIOMES.lush.sky    = { body: 0xe8e8dc, wing: 0x7ab8d8 };
-BIOMES.ocean.sky   = { body: 0xd8e8f0, wing: 0x5a9ac0 };
-BIOMES.crystal.sky = { body: 0xe0f8f4, wing: 0x8ad8e0 };
-BIOMES.fungal.sky  = { body: 0xe8d0f0, wing: 0xb08ad8 };
-BIOMES.murk.sky    = { body: 0xc8f0d8, wing: 0x5ac88a };
+// 注意：不能占用 sky 字段——sky 是生态天空色数组 [r,g,b]（背景/大气穹顶/入大气染色/太空大气壳共用），
+// 此前写成 BIOMES.*.sky = {body,wing} 把数组覆盖成对象 → b.sky[0]=undefined → NaN → 大气变黑
+BIOMES.lush.skywings    = { body: 0xe8e8dc, wing: 0x7ab8d8 };
+BIOMES.ocean.skywings   = { body: 0xd8e8f0, wing: 0x5a9ac0 };
+BIOMES.crystal.skywings = { body: 0xe0f8f4, wing: 0x8ad8e0 };
+BIOMES.fungal.skywings  = { body: 0xe8d0f0, wing: 0xb08ad8 };
+BIOMES.murk.skywings    = { body: 0xc8f0d8, wing: 0x5ac88a };
 // 每个生态一种特色生物（所有星球都有生物）
 BIOMES.lush.animal    = { body: 0x8a9e56, legs: 0x5e7038, eye: 0x2a2a2a, count: 10, name: '草原跳羚', type: 'strider' };
 BIOMES.desert.animal  = { body: 0xd8b878, legs: 0xa8895a, eye: 0x442200, count: 7, name: '沙壳甲虫', type: 'crab' };

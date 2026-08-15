@@ -569,38 +569,32 @@ const Factory = (() => {
   // ---------- 机器 tick ----------
   function furnaceTick(m, dt){
     const d = m.data;
-    // 燃烧
-    if (d.burn <= 0 && d.fuel && d.fuel.n > 0 && d.in && d.in.n > 0){
-      const r = RECIPES.find(r => r.where === 'furnace' && r.in[d.in.item]);
-      if (r){
-        d.burn = FUEL_VALUE[d.fuel.item] || 4;
-        d.burnMax = d.burn;
-        d.fuel.n--;
-        if (d.fuel.n <= 0) d.fuel = null;
-      }
+    const r = d.in && d.in.n > 0 ? RECIPES.find(r => r.where === 'furnace' && r.in[d.in.item]) : null;
+    const need = r ? r.in[d.in.item] : 0;
+    const canWork = !!(r && d.in.n >= need);
+    // 点火：原料足够一份才消耗燃料（不足一份时点火只会空烧不出货）
+    if (d.burn <= 0 && canWork && d.fuel && d.fuel.n > 0){
+      d.burn = FUEL_VALUE[d.fuel.item] || 4;
+      d.burnMax = d.burn;
+      d.fuel.n--;
+      if (d.fuel.n <= 0) d.fuel = null;
     }
     m.active = false;
-    if (d.burn > 0){
+    if (d.burn > 0 && canWork){
       d.burn -= dt;
-      if (d.in && d.in.n > 0){
-        const r = RECIPES.find(r => r.where === 'furnace' && r.in[d.in.item]);
-        if (r){
-          m.active = true;
-          d.prog += dt / r.time;
-          if (d.prog >= 1){
-            d.prog = 0;
-            const outItem = Object.keys(r.out)[0];
-            const need = r.in[d.in.item];
-            if (d.in.n >= need){
-              d.in.n -= need;
-              if (d.in.n <= 0) d.in = null;
-              if (!d.out) d.out = { item: outItem, n: 0 };
-              if (d.out.item === outItem) d.out.n += r.out[outItem];
-            }
-          }
-        }
-      } else d.prog = 0;
-    } else d.prog = Math.max(0, d.prog - dt * 0.3);
+      m.active = true;
+      d.prog += dt / r.time;
+      if (d.prog >= 1){
+        d.prog = 0;
+        d.in.n -= need;
+        if (d.in.n <= 0) d.in = null;
+        if (!d.out) d.out = { item: Object.keys(r.out)[0], n: 0 };
+        if (d.out.item === Object.keys(r.out)[0]) d.out.n += r.out[Object.keys(r.out)[0]];
+      }
+    } else {
+      // 无火/原料不足：燃烧暂停（不空耗燃料），进度冷却回退
+      d.prog = Math.max(0, d.prog - dt * 0.3);
+    }
     // 输出
     if (d.out && d.out.n > 0 && tryOutput(m, d.out.item)){
       d.out.n--;
@@ -921,7 +915,14 @@ const Factory = (() => {
       }
       if (m.type === 'reactor' && m.data.fuel > 0){ gen += POWER_GEN.reactor; m.data.fuel -= dt; m.active = true; }
       else if (m.type === 'reactor') m.active = false;
-      if (POWER_USE[m.type]) use += POWER_USE[m.type];
+      // 需电机器只在「有活可干」时计入需求：空闲装配机/无矿采矿机不再拉低全电网满足率
+      if (m.type === 'miner'){
+        if (World.getDef(m.x, m.y - 1, m.z).ore) use += POWER_USE.miner;
+      } else if (m.type === 'assembler' || m.type === 'refinery'){
+        const d = m.data;
+        const r = d && d.recipe ? RECIPE_BY_ID[d.recipe] : null;
+        if (r && Object.keys(r.in).every(k => (d.in[k] || 0) >= r.in[k])) use += POWER_USE[m.type];
+      }
     }
     const sat = use > 0 ? Math.min(1, gen / use) : 1;
     power = { gen: Math.round(gen), use, sat };

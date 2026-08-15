@@ -2990,8 +2990,8 @@ const Game = (() => {
       sunLight.position.copy(lref).addScaledVector(_skyDir, 180);
       sunLight.target.position.copy(lref);
       sunLight.intensity = 0.25 + day * 0.85;
-      ambLight.intensity = 0.16 + day * 0.24;
-      hemiLight.intensity = 0.15 + day * 0.4;
+      ambLight.intensity = 0.11 + day * 0.24;   // 夜间环境光略降：发光块的 emissive/点光源真正形成明暗层次
+      hemiLight.intensity = 0.11 + day * 0.4;
       const b = World.biome;
       const skyDay = new THREE.Color(b.sky[0], b.sky[1], b.sky[2]);
       const skyNight = new THREE.Color(0x070a18);
@@ -3539,12 +3539,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v103';
+    bd.textContent = 'build v104';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v103';
+  window.__V_MAIN = 'v104';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

@@ -60,6 +60,43 @@ __SF_TEST__.suite('style', function (t, api) {
     }
   });
 
+  t.test('发光方块：emissive 顶点通道 + 点光源按块色相（金珀不入池）', function () {
+    var p = api.pos();
+    var x = Math.floor(p[0]), z = Math.floor(p[2]);
+    var gy = api.topAt(x, z);
+    // 先只放金珀（glow 地形块）：自发光但不进点光源池
+    api.setBlock(x, gy + 1, z, 'amber');
+    window.World.stream(p[0], p[2]);
+    window.World.update(0.016, p[0], p[2]);
+    window.World.update(0.6, p[0], p[2]);
+    var lamps0 = window.World.debugLamps;
+    var anyOn0 = lamps0.some(function (l) { return l.on; });
+    A.ok(!anyOn0, 'amber terrain does not occupy point-light pool');
+    // 换上光源方块：emissive 顶点通道非零 + 暖白灯点亮
+    api.setBlock(x, gy + 1, z, 'lamp');
+    window.World.stream(p[0], p[2]);
+    window.World.update(0.016, p[0], p[2]);
+    window.World.update(0.6, p[0], p[2]);
+    var emFound = false;
+    for (var i = 0; i < window.World.group.children.length; i++) {
+      var m = window.World.group.children[i];
+      if (!m.geometry || !m.geometry.attributes || !m.geometry.attributes.aEm) continue;
+      var a = m.geometry.attributes.aEm;
+      for (var v = 0; v < a.count; v++) {
+        if (a.getX(v) > 0 || a.getY(v) > 0 || a.getZ(v) > 0) { emFound = true; break; }
+      }
+      if (emFound) break;
+    }
+    A.ok(emFound, 'lamp vertices carry non-zero emissive channel');
+    var lamps1 = window.World.debugLamps;
+    var lit = lamps1.filter(function (l) { return l.on; });
+    A.ok(lit.length >= 1, 'a point light lit for lamp block');
+    if (lit.length) A.eq(lit[0].color, 0xffd9a0, 'lamp light hue is warm white');
+    // 清场
+    api.setBlock(x, gy + 1, z, 'air');
+    window.World.stream(p[0], p[2]);
+  });
+
   t.test('天气粒子按生态生成且可开关', function () {
     var w = window.Game.debugWeather;
     A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));

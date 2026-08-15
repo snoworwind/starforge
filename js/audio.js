@@ -113,6 +113,9 @@ const Sound = (() => {
     osc('sine', 150, t + 0.05, 0.24, 0.2, null, 46);
     noise(t, 0.32, 0.26, 'lowpass', 1100, 110);
   };
+  S.sentinelAlert = () => { const t = ctx.currentTime;   // 守卫进入仇恨的警戒双音
+    osc('square', 1180, t, 0.07, 0.1); osc('square', 880, t + 0.09, 0.07, 0.1); osc('square', 1180, t + 0.18, 0.09, 0.1);
+  };
   S.shipDamage= () => { const t = ctx.currentTime; noise(t, 0.3, 0.3, 'lowpass', 1500, 200); osc('sawtooth', 120, t, 0.25, 0.25, null, 45); };
   S.dock      = () => { const t = ctx.currentTime;
     osc('sine', 220, t, 0.4, 0.16, null, 110); noise(t + 0.25, 0.2, 0.1, 'lowpass', 600, 150);

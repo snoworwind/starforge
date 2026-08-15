@@ -107,6 +107,7 @@ const Creatures = (() => {
     const eye = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.07, 0.03), eyeM);
     eye.position.set(0, 0.03, -0.26);
     g.add(eye);
+    g.userData.eye = eye;   // 蓄力前摇时红眼变亮
     const under = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, 0.1), darkM);
     under.position.set(0, -0.21, 0);
     g.add(under);
@@ -296,7 +297,7 @@ const Creatures = (() => {
   }
   function materializeSentinel(x, z, nid, rnd, ruinKey){
     const g = buildSentinel();
-    const rotors = g.userData.rotors;
+    const rotors = g.userData.rotors, eye = g.userData.eye;
     const gy = World.topAt(Math.floor(x), Math.floor(z));
     g.position.set(x, gy + 1 + 5, z);
     g.userData = {
@@ -311,8 +312,8 @@ const Creatures = (() => {
       speed: 2.4, radius: 0.55, foot: 0.5,
       animT: rnd() * 10,
       home: { x, z },
-      atkCd: 0, backoff: 0, aggro: false,
-      rotors,
+      atkCd: 0, backoff: 0, aggro: false, windup: 0,
+      rotors, eye,
       spawnT: FADE_IN_T,
     };
     g.scale.setScalar(0.01);
@@ -861,6 +862,14 @@ const Creatures = (() => {
     u.dir += (u.rnd() < 0.5 ? 1 : -1) * (Math.PI * 0.55 + u.rnd() * 0.9);
   }
 
+  // 守卫蓄力前摇：红眼变亮（命中后/脱离警戒复原）
+  function setSentinelEye(u){
+    if (u.eye && u.eye.material) u.eye.material.color.setHex(0xfff2f0);
+  }
+  function clearSentinelEye(u){
+    if (u.eye && u.eye.material) u.eye.material.color.setHex(0xff5533);
+  }
+
   // ---------- 飞行移动（无人机/浮翼）：悬浮高度保持 + 空中避障 + 敌对追击 ----------
   function flyMove(g, u, dt, plyPos){
     let moving = false;
@@ -870,9 +879,11 @@ const Creatures = (() => {
       if (d < u.aggroR && !u.aggro){
         u.aggro = true;
         u.dir = Math.atan2(dz, dx);
+        Sound.play('sentinelAlert');   // 警戒双音：玩家进入仇恨范围
       }
       if (u.aggro && d > u.aggroR + 6){
         u.aggro = false;   // 玩家脱离警戒 → 回巢巡逻
+        clearSentinelEye(u);
       }
       if (u.aggro){
         // 追击：俯冲贴近（高度压低），命中后后撤再冲
@@ -881,15 +892,29 @@ const Creatures = (() => {
         const back = u.backoff > 0;
         const mv = back ? -spd * 0.7 : spd;
         u.backoff -= dt;
-        g.position.x += Math.cos(u.dir) * mv * dt;
-        g.position.z += Math.sin(u.dir) * mv * dt;
-        moving = true;
-        if (!back && d < 1.15){
-          u.atkCd -= dt;
-          if (u.atkCd <= 0){
-            u.atkCd = 1.15;
-            u.backoff = 0.55;
-            if (window.Player && !Player.dead) Player.damage(2);
+        if (u.windup > 0){
+          // 攻击前摇：0.3s 悬停蓄力、红眼变亮（可被观察/躲避），随后俯冲击中
+          u.windup -= dt;
+          if (u.windup <= 0){
+            clearSentinelEye(u);
+            if (d < 1.9 && window.Player && !Player.dead){
+              Player.damage(2);
+              Sound.play('laserHit');
+              Player.spawnParticles(g.position.x, g.position.y - 0.25, g.position.z, 0x66ccff, 6);   // 电击火花
+              u.backoff = Math.max(u.backoff, 0.55);
+            }
+          }
+        } else {
+          g.position.x += Math.cos(u.dir) * mv * dt;
+          g.position.z += Math.sin(u.dir) * mv * dt;
+          moving = true;
+          if (!back && d < 1.15){
+            u.atkCd -= dt;
+            if (u.atkCd <= 0){
+              u.atkCd = 1.15;
+              u.windup = 0.3;
+              setSentinelEye(u);   // 蓄力：红眼发光
+            }
           }
         }
       } else {

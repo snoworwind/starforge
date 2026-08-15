@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>STARFORGE 星穹熔炉 — 体素星际工厂</title>
-<link rel="stylesheet" href="css/style.css?v=st100">
+<link rel="stylesheet" href="css/style.css?v=st101">
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -451,40 +451,42 @@ window.addEventListener('unhandledrejection', e => {
   console.error('[GAME PROMISE ERROR]', e.reason && (e.reason.stack || e.reason.message || e.reason));
 });
 </script>
-<script src="js/three.min.js?v=st100"></script>
-<script src="js/GLTFLoader.js?v=st100"></script>
-<script src="js/SVGLoader.js?v=st100"></script>
-<script src="js/models.js?v=st100"></script>
-<script src="js/modellib.js?v=st100"></script>
-<script src="js/humanoid.js?v=st100"></script>
-<script src="js/textures.js?v=st100"></script>
-<script src="js/audio.js?v=st100"></script>
-<script src="js/data.js?v=st100"></script>
-<script src="js/world.js?v=st100"></script>
-<script src="js/factory.js?v=st100"></script>
-<script src="js/creatures.js?v=st100"></script>
-<script src="js/player.js?v=st100"></script>
-<script src="js/space.js?v=st100"></script>
-<script src="js/station.js?v=st100"></script>
-<script src="js/savestore.js?v=st100"></script>
-<script src="js/ui.js?v=st100"></script>
-<script src="js/net.js?v=st100"></script>
-<script src="js/main.js?v=st100"></script>
+<script src="js/three.min.js?v=st101"></script>
+<script src="js/GLTFLoader.js?v=st101"></script>
+<script src="js/SVGLoader.js?v=st101"></script>
+<script src="js/models.js?v=st101"></script>
+<script src="js/modellib.js?v=st101"></script>
+<script src="js/humanoid.js?v=st101"></script>
+<script src="js/textures.js?v=st101"></script>
+<script src="js/audio.js?v=st101"></script>
+<script src="js/data.js?v=st101"></script>
+<script src="js/world.js?v=st101"></script>
+<script src="js/factory.js?v=st101"></script>
+<script src="js/creatures.js?v=st101"></script>
+<script src="js/player.js?v=st101"></script>
+<script src="js/space.js?v=st101"></script>
+<script src="js/station.js?v=st101"></script>
+<script src="js/savestore.js?v=st101"></script>
+<script src="js/ui.js?v=st101"></script>
+<script src="js/net.js?v=st101"></script>
+<script src="js/main.js?v=st101"></script>
 <script>
 // 版本自检（内联于入口文档）：确认浏览器实际加载的模块版本；缺失/不匹配 = 在跑旧缓存或别的目录副本
+// 基准 = 最后加载的 main.js 版本（__V_MAIN），不再硬编码：跟随版本同步，杜绝自检本身腐烂
 (function(){
-  var need = 'v88';
+  var main = window.__V_MAIN || '未加载!';
   var got = {
-    main: window.__V_MAIN || '旧版!',
+    main: main,
     station: window.__V_STATION || (window.Station ? '旧版!' : '未加载!'),
     space: window.__V_SPACE || '旧版!',
   };
-  var bad = got.main !== need || got.station !== need || got.space !== need;
+  var bad = main === '未加载!' || got.station !== main || got.space !== main;
   var d = document.createElement('div');
+  d.id = 'verBadge';
   d.style.cssText = 'position:fixed;left:6px;bottom:4px;font:10px monospace;z-index:99999;pointer-events:none;color:' + (bad ? '#ff5a4a' : 'rgba(140,180,200,0.5)');
   d.textContent = bad
     ? ('⚠ 文件版本不齐: main=' + got.main + ' station=' + got.station + ' space=' + got.space + ' → 请 Ctrl+F5 强刷或确认打开的是最新目录')
-    : ('modules ' + need + ' ok');
+    : ('modules ' + main + ' ok');
   document.body.appendChild(d);
 })();
 </script>
@@ -493,7 +495,7 @@ window.addEventListener('unhandledrejection', e => {
 (function(){
   if (/\btest\b/.test(location.search + location.hash)){
     var s = document.createElement('script');
-    s.src = 'js/test-api.js?v=st100';
+    s.src = 'js/test-api.js?v=st101';
     document.body.appendChild(s);
   }
 })();

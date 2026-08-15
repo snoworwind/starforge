@@ -1060,6 +1060,23 @@ const World = (() => {
     }
     return 0;
   }
+  // 只读地表高度：区块未加载返回 null（绝不触发生成）——供生物 AI/特效等每帧查询用，
+  // 避免 AI 移动把地形生成拖进主循环造成卡顿
+  function topAtNoGen(x, z){
+    x = Math.floor(x); z = Math.floor(z);
+    const cx = cf(x), cz = cf(z);
+    const c = chunks.get(ckey(cx, cz));
+    if (!c) return null;
+    const base = lidx(x - cx * CHUNK, 0, z - cz * CHUNK);
+    for (let y = WORLD_H - 1; y >= 0; y--){
+      const id = c.data[base + y * (CHUNK * CHUNK)];
+      if (id){
+        const d = BLOCK_BY_ID[id];
+        if (d && (d.solid || d.liquid)) return y;
+      }
+    }
+    return 0;
+  }
   // ---------- 地表颜色采样（星球贴图贴合方块地形用；区块未加载返回 null，绝不触发生成）----------
   const tileColorCache = {};
   function tileAvgColor(name){
@@ -1371,7 +1388,7 @@ const World = (() => {
     get seed(){ return seed; },
     get materials(){ return [solidMat, waterMat]; },
     get farMesh(){ return ensureFarMesh(); },
-    init, pregen, stream, update, get, set, getDef, raycast, topAt, findSpawn,
+    init, pregen, stream, update, get, set, getDef, raycast, topAt, topAtNoGen, findSpawn,
     serialize, serializeChunk, chunkModified, dispose, inBounds, setCurve, setScanPulse, surfaceColorAt, mapColorAt, mapColorRGB, mapHeightAt,
     pendingSaveCount, takePendingSave, requeueSave, chunkIsSaved,
     setViewDist, setFarDist, setShadows,

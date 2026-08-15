@@ -409,9 +409,11 @@ const Creatures = (() => {
       u.dir += Math.sin(u.animT * 0.35) * 0.22 * dt;
       g.position.x += Math.cos(u.dir) * u.speed * dt;
       g.position.z += Math.sin(u.dir) * u.speed * dt;
-      const gy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
-      const targetY = gy + 1 + u.hoverAlt + Math.sin(u.animT * 0.8) * 1.2;
-      g.position.y += (targetY - g.position.y) * Math.min(1, dt * 1.5);
+      const gy = topAtRo(Math.floor(g.position.x), Math.floor(g.position.z));
+      if (gy !== null){
+        const targetY = gy + 1 + u.hoverAlt + Math.sin(u.animT * 0.8) * 1.2;
+        g.position.y += (targetY - g.position.y) * Math.min(1, dt * 1.5);
+      }
       g.rotation.y = -u.dir - Math.PI / 2;
       g.rotation.z = Math.sin(u.animT * 0.8) * 0.12;
       // 拍翼
@@ -425,6 +427,20 @@ const Creatures = (() => {
 
   // 地形判断：地面列顶是否是树木/液体（生物不生成在树上/水里）
   function solidDefAt(x, y, z){ return World.getDef(Math.floor(x), Math.floor(y), Math.floor(z)); }
+
+  // 每帧 AI 地形查询：只读（未加载区块返回 null，绝不触发生成）+ 按帧缓存同一列结果。
+  // 此前每只生物每帧 2~4 次 topAt，每次都可能 genChunk + 全高扫描——AI 会把地形生成拖进主循环造成卡顿。
+  const topCache = new Map();   // 'x,z' -> { y, frame }
+  function topAtRo(x, z){
+    x = Math.floor(x); z = Math.floor(z);
+    const k = x + ',' + z;
+    const e = topCache.get(k);
+    if (e && e.frame === tickFrame) return e.y;
+    if (topCache.size > 8192) topCache.clear();
+    const y = World.topAtNoGen(x, z);
+    topCache.set(k, { y, frame: tickFrame });
+    return y;
+  }
 
   // plyPos: Vector3, biome: 星球生态对象
   function update(dt, plyPos, biome){
@@ -829,7 +845,8 @@ const Creatures = (() => {
   // 1 格以内的台阶允许直接走上（生物不会被地形卡死堆积）；树干列 topAt 是树冠（4~6 格高）→ 天然被挡
   function blockedAhead(u, nx, nz, curGy){
     const fx = Math.floor(nx), fz = Math.floor(nz);
-    const newGy = World.topAt(fx, fz);
+    const newGy = topAtRo(fx, fz);
+    if (newGy === null) return true;   // 目标区块未加载：视为阻挡（AI 绝不触发生成）
     const maxStep = 1.05;
     if (newGy > curGy + maxStep) return true;
     const bodyH = Math.max(1, (u.typeDef && u.typeDef.h) || 1.4);
@@ -892,11 +909,13 @@ const Creatures = (() => {
         moving = true;
       }
     }
-    // 悬浮高度：贴地形（+hoverAlt）+ 轻微浮动；追击时压低 1.5 格
-    const gy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
-    const alt = u.hoverAlt + Math.sin(u.animT * 1.3) * 0.45 + (u.aggro ? -1.5 : 0);
-    const targetY = gy + 1 + alt;
-    g.position.y += (targetY - g.position.y) * Math.min(1, dt * 3);
+    // 悬浮高度：贴地形（+hoverAlt）+ 轻微浮动；追击时压低 1.5 格（未加载列保持当前高度）
+    const gy = topAtRo(Math.floor(g.position.x), Math.floor(g.position.z));
+    if (gy !== null){
+      const alt = u.hoverAlt + Math.sin(u.animT * 1.3) * 0.45 + (u.aggro ? -1.5 : 0);
+      const targetY = gy + 1 + alt;
+      g.position.y += (targetY - g.position.y) * Math.min(1, dt * 3);
+    }
     // 空中避障：机身高度有实心方块 → 快速爬升
     const by = Math.floor(g.position.y);
     for (let y = by; y <= by + 1; y++){
@@ -967,7 +986,11 @@ const Creatures = (() => {
       } else if (u.state === 'walk'){
         let nx = g.position.x + Math.cos(u.dir) * u.speed * dt;
         let nz = g.position.z + Math.sin(u.dir) * u.speed * dt;
-        const curGy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
+        const curGy = topAtRo(Math.floor(g.position.x), Math.floor(g.position.z));
+        if (curGy === null){
+          // 所在区块未加载（理论上不常见）：本帧不移动，避免触发地形生成
+          nx = g.position.x; nz = g.position.z;
+        }
         if (u.villager){
           // 村民：漫游锚定村庄（离村心 10 格外折返）
           const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
@@ -977,7 +1000,7 @@ const Creatures = (() => {
           const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
           if (hx * hx + hz * hz > 26 * 26) u.dir = Math.atan2(hz, hx);
         }
-        // 前方阻挡（树木/墙体/高台）→ 先尝试沿墙滑动，滑不动再转向（避免顶墙堆积）
+        // 前方阻挡（树木/墙体/高台/未加载区块）→ 先尝试沿墙滑动，滑不动再转向（避免顶墙堆积）
         if (blockedAhead(u, nx, nz, curGy)){
           const sx = g.position.x + Math.cos(u.dir) * u.speed * dt;
           if (!blockedAhead(u, sx, g.position.z, curGy)){
@@ -994,13 +1017,18 @@ const Creatures = (() => {
         }
         // 贴地（仅落地时吸附；空中交给重力，避免跳跃/坠崖被逐帧拉回地面）
         if (u.onGround){
-          const gy = World.topAt(Math.floor(nx), Math.floor(nz));
-          const targetY = gy + 1 + u.foot;
-          if (targetY < g.position.y - 0.5){
-            u.onGround = false;   // 前方悬空 → 转入自由落体
-            g.position.set(nx, g.position.y, nz);
+          const gy = topAtRo(Math.floor(nx), Math.floor(nz));
+          if (gy === null){
+            // 目标列未加载：不吸附不移动（下帧再试）
+            nx = g.position.x; nz = g.position.z;
           } else {
-            g.position.set(nx, THREE.MathUtils.lerp(g.position.y, targetY, dt * 6), nz);
+            const targetY = gy + 1 + u.foot;
+            if (targetY < g.position.y - 0.5){
+              u.onGround = false;   // 前方悬空 → 转入自由落体
+              g.position.set(nx, g.position.y, nz);
+            } else {
+              g.position.set(nx, THREE.MathUtils.lerp(g.position.y, targetY, dt * 6), nz);
+            }
           }
         } else {
           g.position.x = nx; g.position.z = nz;
@@ -1020,12 +1048,14 @@ const Creatures = (() => {
         if (!u.onGround){
           u.jumpVel -= 20 * dt;
           g.position.y += u.jumpVel * dt;
-          const below = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
-          const floorY = below + 1 + u.foot;
-          if (g.position.y <= floorY && u.jumpVel <= 0){
-            g.position.y = floorY;
-            u.jumpVel = 0;
-            u.onGround = true;
+          const below = topAtRo(Math.floor(g.position.x), Math.floor(g.position.z));
+          if (below !== null){   // 未加载列：维持下落，不触发生成
+            const floorY = below + 1 + u.foot;
+            if (g.position.y <= floorY && u.jumpVel <= 0){
+              g.position.y = floorY;
+              u.jumpVel = 0;
+              u.onGround = true;
+            }
           }
         }
       }

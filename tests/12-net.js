@@ -76,6 +76,15 @@ __SF_TEST__.suite('net', function (t, api) {
     try { r2 = await fetch(HTTP + '/不存在.html'); }
     catch (e) { throw new Error('fetch#3 ' + e.message + ' | ' + e.name); }
     A.eq(r2.status, 404, '未知文件 404（跨域可读）');
+    // 敏感文件不得经静态服务器暴露：配置文件含服务器密码，世界存档含主机密钥与玩家数据
+    var r3 = await fetch(HTTP + '/server-config.json');
+    A.eq(r3.status, 404, 'server-config.json 不可读（' + r3.status + '）');
+    var r4 = await fetch(HTTP + '/package.json');
+    A.eq(r4.status, 404, 'package.json 不可读（' + r4.status + '）');
+    var r5 = await fetch(HTTP + '/server.mjs');
+    A.eq(r5.status, 404, 'server.mjs 源码不可读（' + r5.status + '）');
+    var r6 = await fetch(HTTP + '/.git/config');
+    A.eq(r6.status, 403, '.git 不可读（' + r6.status + '）');
     // 路径穿越防护由 test/run.mjs 用原始 TCP 请求自检（浏览器会规范化 URL，无法在页面内测）
   });
 

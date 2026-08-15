@@ -800,7 +800,6 @@ function handleText(c, text){
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -809,14 +808,14 @@ const MIME = {
   '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
-  '.json': 'application/json; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8',
-  '.md': 'text/plain; charset=utf-8',
   '.glb': 'model/gltf-binary',
   '.wasm': 'application/wasm',
   '.mp3': 'audio/mpeg',
   '.ogg': 'audio/ogg',
   '.wav': 'audio/wav',
+  // 注意：故意不含 .json/.txt/.md/.mjs 与无扩展名文件——静态根目录下存在
+  // server-config.json（服务器密码）、save/world.json（主机密钥/玩家数据）、.git 等
+  // 敏感文件，任何扩展名兜底（octet-stream）都会把它们暴露给任何访客。
 };
 
 function sanitizeMarks(pids){
@@ -850,19 +849,34 @@ function serveHttp(req, res){
     }
     if (pathname === '/') pathname = '/index.html';
     const rel = pathname.replace(/^\/+/, '');
+    const ERR = { 'Access-Control-Allow-Origin': '*' };   // 错误/公开资源保持可跨域读取状态码；敏感内容绝不返回 200
+    // 隐藏文件/目录（.git、.e2e-save 等）一律拒绝
+    if (rel.split(/[\\/]+/).some(seg => seg.startsWith('.'))){
+      res.writeHead(403, ERR); res.end('403 Forbidden'); return;
+    }
     const full = path.resolve(__dirname, rel);
     const rootBound = __dirname + path.sep;
     if (!((full === __dirname) || full.startsWith(rootBound))){
-      res.writeHead(403, { 'Access-Control-Allow-Origin': '*' });
-      res.end('403 Forbidden'); return;
+      res.writeHead(403, ERR); res.end('403 Forbidden'); return;
+    }
+    // 存档目录整树拒绝（world.json 内含主机密钥与玩家数据）
+    const saveBound = path.resolve(CFG.saveDir);
+    if (full === saveBound || full.startsWith(saveBound + path.sep)){
+      res.writeHead(403, ERR); res.end('403 Forbidden'); return;
     }
     if (!fs.existsSync(full) || !fs.statSync(full).isFile()){
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(404, Object.assign({ 'Content-Type': 'text/plain; charset=utf-8' }, ERR));
       res.end('404 Not Found');
       return;
     }
     const ext = path.extname(full).toLowerCase();
-    const ct = MIME[ext] || 'application/octet-stream';
+    const ct = MIME[ext];
+    if (!ct){
+      // 白名单外的扩展名（.json/.md/.mjs/无扩展名等）一律 404，不提供 octet-stream 兜底
+      res.writeHead(404, Object.assign({ 'Content-Type': 'text/plain; charset=utf-8' }, ERR));
+      res.end('404 Not Found');
+      return;
+    }
     const cache = ext === '.html' ? 'no-cache' : 'max-age=86400';
     const body = fs.readFileSync(full);
     res.writeHead(200, {

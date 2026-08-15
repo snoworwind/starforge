@@ -57,6 +57,17 @@ const Creatures = (() => {
     return h;
   }
   function creatureNid(cx, cz, i){ return batchSeedOf(cx, cz) * 64 + i; }
+  // 行为参数统一由兽群 nid 确定性派生：新建 / 读档恢复 / 注册补全三路同源，
+  // 跨客户端一致——读档不再用 Math.random 占位（此前各端 animT 相位漂移、速度朝向错误）
+  function herdParams(nid){
+    const rnd = mulberry32(nid);
+    return {
+      speed: 0.5 + rnd() * 0.5,      // 归一化倍率，物化时乘 typeDef.speed
+      dir: rnd() * Math.PI * 2,
+      timer: 1 + rnd() * 3,
+      animT: rnd() * 10,
+    };
+  }
   function villagerNid(vx, vz, i){
     let h = (World.seed ^ 0x7A9E1) >>> 0;
     h = Math.imul(h ^ vx, 374761393);
@@ -536,10 +547,8 @@ const Creatures = (() => {
       const nid = creatureNid(cx, cz, herdIdx);
       const existing = herds.get(nid);
       if (existing){
-        // 存档恢复的兽群：用确定性参数补全行为数据，并标记占用
+        // 存档恢复的兽群：行为参数已由 nid 确定性派生（herdParams），仅标记占用
         st.mask |= (1 << herdIdx);
-        const c = cands[herdIdx];
-        existing.speed = c.speed; existing.dir = c.dir; existing.timer = c.timer; existing.animT = c.animT;
       } else {
         createHerd(st, cands[herdIdx]);
       }
@@ -577,10 +586,11 @@ const Creatures = (() => {
         const x = Number.isFinite(e[3]) ? e[3] / 10 : 0, z = Number.isFinite(e[4]) ? e[4] / 10 : 0;
         const hx = Number.isFinite(e[6]) ? e[6] / 10 : x, hz = Number.isFinite(e[7]) ? e[7] / 10 : z;
         const nid = creatureNid(e[0], e[1], e[2]);
+        const bp = herdParams(nid);
         herds.set(nid, {
           nid, cx: e[0], cz: e[1], candIdx: e[2],
           x, z, hp: e[5] | 0, homeX: hx, homeZ: hz, g: null, first: false,
-          speed: 1, dir: 0, timer: 1, animT: Math.random() * 10,   // 注册时由确定性候选补全
+          speed: bp.speed, dir: bp.dir, timer: bp.timer, animT: bp.animT,
         });
       }
     }
@@ -590,10 +600,11 @@ const Creatures = (() => {
   // 距玩家 >128m 只是卸载休眠，回来时原样重载 → 可围栏圈养、建设农场
   function createHerd(st, c){
     const nid = creatureNid(st.cx, st.cz, c.i);
+    const bp = herdParams(nid);
     herds.set(nid, {
       nid, cx: st.cx, cz: st.cz, candIdx: c.i,
       x: c.x, z: c.z, homeX: c.x, homeZ: c.z, hp: 4, g: null, first: true,
-      speed: c.speed, dir: c.dir, timer: c.timer, animT: c.animT,
+      speed: bp.speed, dir: bp.dir, timer: bp.timer, animT: bp.animT,
     });
     st.mask |= (1 << c.i);
     st.herdCount++;
@@ -613,7 +624,7 @@ const Creatures = (() => {
     const glbClips = g.userData.clips || null;
     g.userData = {
       nid: herd.nid, rnd: mulberry32(herd.nid),   // 联机：确定性行为随机源（跨客户端一致）
-      speed: herd.speed,
+      speed: (typeDef.speed || 1) * herd.speed,   // 记录存归一化倍率，物化时乘物种速度
       dir: herd.dir,
       state: 'idle', timer: herd.timer,
       jumpVel: 0, onGround: true, jumpCd: 0,

@@ -67,6 +67,24 @@ const Net = (() => {
   function saveHostKey(host, port, key){
     try { localStorage.setItem(hostKeyStoreKey(host, port), String(key || '')); } catch(e){}
   }
+  // ---------- 身份令牌（服务器按名字持久化档案；令牌防同名冒领） ----------
+  function tokenStoreKey(host, port){
+    return 'starforge_net_tokens_' + String(host || '').trim() + ':' + port;
+  }
+  function storedToken(host, port, name){
+    try {
+      const o = JSON.parse(localStorage.getItem(tokenStoreKey(host, port)) || '{}');
+      return (o && o[name]) || '';
+    } catch(e){ return ''; }
+  }
+  function saveToken(host, port, name, t){
+    try {
+      const k = tokenStoreKey(host, port);
+      const o = JSON.parse(localStorage.getItem(k) || '{}');
+      o[name] = t;
+      localStorage.setItem(k, JSON.stringify(o));
+    } catch(e){}
+  }
   function pickName(){
     const el = document.getElementById('netName');
     if (el && el.value.trim()) return el.value.trim();
@@ -92,8 +110,10 @@ const Net = (() => {
         // 主机：出示本机保存的所有权密钥（服务器据此裁定实际角色，防伪造主机身份）
         let u;
         try { u = new URL(url); } catch(e){ u = { hostname: defaultAddr(), port: String(WS_PORT) }; }
-        const hello = { t: 'hello', v: 3, name: pickName(), role: roleHint, password: password(), app: (window.Player && Player.appearance) || null };
+        const hello = { t: 'hello', v: 4, name: pickName(), role: roleHint, password: password(), app: (window.Player && Player.appearance) || null };
         if (roleHint === 'host') hello.hostKey = storedHostKey(u.hostname, u.port);
+        // 身份令牌：出示本机保存的名字令牌，服务器据此放行同名档案
+        hello.token = storedToken(u.hostname, u.port, pickName());
         broadcast(hello);
       };
       ws2.onmessage = e => {
@@ -112,6 +132,11 @@ const Net = (() => {
           serverInfo = { svName: m.svName, motd: m.motd, hasWorld: m.hasWorld, worldName: m.worldName };
           connected = true;
           ensurePatched();
+          // 保存服务器签发的身份令牌（按服务器确认后的名字；重名 #2 去重时同时记在原名下）
+          if (m.token){
+            let u;
+            try { u = new URL(url); saveToken(u.hostname, u.port, myName, m.token); if (myName !== pickName()) saveToken(u.hostname, u.port, pickName(), m.token); } catch(e){}
+          }
           try { localStorage.setItem(NAME_KEY, myName.replace(/#\d+$/, '')); } catch(e2){}
           // 房主中途（已在游戏里）创建房间：服务器无世界时立即上传本机世界
           if (role === 'host' && !m.hasWorld && window.Game && gameReady() && Game.buildNetWorld){
@@ -130,7 +155,7 @@ const Net = (() => {
         }
         if (m.t === 'ws-err'){
           clearTimeout(to);
-          const why = m.reason === 'auth' ? '密码错误' : m.reason === 'version' ? '版本不匹配，请 Ctrl+F5 强刷页面' : m.reason === 'full' ? '服务器已满' : '被服务器拒绝';
+          const why = m.reason === 'auth' ? '密码错误' : m.reason === 'version' ? '版本不匹配，请 Ctrl+F5 强刷页面' : m.reason === 'full' ? '服务器已满' : m.reason === 'name-taken' ? '该名字在本服务器已有档案：请换一个名字，或使用创建该档案时的浏览器/设备' : '被服务器拒绝';
           fail(new Error(why));
           return;
         }

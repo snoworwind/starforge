@@ -97,7 +97,7 @@ try {
   // 1) 正常分片：hello 拆两帧应被重组并回应
   const s1 = await wsOpen();
   s1.write(frame(1, Buffer.from('{"t":"he'), false));
-  s1.write(frame(0, Buffer.from('llo","v":3,"name":"分片自检"}'), true));
+  s1.write(frame(0, Buffer.from('llo","v":4,"name":"分片自检"}'), true));
   const okFrag = await new Promise(res => {
     let acc = Buffer.alloc(0);
     s1.on('data', d => { acc = Buffer.concat([acc, d]); if (acc.includes(Buffer.from('"ws-id"'))) res(true); });
@@ -164,7 +164,7 @@ try {
   };
   const s = await wsOpen();
   s.on('error', () => {});
-  wsSend(s, { t: 'hello', v: 3, name: '重置自检', role: 'host' });
+  wsSend(s, { t: 'hello', v: 4, name: '重置自检', role: 'host' });
   await new Promise(r => setTimeout(r, 300));
   // 60 个整块 RLE（交替 [1,0,1,1]）≈ 6MB 世界上传包：让 JSON.stringify + 写盘耗时足够容纳重置窗口
   const rle = [];

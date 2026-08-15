@@ -300,9 +300,8 @@ const Tex = (() => {
   tile('belt', (px, r) => {
     speckle(px, r, ['#3a4148','#333a40','#424a52']);
     for (let x = 0; x < 16; x++){ px(x,0,'#586269'); px(x,15,'#586269'); }
-    // 黄色箭头纹（滚动动画用）
+    // 黄色箭头纹（滚动动画用）：两组明确的 V 形箭头，删去重复绘制的死分支
     for (const oy of [2, 10]){
-      for (let i = 0; i < 5; i++){ px(3+i, oy+4-i>oy? oy+i : oy, '#ffcf4d'); }
       px(3,oy,'#ffcf4d');px(4,oy+1,'#ffcf4d');px(5,oy+2,'#ffcf4d');px(4,oy+3,'#ffcf4d');px(3,oy+4,'#ffcf4d');
       px(9,oy,'#e6b23a');px(10,oy+1,'#e6b23a');px(11,oy+2,'#e6b23a');px(10,oy+3,'#e6b23a');px(9,oy+4,'#e6b23a');
     }
@@ -474,7 +473,7 @@ const Icons = (() => {
   function flatIcon(tileName){
     const c = newC(); const ctx = c.getContext('2d');
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(Tex.tileCanvas(tileName), 0, 0, 16, 16, 2, 2, 28, 28);
+    ctx.drawImage(Tex.tileCanvas(tileName), 0, 0, 16, 16, 0, 0, 32, 32);   // 16→32 整数 2×（此前 1.75× 产生像素大小不一的锯齿）
     return c;
   }
   // 锭
@@ -624,7 +623,7 @@ const Icons = (() => {
     c.getContext('2d').drawImage(src, 0, 0);
     return c;
   }
-  return { get, img };
+  return { get, img, flat: flatIcon };
 })();
 
 /* ============================================================
@@ -774,8 +773,10 @@ const StationTex = (() => {
     const key = name + '_' + repX + '_' + repY;
     if (texCache[key]) return texCache[key];
     const t = new THREE.CanvasTexture(tiles[name]);
-    t.magFilter = THREE.LinearFilter;
-    t.minFilter = THREE.LinearMipmapLinearFilter;   // 远距平滑，消除闪烁
+    // 像素风统一：近距最邻近硬边（不再 Linear 糊成一团）；远距最近 mip 消除闪烁
+    t.magFilter = THREE.NearestFilter;
+    t.minFilter = THREE.NearestMipmapNearestFilter;
+    t.generateMipmaps = true;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.repeat.set(repX || 1, repY || 1);
     texCache[key] = t;

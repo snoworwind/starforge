@@ -425,4 +425,4 @@ const Station = (() => {
   };
 })();
 window.Station = Station;
-window.__V_STATION = 'v105';
+window.__V_STATION = 'v106';

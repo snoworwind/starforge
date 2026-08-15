@@ -97,6 +97,26 @@ __SF_TEST__.suite('style', function (t, api) {
     window.World.stream(p[0], p[2]);
   });
 
+  t.test('空间站贴图最近采样 + flatIcon 2× 整数缩放', function () {
+    var st = window.StationTex && StationTex.tex('panel_a');
+    A.ok(st, 'station texture exists');
+    A.eq(st.magFilter, THREE.NearestFilter, 'station magFilter nearest (与方块像素风一致)');
+    A.eq(st.minFilter, THREE.NearestMipmapNearestFilter, 'station minFilter nearest-mip');
+    A.ok(st.generateMipmaps, 'station mipmaps on');
+    var c = Icons.flat('stone');
+    A.eq(c.width, 32, 'flatIcon canvas 32px wide');
+    A.eq(c.height, 32, 'flatIcon canvas 32px tall');
+    // 2× 整数放大：每个源像素行精确展开为 2 行（1.75× 会产生参差不齐的行）
+    var ctx = c.getContext('2d');
+    var col = ctx.getImageData(0, 0, 1, 32).data;
+    var uniform = true;
+    for (var y = 0; y < 32; y += 2){
+      var a = (y) * 4, b = (y + 1) * 4;
+      if (col[a] !== col[b] || col[a + 1] !== col[b + 1] || col[a + 2] !== col[b + 2]){ uniform = false; break; }
+    }
+    A.ok(uniform, 'each source pixel row expands to an exact 2-row block');
+  });
+
   t.test('天气粒子按生态生成且可开关', function () {
     var w = window.Game.debugWeather;
     A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));

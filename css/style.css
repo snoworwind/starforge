@@ -557,8 +557,8 @@ canvas#game{position:fixed;inset:0;display:block;image-rendering:pixelated}
     100% 100%,0 100%,0 calc(100% - 18px),2px calc(100% - 18px),2px calc(100% - 2px),18px calc(100% - 2px),18px 100%,0 100%)}
 
 /* ============ 联机：聊天 / 玩家列表 / HUD 状态 ============ */
-#netHud{position:absolute;top:14px;right:16px;font-family:var(--mono);font-size:11px;color:var(--dim);
-  letter-spacing:1px;text-align:right;text-shadow:0 1px 3px #000;pointer-events:none;max-width:60vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#netHud{position:absolute;top:14px;left:16px;font-family:var(--mono);font-size:11px;color:var(--dim);
+  letter-spacing:1px;text-align:left;text-shadow:0 1px 3px #000;pointer-events:none;max-width:60vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #chatBox{position:fixed;left:14px;bottom:118px;width:min(430px,44vw);z-index:60;pointer-events:none;
   display:flex;flex-direction:column;gap:2px;opacity:0;transition:opacity .25s;font-family:var(--mono)}
 #chatBox.show{opacity:1}
@@ -569,7 +569,7 @@ canvas#game{position:fixed;inset:0;display:block;image-rendering:pixelated}
   background:rgba(6,12,20,.88);border:1px solid var(--cyan-d);border-left:3px solid var(--cyan);color:var(--txt);
   padding:8px 10px;outline:none;box-shadow:0 0 16px #00000099}
 #chatInput::placeholder{color:var(--dim)}
-#playersPanel{position:fixed;top:70px;right:16px;width:min(340px,80vw);z-index:70;
+#playersPanel{position:fixed;top:70px;right:16px;width:min(340px,80vw);z-index:160;
   background:linear-gradient(165deg,rgba(7,15,26,.94),rgba(9,19,32,.9));border:1px solid var(--cyan-d);
   clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100% - 14px))}
 #playersPanel .panel-head{display:flex;justify-content:space-between;align-items:center;

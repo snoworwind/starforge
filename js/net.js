@@ -680,6 +680,7 @@ const Net = (() => {
     input.placeholder = '输入消息，回车发送（/help 查看命令）';
     input.autocomplete = 'off';
     input.spellcheck = false;
+    input.classList.add('hidden');   // 初始隐藏：此前收到第一条消息时输入框凭空出现在画面下方
     document.body.appendChild(chatBox);
     document.body.appendChild(input);
     chatInput = input;
@@ -827,6 +828,7 @@ const Net = (() => {
     hostRoom, joinRoom, disconnect, tick, onWorldReady, resetWorld, getRemotes, getPlayers,
     requestTp, defaultAddr, sendChat(text){ if (connected) broadcast({ t: 'chat', text }); },
     openChat, closeChat, isChatOpen, togglePlayers, addChatLine,
+    ensureChatUI, ensurePlayersUI,
     timeSynced, syncedTime,
     get role(){ return role; },
     get myId(){ return myId; },

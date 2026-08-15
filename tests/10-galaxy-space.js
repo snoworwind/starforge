@@ -33,4 +33,28 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
       A.ok(tx.generateMipmaps, 'planet ' + i + ' generates mipmaps');
     }
   });
+
+  // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
+  // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
+  t.test('seamless atmosphere entry loads target planet biome', async function () {
+    for (var i = 0; i < [1, 2, 3, 4].length; i++) {
+      var pid = [1, 2, 3, 4][i];
+      var pd = api.defs.SYSTEM_PLANETS[pid];
+      window.Game.tpTo(pid, null, 'space', 'test');
+      // 飞船直接放进目标星球大气握手高度内（表面上方 40 单位）
+      var dir = [0.5, 0.6, 0.6];
+      var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+      window.Space.shipState.pos.fromArray([
+        pd.pos[0] + dir[0] / len * (pd.radius + 40),
+        pd.pos[1] + dir[1] / len * (pd.radius + 40),
+        pd.pos[2] + dir[2] / len * (pd.radius + 40),
+      ]);
+      window.Space.shipState.speed = 0;
+      await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+      A.eq(window.Game.currentPlanet, pid, 'currentPlanet = ' + pid);
+      A.eq(window.World.biome.key, pd.biome, 'planet ' + pid + ' world biome = ' + pd.biome);
+      A.ne(window.World.biome.key, 'lush', 'planet ' + pid + ' world biome not stuck at lush');
+    }
+    await api.reboot('normal');   // 恢复干净的星球 0 状态，避免污染后续套件
+  });
 });

@@ -592,6 +592,11 @@ const Game = (() => {
     if (e && e.map) return e.map;
     if (e && e.promise) return e.promise;
     const prefix = chunkPrefix(activeWorldKey, gs, pid);
+    // 本次请求的缓存条目：结果就绪后回填到条目自身（而非与捕获值比对）。
+    // 此前捕获 e 做身份比对——首次请求时 e 为 undefined，比对永远失败，
+    // { map } 永不落缓存 → prepPlanet 的 ce.map 永远为空 → 无缝入星永远跳过
+    // World.init → 所有星球进入大气后都沿用上一颗星球（翠绿）的世界。
+    const entry = { promise: null };
     const promise = (async () => {
       const map = new Map();
       try {
@@ -604,10 +609,12 @@ const Game = (() => {
           }
         }
       } catch(err){ console.warn('[save] 区块快照读取失败', err); }
-      if (planetChunkCache.get(cacheKey) === e) planetChunkCache.set(cacheKey, { map });
+      // 仅当缓存仍指向本次请求的条目时才回填（写入后失效会重建新条目，防旧快照覆盖新快照）
+      if (planetChunkCache.get(cacheKey) === entry){ entry.map = map; entry.promise = null; }
       return map;
     })();
-    planetChunkCache.set(cacheKey, { promise });
+    entry.promise = promise;
+    planetChunkCache.set(cacheKey, entry);
     return promise;
   }
   function persistModsToStore(pid, galaxySeed){
@@ -3548,12 +3555,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v111';
+    bd.textContent = 'build v112';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v111';
+  window.__V_MAIN = 'v112';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

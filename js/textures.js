@@ -222,23 +222,46 @@ const Tex = (() => {
     px(7, 10, '#e8fff6'); px(8, 10, '#e8fff6');
   });
 
-  // ============ 矿石（石底 + 矿斑）============
-  function orePainter(color, hi, glow){
+  // ============ 矿石（石底 + 成簇矿斑 + 深色描边）============
+  function orePainter(color, hi, glow, outline){
     return (px, r) => {
       speckle(px, r, ['#8c8c8c','#828282','#969696','#7a7a7a']);
-      for (let i = 0; i < 5; i++){
-        const x = 1 + ((r() * 12) | 0), y = 1 + ((r() * 12) | 0);
-        px(x, y, color); px(x+1, y, color); px(x, y+1, color); px(x+1, y+1, hi);
-        if (glow && r() < 0.7) px(x+2, y+1, glow);
+      // 3~4 个矿斑簇：随机游走成不规则簇（不再是 2×2 散点），四周 1px 深色描边 + 顶部高光
+      const clusters = 3 + ((r() * 2) | 0);
+      for (let c = 0; c < clusters; c++){
+        let x = 2 + ((r() * 9) | 0), y = 2 + ((r() * 9) | 0);
+        const steps = 4 + ((r() * 3) | 0);
+        const cells = [];
+        const seen = {};
+        for (let s = 0; s < steps; s++){
+          const k = x + ',' + y;
+          if (!seen[k]){ seen[k] = 1; cells.push([x, y]); }   // 去重：游走折返不重复占用
+          x += ((r() * 3) | 0) - 1; y += ((r() * 3) | 0) - 1;
+          if (x < 1) x = 1; if (x > 14) x = 14; if (y < 1) y = 1; if (y > 14) y = 14;
+        }
+        // 深色描边（先画周边，矿体盖上后只露轮廓）
+        for (const [cx, cy] of cells){
+          for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+            const ox = cx + dx, oy = cy + dy;
+            if (ox >= 0 && ox < 16 && oy >= 0 && oy < 16) px(ox, oy, outline);
+          }
+        }
+        // 矿体
+        for (const [cx, cy] of cells) px(cx, cy, color);
+        // 高光：簇最上端 + 发光矿的辉点
+        let top = cells[0];
+        for (const cell of cells) if (cell[1] < top[1]) top = cell;
+        px(top[0], Math.max(0, top[1] - 1), hi);
+        if (glow && r() < 0.7) px(Math.min(15, top[0] + 1), top[1], glow);
       }
     };
   }
-  tile('coal_ore',     orePainter('#2b2b2b', '#4a4a4a'));
-  tile('iron_ore',     orePainter('#d8af93', '#e8c7ae'));
-  tile('copper_ore',   orePainter('#d17f4a', '#e89a63'));
-  tile('titanium_ore', orePainter('#cdd6dd', '#eef4f8'));
-  tile('uranium_ore',  orePainter('#69d436', '#a2f078', '#c6ff9e'));
-  tile('gold_ore',     orePainter('#f5cd3a', '#ffe98a'));
+  tile('coal_ore',     orePainter('#2b2b2b', '#5a5a5a', null, '#1a1a1a'));
+  tile('iron_ore',     orePainter('#d8af93', '#f0d2b8', null, '#a87a5e'));
+  tile('copper_ore',   orePainter('#d17f4a', '#f0a877', null, '#9a5a2e'));
+  tile('titanium_ore', orePainter('#e6eef4', '#ffffff', null, '#7a8a94'));   // 提亮本体+蓝灰描边（此前与石底几乎同色）
+  tile('uranium_ore',  orePainter('#69d436', '#a2f078', '#c6ff9e', '#3a8a18'));
+  tile('gold_ore',     orePainter('#f5cd3a', '#ffe98a', null, '#b8921a'));
 
   // ============ 植物（十字面片）============
   tile('sodium_plant', (px, r) => {

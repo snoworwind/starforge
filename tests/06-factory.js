@@ -177,4 +177,61 @@ __SF_TEST__.suite('factory', function (t, api) {
     window.Factory.reset();
     api.setBlock(X, y, Z, 'air');
   });
+
+  t.test('power: 空闲机器不计入电网需求', function () {
+    var y = groundY() + 1;
+    // 1 块太阳能（10kW）+ 2 台空闲装配机（无配方）：不应产生需求，sat=1
+    api.placeMachine('solar', X, y, Z, 0);
+    api.placeMachine('assembler', X + 1, y, Z, 0);
+    api.placeMachine('assembler', X + 2, y, Z, 0);
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 0, 'idle assemblers draw no power');
+    A.eq(api.power().sat, 1, 'sat full with idle machines');
+    // 给其中一台设置配方+原料（6 铁可撑多 tick 消耗）：只有它计入 12kW 需求
+    api.setMachineRecipe(X + 1, y, Z, 'gear');
+    var i;
+    for (i = 0; i < 6; i++) api.machineInsert(X + 1, y, Z, 'iron');
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 12, 'only working assembler counts');
+    A.ok(api.power().sat < 1, 'sat drops below 1 (10kW < 12kW)');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X + 1, y, Z);
+    api.removeMachine(X + 2, y, Z);
+  });
+
+  t.test('power: 无矿采矿机不计入电网需求', function () {
+    var y = groundY() + 1;
+    api.placeMachine('solar', X, y, Z + 2, 0);
+    api.placeMachine('miner', X, y, Z, 0);   // 脚下是普通地面，无矿脉
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 0, 'miner without ore below draws no power');
+    A.eq(api.power().sat, 1, 'sat full');
+    // 放上矿脉后开始计费
+    api.setBlock(X, y - 1, Z, 'iron_ore');
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 8, 'miner over ore draws 8kW');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 2);
+    api.setBlock(X, y - 1, Z, 'air');
+  });
+
+  t.test('furnace: 原料不足不点火不空烧', function () {
+    var y = groundY() + 1;
+    api.placeMachine('furnace', X, y, Z, 0);
+    api.machineInsert(X, y, Z, 'dirt');   // 1 泥土 < 需要 4（stone_smelt），不足一份
+    api.machineInsert(X, y, Z, 'coal');
+    api.tickFactory(4.0, 1);
+    var m = api.machineAt(X, y, Z);
+    A.eq(m.data.burn, 0, 'insufficient input: burner never lit');
+    A.eq(m.data.fuel.n, 1, 'fuel not wasted');
+    A.eq(m.data.out, null, 'no output');
+    // 补足到 4：正常点火冶炼
+    api.machineInsert(X, y, Z, 'dirt');
+    api.machineInsert(X, y, Z, 'dirt');
+    api.machineInsert(X, y, Z, 'dirt');
+    api.tickFactory(4.0, 1);
+    m = api.machineAt(X, y, Z);
+    A.ok(m.data.out && m.data.out.item === 'stone', '4 dirt smelts after refill, out=' + JSON.stringify(m.data.out));
+    api.removeMachine(X, y, Z);
+  });
 });

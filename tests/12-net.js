@@ -445,6 +445,21 @@ __SF_TEST__.suite('net', function (t, api) {
     A.eq(init.world.warpLock, null, 'giant warpLock dropped');
     h.close(); g.close();
   });
+
+  t.test('init 在 Game 未挂载时到达：gotInit 仍置位（昼夜同步不失效）', async function () {
+    // 页面极早期（Game 未就绪）收到 init：此前早退漏设 gotInit → timeSynced() 恒假
+    var G = window.Game;
+    try {
+      window.Game = undefined;
+      await Net.joinRoom('127.0.0.1:17886');
+      await api.waitUntil(function () { return Net.gotInit === true; }, 6000, 50);
+      A.eq(Net.gotInit, true, 'gotInit set even when Game undefined');
+      A.eq(Net.timeSynced(), true, 'timeSynced true after init without Game');
+    } finally {
+      Net.disconnect();   // 清空 pendingInit，避免 Game 恢复后被重新应用
+      window.Game = G;
+    }
+  });
 });
 
 /* STARFORGE 测试套件 12b — 客户端世界包应用（Game.joinGame 全量重建） */

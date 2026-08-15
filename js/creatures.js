@@ -5,6 +5,8 @@
    · 体素回退模型腿关节在髋部旋转摆动
    · AI：锚定领地（野生生物守巢、村民守村）、矮跳不爬树、
      前方障碍转向（不再穿树穿墙）、不朝玩家聚集
+   · 批次持久化：按 24m 网格多批次共存；出生点离玩家太近时暂缓
+     生成、远处淡出回收——生物不会当着玩家的面突然消失/刷出
    ============================================================ */
 'use strict';
 
@@ -13,7 +15,18 @@ const Creatures = (() => {
   let vGroup = null, villagers = [];        // 村民（独立分组：不参与刷新清理，不可被攻击）
   const dying = [];                         // 播放死亡动画中的精模生物
   const spawnedVillages = new Set();
-  let batchCell = null;                     // 当前生物批次所在网格（跨玩家确定性生成）
+  // ---------- 批次持久化：多批次共存，跨网格不再整体清空/重生 ----------
+  const batches = new Map();       // 'cx,cz' -> { cx, cz, list: [], pendingCount: 0 }
+  const pendingSpawns = [];        // 出生点离玩家太近而暂缓生成的生物（等玩家走远再淡入）
+  const fadingOut = [];            // 淡出中的生物（已移出活跃列表，只做视觉收尾）
+  const createQueue = [];          // 待创建批次（分帧补齐，避免跨界时集中生成地形卡顿）
+  let lastCenter = null;           // 玩家当前网格（快速路径）
+  let lastInfoType = null;         // 生态动物类型变化 → 重建批次
+  let tickFrame = 0;               // 帧计数：远处生物降频 tick
+  const SPAWN_MIN = 34;            // 出生点距玩家 < 此距离 → 暂缓生成（避免当着玩家的面刷出）
+  const DESPAWN_D = 150;           // 距玩家 > 此距离 → 淡出移除（避免当着玩家的面消失）
+  const FADE_IN_T = 1.2, FADE_OUT_T = 2.4;
+  function easeInOut(t){ return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t); }
 
   // ---------- 联机：确定性 ID / 批次 ----------
   // 生物批次按 24m 网格生成，种子 = 世界种子+网格坐标 → 同网格的玩家看到同一批生物
@@ -100,7 +113,12 @@ const Creatures = (() => {
     dying.length = 0;
     spawnedVillages.clear();
     ghosts.clear();
-    batchCell = null;
+    batches.clear();
+    pendingSpawns.length = 0;
+    fadingOut.length = 0;
+    createQueue.length = 0;
+    lastCenter = null;
+    lastInfoType = null;
   }
 
   // ---------- 村民：统一人形管线（Humanoid），四肢关节可动 ----------
@@ -153,6 +171,7 @@ const Creatures = (() => {
         }
         const grig = rigFromClone(g);
         g.position.set(vx, gy + 1 + 0.02, vz);
+        g.scale.setScalar(0.01);                       // 淡入：不贴着村庄 150m 环当面刷出
         const nid = villagerNid(st.x, st.z, i);
         g.userData = {
           villager: true, isGlb: true, rig: grig,
@@ -164,6 +183,7 @@ const Creatures = (() => {
           state: 'idle', timer: 1 + rnd() * 4,
           jumpVel: 0, onGround: true,
           typeDef: { speed: 0.8, jump: false, h: 1.7 }, animT: rnd() * 10, foot: 0.02,
+          spawnT: FADE_IN_T,
         };
         vGroup.add(g);
         villagers.push(g);
@@ -189,21 +209,61 @@ const Creatures = (() => {
     const info = biome.animal;
     if (!info) return;
 
-    // 批次按 24m 网格：跨网格才重生成。同网格的玩家（联机）生成同一批生物
+    // 生态动物类型变化（换星球）→ 旧批次全部清掉重建
+    if (lastInfoType !== info.type){
+      lastInfoType = info.type;
+      clearBatches();
+    }
+
+    // 玩家所在 24m 网格：跨网格时把 3×3 邻域缺失批次加入创建队列（已有批次保持不动）
     const cx = Math.floor(plyPos.x / CRE_CELL), cz = Math.floor(plyPos.z / CRE_CELL);
-    if (batchCell === cx + ',' + cz) return;
-    batchCell = cx + ',' + cz;
+    const key = cx + ',' + cz;
+    if (lastCenter !== key){
+      lastCenter = key;
+      const order = [[0,0],[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+      for (const [dx, dz] of order){
+        const k = (cx + dx) + ',' + (cz + dz);
+        if (!batches.has(k) && !createQueue.includes(k)) createQueue.push(k);
+      }
+    }
 
-    // 清理旧批（GLB 克隆几何共享模板跳过；体素回退全量）。投影生物（ghosts）保留
-    for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
-    for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
-    for (const g of list) group.remove(g);
-    for (const g of dying) group.remove(g);
-    dying.length = 0;
-    list = [];
+    // 分帧创建批次（每帧最多 2 个，避免跨界时集中生成地形造成卡顿）
+    for (let n = 0; n < 2 && createQueue.length; n++){
+      const k = createQueue.shift();
+      if (batches.has(k)) continue;
+      const parts = k.split(',');
+      spawnBatch(+parts[0], +parts[1], info, plyPos);
+    }
 
+    // 暂缓生成的生物：玩家离出生点足够远 → 淡入生成；走得太远 → 直接放弃（出生也看不见）
+    for (let i = pendingSpawns.length - 1; i >= 0; i--){
+      const p = pendingSpawns[i];
+      const dx = p.x - plyPos.x, dz = p.z - plyPos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= DESPAWN_D * DESPAWN_D){
+        p.batch.pendingCount--;
+        pendingSpawns.splice(i, 1);
+        continue;
+      }
+      if (d2 >= SPAWN_MIN * SPAWN_MIN){
+        p.batch.pendingCount--;
+        pendingSpawns.splice(i, 1);
+        materialize(p.batch, p, CREATURE_TYPES[info.type] || CREATURE_TYPES.strider, info, p.cx, p.cz, false);
+      }
+    }
+
+    // 空批次回收（下次靠近再按确定性种子重建）
+    for (const [k, b] of batches){
+      if (b.list.length === 0 && b.pendingCount === 0) batches.delete(k);
+    }
+  }
+
+  // 生成一个网格批次：出生点与行为参数全部确定性（联机跨客户端一致）
+  function spawnBatch(cx, cz, info, plyPos){
     const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
     const rnd = mulberry32(batchSeedOf(cx, cz));
+    const batch = { cx, cz, list: [], pendingCount: 0 };
+    batches.set(cx + ',' + cz, batch);
     const ccx = cx * CRE_CELL + CRE_CELL / 2, ccz = cz * CRE_CELL + CRE_CELL / 2;
     for (let i = 0; i < Math.min(info.count, 22); i++){
       // 出生点选择：细胞中心 12~92 格随机环（确定性），避开水体与树木顶端
@@ -216,26 +276,81 @@ const Creatures = (() => {
         const dd = solidDefAt(wx, gy, wz);
         ok = !!dd && !dd.liquid && dd.key !== 'log' && dd.key !== 'leaves';
       }
-      const g = buildCreature(typeDef, { body: info.body, legs: info.legs, eye: info.eye }, info.type);
-      // 贴地偏移：模型原点(躯干中心)到最低点（腿底）的距离，站在方块顶面(gy+1)上
-      const foot = footOffset(g, typeDef);
-      g.position.set(wx, gy + 1 + foot, wz);
-      const glbClips = g.userData.clips || null;
-      const nid = creatureNid(cx, cz, i);
-      g.userData = {
-        nid, rnd: mulberry32(nid),            // 联机：确定性行为随机源（跨客户端一致）
-        speed: typeDef.speed * (0.5 + rnd()),
-        dir: rnd() * Math.PI * 2,
-        state: 'idle', timer: 1 + rnd() * 3,
-        jumpVel: 0, onGround: true, jumpCd: 0,
-        typeDef, animT: rnd() * 10, foot,
-        hp: 4, isGlb: !!g.userData.isGlb,
-        clips: glbClips,
-        home: { x: wx, z: wz },             // 领地锚点：野生生物守巢，不再向玩家聚集
-        radius: Math.max(0.55, Math.max(typeDef.w, typeDef.h, typeDef.d) * 1.3),
-      };
-      group.add(g);
-      list.push(g);
+      // 确定性行为参数（RNG 消耗顺序与旧版一致，保证跨客户端对齐）
+      const speed = typeDef.speed * (0.5 + rnd());
+      const dir = rnd() * Math.PI * 2;
+      const timer = 1 + rnd() * 3;
+      const animT = rnd() * 10;
+      const desc = { i, x: wx, z: wz, gy, speed, dir, timer, animT, batch, cx, cz };
+      const dx = wx - plyPos.x, dz = wz - plyPos.z;
+      if (dx * dx + dz * dz < SPAWN_MIN * SPAWN_MIN){
+        // 离玩家太近：暂缓生成，等玩家走远再淡入（不会当着玩家的面刷出）
+        batch.pendingCount++;
+        pendingSpawns.push(desc);
+      } else {
+        materialize(batch, desc, typeDef, info, cx, cz, true);
+      }
+    }
+  }
+  // 实例化一只生物（fresh=true 直接信任批次算好的地形，false 重新校验地形）
+  function materialize(batch, desc, typeDef, info, cx, cz, fresh){
+    let gy = desc.gy;
+    if (!fresh){
+      // 暂缓出生点重新校验（期间玩家可能挖/填了地形）
+      gy = World.topAt(Math.floor(desc.x), Math.floor(desc.z));
+      const dd = solidDefAt(desc.x, gy, desc.z);
+      if (!dd || dd.liquid || dd.key === 'log' || dd.key === 'leaves') return;
+    }
+    const g = buildCreature(typeDef, { body: info.body, legs: info.legs, eye: info.eye }, info.type);
+    // 贴地偏移：模型原点(躯干中心)到最低点（腿底）的距离，站在方块顶面(gy+1)上
+    const foot = footOffset(g, typeDef);
+    g.position.set(desc.x, gy + 1 + foot, desc.z);
+    const glbClips = g.userData.clips || null;
+    const nid = creatureNid(cx, cz, desc.i);
+    g.userData = {
+      nid, rnd: mulberry32(nid),            // 联机：确定性行为随机源（跨客户端一致）
+      speed: desc.speed,
+      dir: desc.dir,
+      state: 'idle', timer: desc.timer,
+      jumpVel: 0, onGround: true, jumpCd: 0,
+      typeDef, animT: desc.animT, foot,
+      hp: 4, isGlb: !!g.userData.isGlb,
+      clips: glbClips,
+      home: { x: desc.x, z: desc.z },       // 领地锚点：野生生物守巢，不再向玩家聚集
+      radius: Math.max(0.55, Math.max(typeDef.w, typeDef.h, typeDef.d) * 1.3),
+      batch, spawnT: FADE_IN_T,             // 淡入计时（0.01 → 1）
+    };
+    g.scale.setScalar(0.01);
+    group.add(g);
+    list.push(g);
+    batch.list.push(g);
+  }
+  // 清空所有批次（换星球/换生态时调用）
+  function clearBatches(){
+    for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+    for (const g of list) group.remove(g);
+    for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+    for (const g of dying) group.remove(g);
+    for (const f of fadingOut){
+      disposeObject3D(f.g, { skipGeo: !!f.g.userData.isGlb, skipTex: true });
+      group.remove(f.g);
+    }
+    list = [];
+    dying.length = 0;
+    fadingOut.length = 0;
+    batches.clear();
+    pendingSpawns.length = 0;
+    createQueue.length = 0;
+    lastCenter = null;
+  }
+  // 从活跃列表与所属批次中移除（击杀/淡出移除共用）
+  function removeFromList(g){
+    const i = list.indexOf(g);
+    if (i >= 0) list.splice(i, 1);
+    const b = g.userData.batch;
+    if (b){
+      const j = b.list.indexOf(g);
+      if (j >= 0) b.list.splice(j, 1);
     }
   }
   // 模型原点到最低点的距离（含微小离地悬浮，避免脚底穿插）
@@ -248,8 +363,48 @@ const Creatures = (() => {
 
   // ---------- 每帧更新 ----------
   function tick(dt, plyPos){
-    for (const g of list) tickOne(g, dt, plyPos);
-    for (const g of villagers) tickOne(g, dt, plyPos);
+    tickFrame++;
+    // 生物：淡入 / 距离淡出 / 远处降频
+    for (let i = list.length - 1; i >= 0; i--){
+      const g = list[i];
+      const u = g.userData;
+      // 淡入（出生时从 0.01 平滑放大到 1）
+      if (u.spawnT !== undefined && u.spawnT > 0){
+        u.spawnT -= dt;
+        g.scale.setScalar(Math.max(0.01, easeInOut(1 - u.spawnT / FADE_IN_T)));
+      }
+      // 距玩家过远 → 淡出移除（不在玩家眼前凭空消失）
+      const dx = g.position.x - plyPos.x, dz = g.position.z - plyPos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > DESPAWN_D * DESPAWN_D){
+        removeFromList(g);
+        fadingOut.push({ g, t: FADE_OUT_T });
+        continue;
+      }
+      // 远处生物降频（每 4 帧一次，按 nid 错开）；近处与远端对齐保持全帧率
+      if (!u.remote && d2 > 70 * 70 && ((tickFrame + (u.nid || 0)) & 3) !== 0) continue;
+      tickOne(g, dt, plyPos);
+    }
+    // 淡出收尾：缩到最小后释放
+    for (let i = fadingOut.length - 1; i >= 0; i--){
+      const f = fadingOut[i];
+      f.t -= dt;
+      if (f.t <= 0){
+        disposeObject3D(f.g, { skipGeo: !!f.g.userData.isGlb, skipTex: true });
+        group.remove(f.g);
+        fadingOut.splice(i, 1);
+      } else {
+        f.g.scale.setScalar(Math.max(0.01, easeInOut(f.t / FADE_OUT_T)));
+      }
+    }
+    for (const g of villagers){
+      const u = g.userData;
+      if (u.spawnT !== undefined && u.spawnT > 0){      // 村民淡入
+        u.spawnT -= dt;
+        g.scale.setScalar(Math.max(0.01, easeInOut(1 - u.spawnT / FADE_IN_T)));
+      }
+      tickOne(g, dt, plyPos);
+    }
     // 死亡动画播完 → 移除
     for (let i = dying.length - 1; i >= 0; i--){
       const g = dying[i];
@@ -265,6 +420,11 @@ const Creatures = (() => {
     // 联机投影生物：向快照位置平滑移动，4 秒无更新则移除
     const now = performance.now();
     for (const [nid, gh] of ghosts){
+      // 淡入（不在玩家眼前凭空出现）
+      if (gh.fade > 0){
+        gh.fade -= dt;
+        gh.g.scale.setScalar(Math.max(0.01, easeInOut(1 - gh.fade / FADE_IN_T)));
+      }
       const k = Math.min(1, dt * 6);
       gh.g.position.x += (gh.tgt.x - gh.g.position.x) * k;
       gh.g.position.y += (gh.tgt.y - gh.g.position.y) * k;
@@ -463,17 +623,23 @@ const Creatures = (() => {
     if (group){
       for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
       for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+      for (const f of fadingOut) disposeObject3D(f.g, { skipGeo: !!f.g.userData.isGlb, skipTex: true });
       group.clear();
     }
     list = [];
     dying.length = 0;
+    fadingOut.length = 0;
+    batches.clear();
+    pendingSpawns.length = 0;
+    createQueue.length = 0;
+    lastCenter = null;
+    lastInfoType = null;
     if (vGroup){
       for (const g of villagers) disposeObject3D(g, { skipGeo: true, skipTex: true, skipMat: true });   // 村民克隆共享模板几何/材质
       vGroup.clear();
     }
     villagers = [];
     spawnedVillages.clear();
-    batchCell = null;
     for (const [, gh] of ghosts){
       disposeObject3D(gh.g, { skipGeo: !!gh.g.userData.isGlb, skipTex: true, skipMat: !!gh.g.userData.isGlb });
     }
@@ -508,8 +674,7 @@ const Creatures = (() => {
     return false;
   }
   function kill(g, opts){
-    const i = list.indexOf(g);
-    if (i >= 0) list.splice(i, 1);
+    removeFromList(g);
     const u = g.userData;
     // 有死亡动画的精模：原地播放倒地动画后移除
     if (u.mixer && u.clips && u.clips.death){
@@ -579,7 +744,7 @@ const Creatures = (() => {
     return g;
   }
   function applyRemote(arr){
-    if (!group || !Array.isArray(arr) || arr.length > 256) return;
+    if (!group || !Array.isArray(arr) || arr.length > 512) return;   // 多批次共存后 90m 内生物可超 256，放宽上限
     const now = performance.now();
     for (const e of arr){
       if (!Array.isArray(e) || e.length < 7 || !Number.isFinite(e[0]) || !e.slice(1, 5).every(Number.isFinite)) continue;
@@ -595,7 +760,8 @@ const Creatures = (() => {
         if (!gh){
           const g2 = ghostFor(e);
           g2.position.set(tgt.x, tgt.y, tgt.z);
-          gh = { g: g2, tgt, last: now };
+          g2.scale.setScalar(0.01);            // 淡入：不在玩家眼前凭空出现
+          gh = { g: g2, tgt, last: now, fade: FADE_IN_T };
           ghosts.set(nid, gh);
         }
         gh.tgt = tgt;

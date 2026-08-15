@@ -15,6 +15,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
+import crypto from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -60,6 +62,70 @@ try {
   console.log('[net-server] 联机服务器就绪（路径穿越防护 403 OK）');
 } catch (e){
   console.error(`[net-server] 自检失败：${e.message}`);
+  process.exit(1);
+}
+// WS 分片安全自检：正常分片消息可重组；超过 64MB 上限的续帧洪水必须被服务器掐断（防预认证内存 DoS）
+try {
+  const wsOpen = () => new Promise((res, rej) => {
+    const s = net.connect(NET_WS, '127.0.0.1');
+    const key = crypto.randomBytes(16).toString('base64');
+    let hs = false, acc = Buffer.alloc(0);
+    const to = setTimeout(() => { s.destroy(); rej(new Error('WS 握手超时')); }, 5000);
+    s.on('connect', () => s.write('GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\nSec-WebSocket-Version: 13\r\n\r\n'));
+    s.on('data', d => {
+      if (hs) return;
+      acc = Buffer.concat([acc, d]);
+      if (acc.includes(Buffer.from('\r\n\r\n'))){ hs = true; clearTimeout(to); res(s); }
+    });
+    s.on('error', e => { clearTimeout(to); rej(e); });
+  });
+  const frame = (op, payload, fin = true) => {
+    const b = Buffer.alloc(payload.length + 2);
+    b[0] = (fin ? 0x80 : 0) | op; b[1] = payload.length;
+    payload.copy(b, 2);
+    return b;
+  };
+  // 1) 正常分片：hello 拆两帧应被重组并回应
+  const s1 = await wsOpen();
+  s1.write(frame(1, Buffer.from('{"t":"he'), false));
+  s1.write(frame(0, Buffer.from('llo","v":3,"name":"分片自检"}'), true));
+  const okFrag = await new Promise(res => {
+    let acc = Buffer.alloc(0);
+    s1.on('data', d => { acc = Buffer.concat([acc, d]); if (acc.includes(Buffer.from('"ws-id"'))) res(true); });
+    setTimeout(() => res(false), 3000);
+  });
+  s1.destroy();
+  if (!okFrag) throw new Error('分片消息重组异常：两帧 hello 未被处理');
+  // 2) 洪水：fin=0 的续帧累计超过 64MB 上限 → 服务器必须主动断开
+  const s2 = await wsOpen();
+  s2.write(frame(1, Buffer.from('{'), false));
+  const chunk = Buffer.alloc(65535, 0x61);
+  let sent = 0;
+  await new Promise((res) => {
+    let done = false;
+    const finish = () => { if (!done){ done = true; res(); } };
+    s2.on('close', finish); s2.on('error', finish);   // 服务器提前掐断也视为泵送结束
+    const pump = () => {
+      if (done) return;
+      while (sent < 1024){
+        sent++;
+        if (!s2.write(frame(0, chunk, false))){ s2.once('drain', pump); return; }
+      }
+      s2.write(frame(0, Buffer.alloc(1025, 0x61), false));   // 总计 64MB+1B，越过上限
+      finish();
+    };
+    pump();
+  });
+  const killed = await new Promise(res => {
+    s2.on('close', () => res(true));
+    s2.on('error', () => res(true));
+    setTimeout(() => res(false), 8000);
+  });
+  s2.destroy();
+  if (!killed) throw new Error('64MB+ 分片洪水未被掐断：服务器存在预认证内存 DoS');
+  console.log('[net-server] 分片上限自检 OK（正常分片重组 + 64MB 洪水掐断）');
+} catch (e){
+  console.error(`[net-server] 分片自检失败：${e.message}`);
   process.exit(1);
 }
 

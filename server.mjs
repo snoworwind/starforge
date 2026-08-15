@@ -386,7 +386,7 @@ function issueHostKey(){
 function makeClient(socket){
   return {
     id: nextId++, socket, name: '', app: null, role: 'guest',
-    dead: false, buf: Buffer.alloc(0), frag: [], fragOp: 0,
+    dead: false, buf: Buffer.alloc(0), frag: [], fragOp: 0, fragSize: 0,
     lastTraffic: Date.now(), lastPong: Date.now(),
     lastPlanet: -1, lastSt: '', lastPos: null, lastYaw: 0,
     charT: 0, lastCharAt: 0,
@@ -765,24 +765,27 @@ function parseFrames(c, data){
     // 数据帧
     if (opcode === 0){ // continuation
       if (c.fragOp === 0){ continue; } // 无头分片：丢弃
+      c.fragSize += payload.length;
+      if (c.fragSize > MAX_FRAME){ c.dead = true; return; }   // 逐片累计上限：无头续帧洪水不再可无限吞内存
       c.frag.push(payload);
       if (fin){
-        if (c.frag.reduce((s, b) => s + b.length, 0) > MAX_FRAME){ c.dead = true; return; }
         const full = Buffer.concat(c.frag);
-        c.frag = []; c.fragOp = 0;
+        c.frag = []; c.fragOp = 0; c.fragSize = 0;
         handleText(c, full.toString('utf8'));
       }
     } else if (opcode === 1){
       c.frag = [];
+      c.fragSize = 0;
       if (fin){
         handleText(c, payload.toString('utf8'));
       } else {
         c.fragOp = 1;
+        c.fragSize = payload.length;
         c.frag.push(payload);
       }
     } else if (opcode === 2){
       // 二进制帧：不支持，忽略
-      if (!fin) c.fragOp = 0;
+      if (!fin){ c.fragOp = 0; c.fragSize = 0; }
     }
   }
 }

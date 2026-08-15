@@ -21,9 +21,9 @@ wrsk/
 │   ├── data.js                 # 数据定义：BLOCKS/ITEMS/RECIPES/TECH/QUESTS/BIOMES/星系
 │   ├── world.js  factory.js  player.js  ui.js  main.js
 │   ├── space.js  station.js  net.js  creatures.js  savestore.js  audio.js
-│   └── (three.min.js / GLTFLoader.js / SVGLoader.js / models.js / modellib.js / textures.js)
+│   └── (three.min.js / GLTFLoader.js / SVGLoader.js / models.js / modellib.js / humanoid.js / textures.js)
 ├── tests/
-│   ├── 01-data.js … 10-galaxy-space.js   # ★ 10 个测试套件（文件名排序 = 执行顺序）
+│   ├── 01-data.js … 11-charworld.js      # ★ 11 个测试套件（文件名排序 = 执行顺序）
 ├── test/
 │   ├── run.mjs                 # ★ Node 编排器（Playwright 无头运行）
 │   └── serve.mjs               # 测试专用静态服务器（端口 17899）
@@ -62,7 +62,7 @@ node test/run.mjs --browser=chrome        # 用 Chrome（默认 edge）
 - `test-results/test-results.xml`：JUnit 格式（CI 直接吞）。
 - **退出码 `0` = 全部通过；`1` = 有失败或致命异常**。CI 用退出码判定即可。
 
-预期基线（当前）：**10 套件 · 60 用例 · 60 通过 · 约 20 秒**。
+预期基线（当前）：**11 套件 · 69 用例 · 69 通过 · 约 40 秒**。
 
 ---
 

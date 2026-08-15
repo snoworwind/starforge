@@ -11,7 +11,7 @@
 
 <!-- ====== 启动界面 ====== -->
 <div id="boot" class="screen">
-  <div class="boot-inner">
+  <div class="boot-inner" id="bootInner">
     <div class="boot-logo">
       <div class="logo-cube"><div class="lc f"></div><div class="lc b"></div><div class="lc l"></div><div class="lc r"></div><div class="lc t"></div><div class="lc d"></div></div>
       <h1>STARFORGE</h1>
@@ -35,6 +35,50 @@
       <button id="btnDiffNormal" class="boot-btn">◈ 普通模式<small class="mode-sub">采集与合成产出 ×4 · 均衡体验</small></button>
       <button id="btnDiffHard" class="boot-btn">☠ 困难模式<small class="mode-sub">标准产出 ×1 · 原汁原味</small></button>
       <button id="btnDiffBack" class="boot-btn small">← 返回</button>
+    </div>
+    <!-- 人物创建（捏人：肤色/发型/发色/制服/饰条/裤装/靴子/头盔/目镜） -->
+    <div class="boot-menu hidden cc-menu" id="charCreate">
+      <div class="cc-head">◈ 创建你的旅行者</div>
+      <div class="cc-body">
+        <div class="cc-preview"><canvas id="charPrevCanvas" width="300" height="360"></canvas></div>
+        <div class="cc-controls">
+          <div class="cc-row"><span class="cc-label">名 字</span><input id="charNameInput" maxlength="10" placeholder="旅行者" spellcheck="false"></div>
+          <div class="cc-row"><span class="cc-label">肤 色</span><div id="ccSkin" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">发 型</span><div id="ccHairStyle" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">发 色</span><div id="ccHair" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">制 服</span><div id="ccSuit" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">饰 条</span><div id="ccTrim" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">裤 装</span><div id="ccPants" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">靴 子</span><div id="ccBoots" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">头 盔</span><div id="ccHelmet" class="cc-swatches"></div></div>
+          <div class="cc-row"><span class="cc-label">目 镜</span><div id="ccVisor" class="cc-swatches"></div></div>
+        </div>
+      </div>
+      <div class="cc-actions">
+        <button id="btnCharRandom" class="boot-btn small">🎲 随机外观</button>
+        <button id="btnCharConfirm" class="boot-btn">✓ 下一步：创建世界</button>
+        <button id="btnCharBack" class="boot-btn small">← 返回</button>
+      </div>
+    </div>
+    <!-- 世界创建（名称/种子/难度） -->
+    <div class="boot-menu hidden cc-menu" id="worldCreate">
+      <div class="cc-head">◈ 创建新世界</div>
+      <div class="wc-body">
+        <div class="cc-row"><span class="cc-label">世界名</span><input id="worldNameInput" maxlength="16" placeholder="新世界" spellcheck="false"></div>
+        <div class="cc-row"><span class="cc-label">种 子</span><input id="worldSeedInput" maxlength="12" placeholder="留空 = 随机" spellcheck="false"></div>
+        <div class="cc-row"><span class="cc-label">难 度</span>
+          <div class="cc-swatches">
+            <button id="btnWcEasy" class="boot-btn small">☘ 简单 ×7</button>
+            <button id="btnWcNormal" class="boot-btn small on">◈ 普通 ×4</button>
+            <button id="btnWcHard" class="boot-btn small">☠ 困难 ×1</button>
+            <button id="btnWcCreative" class="boot-btn small">✦ 创造</button>
+          </div>
+        </div>
+      </div>
+      <div class="cc-actions">
+        <button id="btnWorldConfirm" class="boot-btn">✓ 出发！</button>
+        <button id="btnWorldBack" class="boot-btn small">← 返回</button>
+      </div>
     </div>
     <div class="boot-tip" id="bootTip">「旅行者，你的飞船坠毁在了未知星球……」</div>
     <div class="boot-ver">v1.0 · 单机网页版 · 所有素材程序化生成</div>
@@ -212,13 +256,34 @@
   </div>
 </div>
 
-<!-- ====== 存档管理 ====== -->
+<!-- ====== 存档管理（泰拉瑞亚式：人物 / 世界 分离） ====== -->
 <div id="savePanel" class="panel hidden">
   <div class="panel-head"><span id="saveTitle">◈ 档案管理</span><button class="pclose" data-close="savePanel">✕</button></div>
   <div class="panel-body">
-    <div id="saveList"></div>
-    <button id="btnNewSave" class="boot-btn small" style="margin-top:10px">＋ 新建存档</button>
-    <button id="btnImportSave" class="boot-btn small" style="margin-top:10px">📥 导入存档</button>
+    <!-- 继续：选择人物 × 世界 -->
+    <div id="savePairWrap" style="display:none">
+      <div class="pair-cols">
+        <div class="pair-col">
+          <div class="save-sec">◈ 人物 <button id="btnNewChar" class="sv-btn">＋ 新建人物</button></div>
+          <div id="charList"></div>
+        </div>
+        <div class="pair-col">
+          <div class="save-sec">◈ 世界 <button id="btnNewWorld" class="sv-btn">＋ 新建世界</button></div>
+          <div id="worldList"></div>
+        </div>
+      </div>
+      <div class="pair-go">
+        <button id="btnPairGo" class="boot-btn small" disabled>▶ 开始游戏</button>
+        <button id="btnImportSave" class="boot-btn small">📥 导入档案</button>
+      </div>
+    </div>
+    <!-- 存档（游戏内）：档案配对列表 -->
+    <div id="saveListWrap">
+      <div class="save-sec" id="saveCurInfo"></div>
+      <div id="saveList"></div>
+      <button id="btnNewSave" class="boot-btn small" style="margin-top:10px">＋ 新建档案</button>
+      <button id="btnImportSave2" class="boot-btn small" style="margin-top:10px">📥 导入档案</button>
+    </div>
     <input type="file" id="saveFileInput" accept=".json,application/json" style="display:none">
   </div>
 </div>
@@ -353,11 +418,12 @@ window.addEventListener('unhandledrejection', e => {
   console.error('[GAME PROMISE ERROR]', e.reason && (e.reason.stack || e.reason.message || e.reason));
 });
 </script>
-<script src="js/three.min.js?v=st86"></script>
-<script src="js/GLTFLoader.js?v=st86"></script>
-<script src="js/SVGLoader.js?v=st86"></script>
-<script src="js/models.js?v=st86"></script>
-<script src="js/modellib.js?v=st86"></script>
+<script src="js/three.min.js?v=st87"></script>
+<script src="js/GLTFLoader.js?v=st87"></script>
+<script src="js/SVGLoader.js?v=st87"></script>
+<script src="js/models.js?v=st87"></script>
+<script src="js/modellib.js?v=st87"></script>
+<script src="js/humanoid.js?v=st87"></script>
 <script src="js/textures.js?v=st86"></script>
 <script src="js/audio.js?v=st86"></script>
 <script src="js/data.js?v=st86"></script>
@@ -374,7 +440,7 @@ window.addEventListener('unhandledrejection', e => {
 <script>
 // 版本自检（内联于入口文档）：确认浏览器实际加载的模块版本；缺失/不匹配 = 在跑旧缓存或别的目录副本
 (function(){
-  var need = 'v86';
+  var need = 'v87';
   var got = {
     main: window.__V_MAIN || '旧版!',
     station: window.__V_STATION || (window.Station ? '旧版!' : '未加载!'),

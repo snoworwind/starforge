@@ -23,6 +23,7 @@ const Player = (() => {
   };
   let credits = 0;
   let dead = false;
+  let appearance = null;   // 人物外观（创建角色时自定义：肤色/发型/服装配色等；联机同步）
 
   // 背包：36 格（前9=快捷栏）；hotIdx=-1 表示选中固定栏位「采矿激光」
   const inv = new Array(36).fill(null);
@@ -977,7 +978,7 @@ const Player = (() => {
   }
 
   function serialize(){
-    return { pos: pos.toArray(), yaw, pitch, stats: { ...stats }, inv: inv.map(s => s ? { ...s } : null), hotIdx, credits };
+    return { pos: pos.toArray(), yaw, pitch, stats: { ...stats }, inv: inv.map(s => s ? { ...s } : null), hotIdx, credits, appearance };
   }
   function deserialize(d){
     pos.fromArray(d.pos); yaw = d.yaw; pitch = d.pitch;
@@ -985,6 +986,7 @@ const Player = (() => {
     for (let i = 0; i < inv.length; i++) inv[i] = d.inv[i] ? { ...d.inv[i] } : null;
     hotIdx = d.hotIdx || 0;
     credits = d.credits || 0;
+    appearance = d.appearance || null;
   }
 
   return {
@@ -993,6 +995,7 @@ const Player = (() => {
     get pitch(){ return pitch; }, set pitch(v){ pitch = v; },
     get hotIdx(){ return hotIdx; }, set hotIdx(v){ hotIdx = v; },
     get credits(){ return credits; }, set credits(v){ credits = v; },
+    get appearance(){ return appearance; }, set appearance(v){ appearance = v; },
     get mineHeld(){ return mineHeld; }, set mineHeld(v){ mineHeld = v; },
     get dead(){ return dead; },
     keys, update, initVisuals, tryPlace, lookTarget, recharge, damage, setToolVisible,

@@ -702,7 +702,11 @@ function handleMessage(c, m){
     case 'reset-world': {
       if (c.role !== 'host') return;
       world = null;   // 密钥随世界一并清除：重置后下一位主机重新签发
-      try { fs.rmSync(worldFilePath(), { force: true }); } catch(e){}
+      // 删除必须排在未完成的存档写入之后：在途 saveWorld 已持有旧世界快照，
+      // 若此刻同步删除，稍后完成的写入会把旧世界写回磁盘 → 重启后「已重置」的世界复活
+      saveChain = saveChain.then(async () => {
+        try { await fsp.rm(worldFilePath(), { force: true }); } catch(e){}
+      });
       console.log(`${ts()} [world] ${c.name} 重置了服务器世界`);
       broadcast({ t: 'world-missing' });
       sendText(c, JSON.stringify({ t: 'chat', sys: 1, text: '服务器世界已重置，开始游戏后会自动上传你的世界' }));

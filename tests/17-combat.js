@@ -93,4 +93,49 @@ __SF_TEST__.suite('combat', function (t, api) {
     A.eq(window.World.genCount, g0, 'creature AI ticks generate zero chunks (gen=' + g0 + ')');
     window.Creatures.kill(s);
   });
+
+  t.test('被水淹没的细胞不产生幽灵兽群（无效候选不注册）', function () {
+    // 挑一个远离出生活动区的细胞，把候选环（细胞中心 12~92m）整圈淹水，
+    // 使 8 次地形验证全部落在水面上 → 修复前这些候选以 (0,0) 初始值入列，
+    // 掷骰命中即产生永久占据名额的幽灵兽群（水域生态大量出现、抑制真实生成）
+    var p = api.pos();
+    // 复制 creatures.js 的批次种子与随机消耗序：淹水后每次候选固定消耗
+    // 8 次验证 × 2 抽 + 4 行为参数 = 20 抽；roll 是第 nCand×20+1 抽。
+    // 选一个 roll < HERD_CHANCE(0.18) 的细胞，让「修复前必产生幽灵」可确定复现
+    function batchSeedOf(cx, cz){
+      var h = (window.World.seed ^ 0xC7EA5) >>> 0;
+      h = Math.imul(h ^ cx, 374761393);
+      h = Math.imul(h ^ cz, 668265263);
+      h = (h ^ (h >>> 13)) >>> 0;
+      return h;
+    }
+    var nCand = Math.min(window.World.biome.animal.count, 22);
+    function rollOf(cx, cz){
+      var rnd = api.mulberry32(batchSeedOf(cx, cz));
+      for (var i = 0; i < nCand * 20; i++) rnd();
+      return rnd();
+    }
+    var cx = Math.floor((p[0] + 300) / 24), cz = Math.floor(p[2] / 24);
+    var guard = 0;
+    while (rollOf(cx, cz) >= 0.18 && guard < 30){ cx++; guard++; }   // 找到掷骰命中的细胞
+    var ccx = cx * 24 + 12, ccz = cz * 24 + 12;
+    var waterId = api.defs.BLOCKS.water.id;
+    var r = 104;
+    for (var x = Math.floor(ccx - r); x <= ccx + r; x++){
+      for (var z = Math.floor(ccz - r); z <= ccz + r; z++){
+        var gy = window.World.topAt(x, z);
+        window.World.set(x, gy, z, waterId, true);   // silent：跳过网格重建，只改地形数据
+      }
+    }
+    var h0 = window.Creatures.debugHerds();
+    window.Creatures.debugRegisterCell(cx, cz);
+    var h1 = window.Creatures.debugHerds();
+    A.eq(h1, h0, 'flooded cell registers zero phantom herds (herds ' + h0 + ' → ' + h1 + ')');
+    // 无任何兽群停留在无效出生点 (0,0)（合法候选距细胞中心至少 12m，不可能落在原点）
+    var s = window.Creatures.serialize();
+    var phantoms = s.herds.filter(function (h) { return h[3] === 0 && h[4] === 0; });
+    A.eq(phantoms.length, 0, 'no herd at invalid (0,0) spawn point');
+    // 复位位置：后续套件不依赖本测试的淹水区域
+    api.setPos(96, 80, 96);
+  });
 });

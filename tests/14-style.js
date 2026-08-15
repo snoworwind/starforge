@@ -101,6 +101,11 @@ __SF_TEST__.suite('style', function (t, api) {
     var w = window.Game.debugWeather;
     A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));
     A.ok(w.n > 0, 'particles allocated');
+    // 16 种生态全部有大气粒子定义（沙尘/磁暴/孢子/盐晶/火星/苔絮/金粉等此前缺失 8 个）
+    var defs = window.Game.weatherDefs;
+    var missing = [];
+    for (var k in api.defs.BIOMES) if (!defs[k]) missing.push(k);
+    A.eq(missing.length, 0, 'every biome has weather particles, missing: ' + missing.join(','));
     document.querySelector('#setWeather button[data-q="off"]').onclick();
     A.eq(window.Game.debugWeather.on, false, 'weather disabled');
     document.querySelector('#setWeather button[data-q="on"]').onclick();

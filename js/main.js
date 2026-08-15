@@ -190,6 +190,15 @@ const Game = (() => {
     crystal:  { color: 0xd8f4f8, speed: 5,  size: 0.08, count: 220, opacity: 0.65 },
     ashen:    { color: 0x8a8a8a, speed: 7,  size: 0.07, count: 200, opacity: 0.55 },
     volcanic: { color: 0xff8a3a, speed: 6,  size: 0.09, count: 160, opacity: 0.75 },
+    // 补齐 8 个此前无大气粒子的生态（按生态氛围调色/速率）
+    desert:   { color: 0xe8d0a0, speed: 9,  size: 0.06, count: 140, opacity: 0.30 },   // 沙尘
+    amber:    { color: 0xf0c860, speed: 8,  size: 0.06, count: 130, opacity: 0.30 },   // 金色飘尘
+    ferrous:  { color: 0xa89ae0, speed: 16, size: 0.05, count: 150, opacity: 0.38 },   // 磁暴弧尘
+    alien:    { color: 0xb070e0, speed: 10, size: 0.07, count: 200, opacity: 0.42 },   // 孢子
+    salt:     { color: 0xf4f8fc, speed: 6,  size: 0.06, count: 160, opacity: 0.35 },   // 盐晶闪光
+    obsidian: { color: 0xff6a3a, speed: 7,  size: 0.08, count: 130, opacity: 0.60 },   // 余温火星
+    redmoss:  { color: 0xd87868, speed: 10, size: 0.06, count: 150, opacity: 0.32 },   // 苔絮
+    hive:     { color: 0xe8b860, speed: 8,  size: 0.06, count: 170, opacity: 0.38 },   // 信息素金粉
   };
   let weather = null;   // { def, points, pos:Float32Array, floors:Float32Array, n }
   function buildWeather(){
@@ -3539,12 +3548,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v104';
+    bd.textContent = 'build v105';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v104';
+  window.__V_MAIN = 'v105';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4728,6 +4737,7 @@ const Game = (() => {
     debugCloseDialog(){ dlg = null; const b = $('dialogBox'); if (b) b.classList.add('hidden'); },
     // 天气诊断（测试用）
     get debugWeather(){ return weather ? { on: true, kind: World.biome && World.biome.key, n: weather.n } : { on: false }; },
+    get weatherDefs(){ return WEATHER_DEFS; },
   };
   window.Game = api;
   return api;

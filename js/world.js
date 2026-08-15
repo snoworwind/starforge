@@ -70,6 +70,17 @@ const World = (() => {
   const solidMat = new THREE.MeshLambertMaterial({ map: Tex.texture, vertexColors: true, transparent: true, alphaTest: 0.4, side: THREE.DoubleSide });
   const waterMat = new THREE.MeshLambertMaterial({ map: Tex.texture, vertexColors: true, transparent: true, opacity: 0.72, side: THREE.DoubleSide });
 
+  // ---------- 发光块：真正自发光（emissive 顶点通道）+ 点光源按块色相 ----------
+  // GLOW_EMIT：雾后直接叠加的发光色（每块独立，深夜也亮）
+  // GLOW_LIGHT：进入点光源池的块及其光色（琥珀金珀是「地形」不是「灯」，只自发光不入池）
+  const GLOW_EMIT = {
+    lamp:        [0.62, 0.48, 0.24],
+    crystal:     [0.20, 0.60, 0.54],
+    glow_shroom: [0.16, 0.55, 0.38],
+    amber:       [0.30, 0.22, 0.10],
+  };
+  const GLOW_LIGHT = { lamp: 0xffd9a0, crystal: 0x7fe8e0, glow_shroom: 0x4ee8b8 };
+
   // ---------- 星球曲率（顶点着色器弯曲：高空/太空视角地形贴合球面，落地渐平）----------
   // 体素坐标下星球曲率半径恒为 1/0.004 = 250 格
   // 注：近全透明像素（边缘淡出环外圈/淡入首帧/皮肤 160 格外区块）必须 discard——
@@ -108,6 +119,21 @@ const World = (() => {
   }
   applyCurve(solidMat);
   applyCurve(waterMat);
+  // 发光注入：仅 solidMat 与其淡入克隆（水面/远景材质无 aEm 属性，不注入）
+  function applyGlow(mat){
+    const prev = mat.onBeforeCompile;
+    mat.onBeforeCompile = shader => {
+      if (prev) prev(shader);   // 先注入曲率/扫描（链式）
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute vec3 aEm;\nvarying vec3 vEm;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vEm = aEm;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vEm;')
+        .replace('#include <fog_fragment>', '#include <fog_fragment>\n  gl_FragColor.rgb += vEm;');
+    };
+    mat.customProgramCacheKey = () => 'curveGlow3';
+  }
+  applyGlow(solidMat);
   function setCurve(amt, cx, cz, fade, grow, edgeR){
     curveU.amt.value = amt;
     curveU.cx.value = cx;
@@ -820,6 +846,7 @@ const World = (() => {
     if (c.mesh){ group.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh = null; }
     if (c.waterMesh){ group.remove(c.waterMesh); c.waterMesh.geometry.dispose(); c.waterMesh = null; }
     const pos = [], nor = [], uv = [], col = [], ind = [];
+    const em = [];   // 发光块自发光顶点色（RGB；非发光块全 0）
     const wpos = [], wnor = [], wuv = [], wcol = [], wind = [];
     const wt = waterTintRGB();
     const x0 = c.cx * CHUNK, z0 = c.cz * CHUNK;
@@ -833,17 +860,21 @@ const World = (() => {
           const def = BLOCK_BY_ID[id];
           if (def.machine) continue;
           const x = x0 + lx, z = z0 + lz;
-          if (def.glow) (c.lamps || (c.lamps = [])).push([x, y, z]);
+          if (GLOW_LIGHT[def.key]) (c.lamps || (c.lamps = [])).push([x, y, z, def.key]);   // 只有「灯类」发光块进入点光源池
           if (def.cross){
             const t = Tex.uvRect(def.tiles.all);
             const gb = def.glow ? 1.7 : 1;   // 发光植物全亮
+            const emRGB = def.glow ? (GLOW_EMIT[def.key] || [0.45, 0.4, 0.25]) : null;
             const quads = [
               [[x+0.15,y,z+0.15],[x+0.85,y,z+0.85],[x+0.85,y+1,z+0.85],[x+0.15,y+1,z+0.15]],
               [[x+0.85,y,z+0.15],[x+0.15,y,z+0.85],[x+0.15,y+1,z+0.85],[x+0.85,y+1,z+0.15]],
             ];
             for (let q = 0; q < 2; q++){
               const b = pos.length / 3;
-              for (const [px, py, pz] of quads[q]){ pos.push(px, py, pz); nor.push(0, 1, 0); col.push(gb, gb, gb); }
+              for (const [px, py, pz] of quads[q]){
+                pos.push(px, py, pz); nor.push(0, 1, 0); col.push(gb, gb, gb);
+                em.push(emRGB ? emRGB[0] : 0, emRGB ? emRGB[1] : 0, emRGB ? emRGB[2] : 0);
+              }
               uv.push(t.u0, t.v0, t.u1, t.v0, t.u1, t.v1, t.u0, t.v1);
               ind.push(b, b + 1, b + 2, b, b + 2, b + 3, b, b + 2, b + 1, b, b + 3, b + 2);
             }
@@ -867,6 +898,7 @@ const World = (() => {
             }
             const t = Tex.uvRect(tileFor(def, f));
             const P = isWater ? wpos : pos, N = isWater ? wnor : nor, U = isWater ? wuv : uv, I = isWater ? wind : ind;
+            const emRGB = (!isWater && def.glow) ? (GLOW_EMIT[def.key] || [0.45, 0.4, 0.25]) : null;
             const b = P.length / 3;
             for (const cnr of face.corners){
               let yy = y + cnr[1];
@@ -874,7 +906,10 @@ const World = (() => {
               if (isWater && cnr[1] === 1) yy -= 0.12;
               P.push(x + cnr[0], yy, z + cnr[2]);
               N.push(face.dir[0], face.dir[1], face.dir[2]);
-              if (!isWater){ const s = face.shade * (def.glow ? 2.2 : 1); col.push(s, s, s); }   // 光源方块自体全亮
+              if (!isWater){
+                const s = face.shade * (def.glow ? 2.2 : 1); col.push(s, s, s);   // 光源方块自体全亮
+                em.push(emRGB ? emRGB[0] : 0, emRGB ? emRGB[1] : 0, emRGB ? emRGB[2] : 0);
+              }
               else { const sh = 0.72 + face.shade * 0.28; wcol.push(wt[0] * sh, wt[1] * sh, wt[2] * sh); }
             }
             U.push(t.u0, t.v1, t.u0, t.v0, t.u1, t.v1, t.u1, t.v0);
@@ -889,6 +924,7 @@ const World = (() => {
       g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
       g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+      g.setAttribute('aEm', new THREE.Float32BufferAttribute(em, 3));   // 发光块自发光顶点通道
       g.setIndex(ind);
       g.computeBoundingSphere();
       g.boundingSphere.radius += 60;   // 曲率顶点位移的裁剪余量
@@ -921,6 +957,7 @@ const World = (() => {
   function startFadeIn(mesh, sharedMat, targetOpacity){
     const mat = sharedMat.clone();
     applyCurve(mat);               // clone 不携带 onBeforeCompile，需重新注入曲率
+    if (sharedMat === solidMat) applyGlow(mat);   // 发光注入同样需要重建
     mat.opacity = 0;
     mesh.material = mat;
     fadeIns.push({ mesh, sharedMat, mat, targetOpacity, t: 0 });
@@ -1044,6 +1081,7 @@ const World = (() => {
       const l = lampPool[i];
       if (i < cands.length && cands[i].d < 3600){
         l.position.set(cands[i].p[0] + 0.5, cands[i].p[1] + 0.9, cands[i].p[2] + 0.5);
+        l.color.setHex(GLOW_LIGHT[cands[i].p[3]] || 0xffd9a0);   // 光色随块类型（晶簇青 / 荧光蕈绿 / 光源暖白）
         l.intensity = 0.95;
       } else l.intensity = 0;
     }
@@ -1401,6 +1439,8 @@ const World = (() => {
     setViewDist, setFarDist, setShadows,
     get structures(){ return structures; },
     stats, get genCount(){ return genCount; },
+    // 测试钩子：点光源池快照（on/光色/位置）
+    get debugLamps(){ return lampPool ? lampPool.map(l => ({ on: l.intensity > 0, color: l.color.getHex(), pos: [l.position.x, l.position.y, l.position.z] })) : []; },
   };
 })();
 window.World = World;

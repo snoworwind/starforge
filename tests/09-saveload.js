@@ -49,4 +49,26 @@ __SF_TEST__.suite('saveload', function (t, api) {
       });
     });
   });
+
+  t.test('完整区块快照：读档后区块来自落盘数据（Minecraft 式持久化）', function () {
+    // 生成并修改出生点外的区块 (3,3)，然后存档
+    var x = 60, z = 60, y = Math.min(api.topAt(x, z) + 1, 95);
+    api.setBlock(x, y, z, 'stone');
+    A.eq(api.blockKeyAt(x, y, z), 'stone', '修改生效');
+    var pcx = Math.floor(api.pos()[0] / 16), pcz = Math.floor(api.pos()[2] / 16);
+    return api.save('快照测试档').then(function (ok) {
+      A.ok(ok, 'save succeeded');
+      return api.listSaves();
+    }).then(function (saves) {
+      A.ok(saves.length >= 1, '有可用档案');
+      var key = saves[0].key;
+      return api.load(key).then(function (loaded) {
+        A.ok(loaded, 'load succeeded');
+        A.eq(api.blockKeyAt(x, y, z), 'stone', '修改过的方块从区块快照还原');
+        A.ok(api.chunkSaved(x, z), '修改区块来自完整快照（非程序化重生成）');
+        A.ok(api.chunkSaved(pcx * 16, pcz * 16), '出生点区块同样来自完整快照');
+        return api.deleteSave(key);
+      });
+    });
+  });
 });

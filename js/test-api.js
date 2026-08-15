@@ -218,6 +218,8 @@
   function setBlock(x, y, z, key) { window.World.set(x, y, z, BLOCKS[key].id); return true; }
   function topAt(x, z) { return window.World.topAt(x, z); }
   function findSpawn() { const v = window.World.findSpawn(); return [v.x, v.y, v.z]; }
+  function chunkSaved(x, z) { return window.World.chunkIsSaved(Math.floor(x / 16), Math.floor(z / 16)); }
+  function pendingSaveCount() { return window.World.pendingSaveCount(); }
 
   // ---------- 合成（镜像 UI.tryCraft，可精确断言产出） ----------
   function canCraft(recipeId) {
@@ -440,7 +442,7 @@
     chargeStat(kind) { return window.Player.chargeStat(kind); },
     canCharge(kind) { return window.Player.canCharge(kind); },
     // 世界
-    blockKeyAt, setBlock, topAt, findSpawn,
+    blockKeyAt, setBlock, topAt, findSpawn, chunkSaved, pendingSaveCount,
     raycast(o, d, dist) { return window.World.raycast(new THREE.Vector3(o[0], o[1], o[2]), new THREE.Vector3(d[0], d[1], d[2]), dist == null ? 6 : dist); },
     // 合成
     craft, canCraft,

@@ -36,7 +36,7 @@ __SF_TEST__.suite('net', function (t, api) {
   t.before(async function () {
     var c = wsClient();
     await c.open;
-    c.send({ t: 'hello', v: 2, name: '测试清理者', role: 'host' });
+    c.send({ t: 'hello', v: 3, name: '测试清理者', role: 'host' });
     var id = await c.next(function (m) { return m.t === 'ws-id'; });
     if (id.hasWorld) {
       c.send({ t: 'reset-world' });
@@ -80,19 +80,19 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('握手 → 空世界 → 上传 → 访客自动收 init', async function () {
     var host = wsClient(); await host.open;
-    host.send({ t: 'hello', v: 2, name: '测试房主', role: 'host', app: { suit: '#123456' } });
+    host.send({ t: 'hello', v: 3, name: '测试房主', role: 'host', app: { suit: '#123456' } });
     var id = await host.next(function (m) { return m.t === 'ws-id'; });
     A.eq(id.auth, 'ok', '认证通过');
     await host.next(function (m) { return m.t === 'world-missing'; });
     host.send({ t: 'world-upload', world: {
-      v: 2, name: '联机测试世界', creative: false, dropMult: 4,
+      v: 4, name: '联机测试世界', creative: false, dropMult: 4,
       galaxySeed: 777, galaxyCount: 1, currentPlanet: 0, dayTime: 0.4,
       planets: { '0': { mods: {}, machines: [], shipPos: [5, 30, 5], seed: 777, biome: 'green' } },
       galaxyArchives: {}, market: { carbon: 1.2 }, mapMarks: { '0': [{ x: 3, z: 4, y: 30, label: '矿点', gal: false }] }, flags: { x: 1 }, warpLock: null,
     } });
     await sleep(300);
     var guest = wsClient(); await guest.open;
-    guest.send({ t: 'hello', v: 2, name: '测试访客', role: 'guest' });
+    guest.send({ t: 'hello', v: 3, name: '测试访客', role: 'guest' });
     var init = await guest.next(function (m) { return m.t === 'init'; });
     A.eq(init.world.name, '联机测试世界', '世界名');
     A.eq(init.world.planets['0'].seed, 777, '星球种子');
@@ -107,12 +107,12 @@ __SF_TEST__.suite('net', function (t, api) {
   t.test('方块改动：整块 RLE + 增量 + 持久化到新访客', async function () {
     // 先连入拿到现有世界
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 2, name: '方块甲', role: 'host' });
+    a.send({ t: 'hello', v: 3, name: '方块甲', role: 'host' });
     await a.next(function (m) { return m.t === 'init' || m.t === 'world-missing'; });
-    // 整块（未知区块必须带 full RLE）
+    // 整块（未知区块必须带 full RLE；区块数据长度 = 16×16×96）
     var full = [];
     var i;
-    for (i = 0; i < 16384; i++) full.push(0);
+    for (i = 0; i < 24576; i++) full.push(0);
     full[((3 * 16 + 4) * 16) + 5] = 1;   // x=5,y=3,z=4
     var rle = [], cur = full[0], run = 1;
     for (i = 1; i < full.length; i++) {
@@ -121,7 +121,7 @@ __SF_TEST__.suite('net', function (t, api) {
     }
     rle.push(run, cur);
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 2, name: '方块乙', role: 'guest' });
+    b.send({ t: 'hello', v: 3, name: '方块乙', role: 'guest' });
     await b.next(function (m) { return m.t === 'init'; });
     b.send({ t: 'blk', planet: 0, x: 5, y: 3, z: 4, b: 1, full: rle });
     await a.next(function (m) { return m.t === 'blk' && m.b === 1; });
@@ -129,7 +129,7 @@ __SF_TEST__.suite('net', function (t, api) {
     await a.next(function (m) { return m.t === 'blk' && m.b === 2; });
     // 持久化验证：第三个连接拿到两份改动
     var c = wsClient(); await c.open;
-    c.send({ t: 'hello', v: 2, name: '方块丙', role: 'guest' });
+    c.send({ t: 'hello', v: 3, name: '方块丙', role: 'guest' });
     var init = await c.next(function (m) { return m.t === 'init'; });
     A.ok(init.world.planets['0'].mods['0,0'], '修改区块已持久化');
     a.close(); b.close(); c.close();
@@ -137,13 +137,13 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('机器增删 + 运行数据合并持久化', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 2, name: '机器甲', role: 'guest' });
+    a.send({ t: 'hello', v: 3, name: '机器甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     a.send({ t: 'mac', planet: 0, op: 'add', x: 8, y: 2, z: 8, type: 'furnace', dir: 0, data: { fuel: null } });
     a.send({ t: 'mac-data', planet: 0, arr: [{ x: 8, y: 2, z: 8, data: { fuel: { item: 'carbon', n: 3 }, prog: 0.5 } }] });
     await sleep(300);
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 2, name: '机器乙', role: 'guest' });
+    b.send({ t: 'hello', v: 3, name: '机器乙', role: 'guest' });
     var init = await b.next(function (m) { return m.t === 'init'; });
     var mach = (init.world.planets['0'].machines || []).filter(function (m) { return m.x === 8; })[0];
     A.ok(mach && mach.type === 'furnace', '机器已持久化');
@@ -153,7 +153,7 @@ __SF_TEST__.suite('net', function (t, api) {
     a.send({ t: 'mac', planet: 0, op: 'remove', x: 8, y: 2, z: 8 });
     await sleep(300);
     var c = wsClient(); await c.open;
-    c.send({ t: 'hello', v: 2, name: '机器丙', role: 'guest' });
+    c.send({ t: 'hello', v: 3, name: '机器丙', role: 'guest' });
     var init2 = await c.next(function (m) { return m.t === 'init'; });
     A.eq((init2.world.planets['0'].machines || []).some(function (m) { return m.x === 8; }), false, '机器已删除');
     a.close(); b.close(); c.close();
@@ -161,10 +161,10 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('聊天中继 + 服务器命令', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 2, name: '聊天甲', role: 'guest' });
+    a.send({ t: 'hello', v: 3, name: '聊天甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 2, name: '聊天乙', role: 'guest' });
+    b.send({ t: 'hello', v: 3, name: '聊天乙', role: 'guest' });
     await b.next(function (m) { return m.t === 'init'; });
     b.send({ t: 'chat', text: '大家好' });
     var chat = await a.next(function (m) { return m.t === 'chat' && !m.sys; });
@@ -178,10 +178,10 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('位置中继 + 一键传送 + 市场/标记/生物中继', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 2, name: '传送甲', role: 'guest' });
+    a.send({ t: 'hello', v: 3, name: '传送甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 2, name: '传送乙', role: 'guest' });
+    b.send({ t: 'hello', v: 3, name: '传送乙', role: 'guest' });
     var bInit = await b.next(function (m) { return m.t === 'init'; });
     var bId = bInit.you.id;
     b.send({ t: 'pos', planet: 0, st: 'planet', p: [11, 22, 33], yaw: 1.5, act: 1 });
@@ -208,7 +208,7 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('服务器权威昼夜时间广播', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 2, name: '时间甲', role: 'guest' });
+    a.send({ t: 'hello', v: 3, name: '时间甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var t1 = await a.next(function (m) { return m.t === 'time'; });
     var t2 = await a.next(function (m) { return m.t === 'time'; });
@@ -219,18 +219,18 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('人物数据按名字持久化 + 同名重连恢复 + 离线上报', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 2, name: '人物甲', role: 'guest' });
+    a.send({ t: 'hello', v: 3, name: '人物甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     a.send({ t: 'pos', planet: 0, st: 'planet', p: [42, 30, 42], yaw: 0.5 });
     a.send({ t: 'char', char: { name: '人物甲', inv: [{ item: 'carbon', n: 9 }], credits: 100, player: { pos: [42, 30, 42], inv: [{ item: 'carbon', n: 9 }], credits: 100 }, techState: { survival: true } } });
     // 等第三个旁观者确认离线后再重连（避免重名改名）
     var watch = wsClient(); await watch.open;
-    watch.send({ t: 'hello', v: 2, name: '旁观者', role: 'guest' });
+    watch.send({ t: 'hello', v: 3, name: '旁观者', role: 'guest' });
     await watch.next(function (m) { return m.t === 'init'; });
     a.close();
     await watch.next(function (m) { return m.t === 'left' && m.name === '人物甲'; }, 8000);
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 2, name: '人物甲', role: 'guest' });
+    b.send({ t: 'hello', v: 3, name: '人物甲', role: 'guest' });
     var init = await b.next(function (m) { return m.t === 'init'; });
     A.eq(init.you.name, '人物甲', '同名重连不改名');
     A.eq(init.you.char.credits, 100, '人物数据恢复');
@@ -262,7 +262,7 @@ __SF_TEST__.suite('net-join', function (t, api) {
     api.give('carbon', 30);
     // 与当前世界不同的种子，验证世界确实被替换
     var world = {
-      v: 2, name: '服务器世界', creative: true, dropMult: 7,
+      v: 4, name: '服务器世界', creative: true, dropMult: 7,
       galaxySeed: 123456, galaxyCount: 1, currentPlanet: 0, dayTime: 0.25,
       planets: { '0': { mods: {}, machines: [], shipPos: [6, 40, 6], seed: 20202020, biome: 'lush' } },
       galaxyArchives: {}, market: { carbon: 1.5 }, mapMarks: { '0': [{ x: 10, z: 10, y: 30, label: '基地', gal: false }] },
@@ -288,14 +288,14 @@ __SF_TEST__.suite('net-join', function (t, api) {
   t.test('服务器人物数据应用（you.char）+ 指定出生点', async function () {
     var spawn = { planet: 0, p: [12, 45, 12], st: 'planet', yaw: 1.2 };
     var you = { id: 9, name: '服务器旅行者', char: {
-      v: 3, kind: 'char', name: '服务器旅行者',
+      v: 4, kind: 'char', name: '服务器旅行者',
       appearance: null,
       player: { pos: [12, 45, 12], yaw: 1.2, pitch: 0, stats: { hp: 100, hpMax: 100 }, inv: [{ item: 'iron_ingot', n: 5 }], hotIdx: 0, credits: 88, appearance: null },
       techState: { survival: true }, questIdx: 0, playTime: 10, fuelLoaded: 1,
       playerShip: { model: 'ship', cls: 'C', name: '测试船', inv: Array(12).fill(null) }, shipGarage: [],
     } };
     var world = {
-      v: 2, name: '服务器世界2', creative: false, dropMult: 4,
+      v: 4, name: '服务器世界2', creative: false, dropMult: 4,
       galaxySeed: 123456, galaxyCount: 1, currentPlanet: 0, dayTime: 0.5,
       planets: { '0': { mods: {}, machines: [], shipPos: [6, 40, 6], seed: 30303030, biome: 'lush' } },
       galaxyArchives: {}, market: {}, mapMarks: {}, flags: {}, warpLock: null,

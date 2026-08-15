@@ -94,18 +94,20 @@ try {
   await new Promise(r => setTimeout(r, 500));   // 等房主位置广播到服务器
   const hostId = await A.evaluate(() => Net.myId);
   const bPosBefore = await B.evaluate(() => [window.Player.pos.x, window.Player.pos.y, window.Player.pos.z]);
-  await B.evaluate(id => Net.requestTp(id), hostId);
-  for (let i = 0; i < 8; i++){
-    await new Promise(r => setTimeout(r, 2000));
-    const bp = await B.evaluate(() => [window.Player.pos.x, window.Player.pos.y, window.Player.pos.z]);
-    console.log(`[tp diag] before=${bPosBefore.map(v => v.toFixed(1)).join(',')} now=${bp.map(v => v.toFixed(1)).join(',')}`);
-    if (Math.abs(bp[0] - 50) < 6 && Math.abs(bp[2] - 50) < 6) break;
+  // 无头环境 rAF 可能被节流，房主广播可能滞后：多轮重试直到服务器记录到新位置
+  let tpOk = false;
+  for (let attempt = 0; attempt < 6 && !tpOk; attempt++){
+    await B.evaluate(id => Net.requestTp(id), hostId);
+    for (let i = 0; i < 4; i++){
+      await new Promise(r => setTimeout(r, 1500));
+      tpOk = await B.evaluate(() => Math.abs(window.Player.pos.x - 50) < 6 && Math.abs(window.Player.pos.z - 50) < 6);
+      if (tpOk) break;
+    }
+    if (!tpOk) await new Promise(r => setTimeout(r, 2000));   // 等房主下一次广播
   }
-  await B.waitForFunction(() => {
-    const p = window.Player.pos;
-    return Math.abs(p.x - 50) < 6 && Math.abs(p.z - 50) < 6;
-  }, null, { timeout: 5000 });
-  ok('访客传送到房主身边', true);
+  const bPosAfter = await B.evaluate(() => [window.Player.pos.x, window.Player.pos.y, window.Player.pos.z]);
+  console.log(`[tp diag] before=${bPosBefore.map(v => v.toFixed(1)).join(',')} after=${bPosAfter.map(v => v.toFixed(1)).join(',')}`);
+  ok('访客传送到房主身边', tpOk, tpOk ? '' : `after=${bPosAfter.map(v => v.toFixed(1)).join(',')}`);
 
   // ---- 昼夜同步（服务器权威时间）----
   const tA = await A.evaluate(() => Net.syncedTime());

@@ -423,12 +423,14 @@ const Game = (() => {
     clearScanMarkers();
     const pd = SYSTEM_PLANETS[pid];
     const saved = visitedPlanets[pid];
+    const savedChunks = await ensurePlanetChunks(pid);   // v4 完整区块快照（未建档/联机客人 → null）
     if (saved && !fresh){
-      World.init(pd.biome, saved.seed, saved.mods || null);
+      World.init(pd.biome, saved.seed, saved.mods || null, savedChunks);
       if (!center) center = [saved.shipPos[0], saved.shipPos[2]];
     } else {
-      World.init(pd.biome, seed !== undefined ? (seed >>> 0) : (Math.random() * 1e9) | 0, null);
+      World.init(pd.biome, seed !== undefined ? (seed >>> 0) : (Math.random() * 1e9) | 0, null, savedChunks);
     }
+    worldLoadedGalaxy = Space.getCurrentGalaxySeed();
     if (!center) center = [0, 0];
     await World.pregen(center[0], center[1], 4, f => setP(f * 0.9));
     buildPlanetScene();
@@ -459,15 +461,131 @@ const Game = (() => {
     if (!deferState) state = 'planet';
     Sound.Music.setMode(World.biome.haz ? 'danger' : 'planet');
   }
-  function savePlanetState(){
+  function savePlanetState(pid){
+    const p = pid === undefined ? currentPlanet : pid;
+    if (worldLoadedFor !== p) return;   // 内存世界不属于该星球则跳过（跨星系/换星球保护）
     const w = World.serialize();
-    visitedPlanets[currentPlanet] = {
-      mods: w.mods,
+    visitedPlanets[p] = {
+      mods: w.mods,                     // 修改过的区块 RLE（常驻内存：联机上传 + 落盘安全网）
       machines: Factory.serialize(),
       shipPos: shipPos.toArray(),
       seed: w.seed,
-      biome: SYSTEM_PLANETS[currentPlanet].biome,
+      biome: SYSTEM_PLANETS[p].biome,
     };
+    persistModsToStore(p, worldLoadedGalaxy);   // 立即把修改区块写入完整快照库（防 World.dispose 丢失）
+  }
+
+  // ---------- 完整区块落盘（Minecraft 式：worldKey|galaxySeed|pid|cx,cz）----------
+  const planetChunkCache = new Map();   // `${galaxySeed}:${pid}` -> { map: Map("cx,cz"->{mod,data}), promise }
+  function chunkPrefix(worldKey, galaxySeed, pid){ return worldKey + '|' + galaxySeed + '|' + pid + '|'; }
+  function chunkStoreKey(worldKey, galaxySeed, pid, cx, cz){ return chunkPrefix(worldKey, galaxySeed, pid) + cx + ',' + cz; }
+  function chunkPersistEnabled(){ return !!activeWorldKey && !(window.Net && Net.role === 'guest'); }
+  function clearPlanetChunkCache(){ planetChunkCache.clear(); }
+  // 落盘后使对应星球的快照缓存失效：下次 ensurePlanetChunks 从库中重读（拿到最新 mod 标记）
+  function invalidatePlanetChunkCache(galaxySeed, pid){
+    planetChunkCache.delete((activeWorldKey || 'none') + ':' + galaxySeed + ':' + pid);
+  }
+  async function ensurePlanetChunks(pid){
+    if (!chunkPersistEnabled()) return null;
+    const gs = Space.getCurrentGalaxySeed();
+    const cacheKey = (activeWorldKey || 'none') + ':' + gs + ':' + pid;
+    let e = planetChunkCache.get(cacheKey);
+    if (e && e.map) return e.map;
+    if (e && e.promise) return e.promise;
+    const prefix = chunkPrefix(activeWorldKey, gs, pid);
+    const promise = (async () => {
+      const map = new Map();
+      try {
+        const keys = await SaveStore.getChunkKeys(prefix);
+        for (let i = 0; i < keys.length; i += 400){
+          const got = await SaveStore.getChunks(keys.slice(i, i + 400));
+          for (const [k, rec] of got){
+            const mm = k.slice(prefix.length).match(/^(-?\d+),(-?\d+)$/);
+            if (mm && rec) map.set(mm[1] + ',' + mm[2], { mod: rec.mod, data: rec.data });
+          }
+        }
+      } catch(err){ console.warn('[save] 区块快照读取失败', err); }
+      if (planetChunkCache.get(cacheKey) === e) planetChunkCache.set(cacheKey, { map });
+      return map;
+    })();
+    planetChunkCache.set(cacheKey, { promise });
+    return promise;
+  }
+  function persistModsToStore(pid, galaxySeed){
+    if (!chunkPersistEnabled()) return Promise.resolve(false);
+    const rec = visitedPlanets[pid];
+    if (!rec || !rec.mods) return Promise.resolve(true);
+    const keys = Object.keys(rec.mods);
+    if (!keys.length) return Promise.resolve(true);
+    const entries = keys.map(k => {
+      const a = k.split(',');
+      return { key: chunkStoreKey(activeWorldKey, galaxySeed, pid, +a[0], +a[1]), rec: { v: 1, mod: 1, data: Uint16Array.from(rec.mods[k]) } };
+    });
+    return SaveStore.putChunks(entries).then(ok => {
+      if (!ok) console.warn('[save] 修改区块落盘失败');
+      else invalidatePlanetChunkCache(galaxySeed, pid);
+      return ok;
+    });
+  }
+  function flushPendingWorldChunks(pid, galaxySeed, budget){
+    if (!chunkPersistEnabled()) return Promise.resolve(0);
+    const batch = World.takePendingSave(budget);
+    if (!batch.length) return Promise.resolve(0);
+    const entries = batch.map(b => ({ key: chunkStoreKey(activeWorldKey, galaxySeed, pid, b.cx, b.cz), rec: { v: 1, mod: b.mod, data: b.rle } }));
+    return SaveStore.putChunks(entries).then(ok => {
+      if (!ok) World.requeueSave(batch);
+      else invalidatePlanetChunkCache(galaxySeed, pid);
+      return ok ? batch.length : 0;
+    });
+  }
+  let chunkWriteBusy = false;
+  function flushChunkQueue(budget){
+    if (chunkWriteBusy || !chunkPersistEnabled() || worldLoadedFor === null) return 0;
+    const batch = World.takePendingSave(budget || 6);
+    if (!batch.length) return 0;
+    chunkWriteBusy = true;
+    const entries = batch.map(b => ({ key: chunkStoreKey(activeWorldKey, worldLoadedGalaxy, worldLoadedFor, b.cx, b.cz), rec: { v: 1, mod: b.mod, data: b.rle } }));
+    SaveStore.putChunks(entries).then(ok => {
+      if (!ok) World.requeueSave(batch);
+      else invalidatePlanetChunkCache(worldLoadedGalaxy, worldLoadedFor);
+    }).catch(() => World.requeueSave(batch)).finally(() => { chunkWriteBusy = false; });
+    return batch.length;
+  }
+  async function flushAllChunks(){
+    if (!chunkPersistEnabled()) return;
+    if (worldLoadedFor !== null){
+      savePlanetState();
+      await persistModsToStore(worldLoadedFor, worldLoadedGalaxy);   // 修改区块先行落盘（幂等）
+      while (chunkWriteBusy) await new Promise(r => setTimeout(r, 10));   // 等在途后台批次落定
+      let guard = 0;
+      while (guard++ < 200){
+        const n = await flushPendingWorldChunks(worldLoadedFor, worldLoadedGalaxy, 400);
+        if (!n) break;
+      }
+    }
+  }
+  function exportSlotJson(key, data){
+    try {
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (key.replace(/[^\w-]/g, '_') || 'starforge_save') + '.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      return true;
+    } catch(e){ return false; }
+  }
+  // v4 起旧档（v≤3）不兼容：明确导出/删除，不静默迁移
+  async function legacySaveAction(key, d){
+    try {
+      const exportOk = window.confirm('该存档由旧版本创建，无法在新版本读取。\n\n【确定】导出 JSON 备份\n【取消】跳过导出');
+      if (exportOk) exportSlotJson(key, d);
+      const del = window.confirm('是否删除这个旧版存档？（列表中的其它旧档可稍后处理）\n\n【确定】删除\n【取消】保留');
+      if (del) await deleteSave(key);
+    } catch(e){ console.warn('[save] 旧档处理失败', e); }
+    UI.bigMessage('旧版存档', '旧档不兼容新版（存档格式 v4）。可开始新游戏或加入联机世界', 4200);
   }
 
   // opts.char = { name, appearance, key? }（key=复用已有角色）；opts.world = { name, seed }
@@ -511,6 +629,7 @@ const Game = (() => {
     visitedPlanets = {};
     galaxyArchives = {};
     mapMarks = {};
+    clearPlanetChunkCache();   // 新世界：区块快照缓存失效
     const wseed = (opts.world && opts.world.seed !== undefined && opts.world.seed !== null && opts.world.seed !== '') ? (opts.world.seed | 0) : undefined;
     await genPlanet(0, true, null, wseed, true);   // 先建档案再宣告 planet，避免读档竞态
     const sp = World.findSpawn();
@@ -1295,6 +1414,7 @@ const Game = (() => {
   let landAnim = null;
   // ---------- 无缝入星（NMS 式：接近星球自动再入，无加载画面）----------
   let worldLoadedFor = null;        // 当前 World 数据属于哪颗星球
+  let worldLoadedGalaxy = HOME_GALAXY_SEED;   // 该星球所属星系种子（区块落盘键前缀）
   let prepState = null;             // {pid, center:[x,z]}
   let reentryT = 0;
   // ---- 大气颜色滤镜：接近星球时渐显目标星球天空色（NMS 式再入氛围）----
@@ -1391,10 +1511,10 @@ const Game = (() => {
     north.set(-Math.sin(lat) * Math.cos(phi), Math.cos(lat), -Math.sin(lat) * Math.sin(phi));
   }
   const BEACON_LOCK_ANG = 0.12;   // 信标定点登陆需精确对准（约 7°）
-  const SEA_Y = 16;               // 与球面表面对应的体素高度（略低于海平面20，防止球体穿透水面）
-  const HANDOFF_Y = 104;          // 太空→大气 握手高度（体素）：入场留足反应高度（峰顶+树冠≈63）
-  const EXIT_Y = 175;             // 大气→太空 高度（体素）：突破云层顶(≈124~158)即冲出大气，不再爬无谓的平流层
-  const HANDOFF_BUFFER_H = 16;    // 大气→太空 交棒缓冲区高度（格）：进入该区间且资源未就绪时短暂锁控兜底
+  const SEA_Y = World.SEA_Y;     // 与球面表面对应的体素高度（海平面下 4 格，防止球体穿透水面）
+  const HANDOFF_Y = 150;         // 太空→大气 握手高度（体素）：入场留足反应高度（峰顶+树冠≈94）
+  const EXIT_Y = 220;            // 大气→太空 高度（体素）：突破云层顶(≈124~158)即冲出大气，不再爬无谓的平流层
+  const HANDOFF_BUFFER_H = 16;   // 大气→太空 交棒缓冲区高度（格）：进入该区间且资源未就绪时短暂锁控兜底
   // 信标放置/改名后即刻存档（使太空立即可见）
   function saveBeaconState(pid){
     if (!pid && pid !== 0) pid = currentPlanet;
@@ -1409,17 +1529,30 @@ const Game = (() => {
   function prepPlanet(pid){
     if (worldLoadedFor === pid) return;                 // 已加载（如刚起飞的星球）
     if (!prepState || prepState.pid !== pid){
-      World.dispose();                                   // 旧星球区块数据彻底清空——残留 block ID 与新星球 biome 冲突的根源
+      // 区块快照未就绪时本帧跳过（加载完成后下一帧继续；调用方逐帧重复调用）
+      const ce = planetChunkCache.get((activeWorldKey || 'none') + ':' + Space.getCurrentGalaxySeed() + ':' + pid);
+      if (chunkPersistEnabled() && !(ce && ce.map)){
+        ensurePlanetChunks(pid);
+        return;
+      }
+      // 旧星球离场：内存档案 + 完整快照落盘（用旧星系的种子键，防止跨星系串档）
+      if (worldLoadedFor !== null){
+        savePlanetState();
+        flushPendingWorldChunks(worldLoadedFor, worldLoadedGalaxy, 2000);
+        World.dispose();   // 旧星球区块数据彻底清空——残留 block ID 与新星球 biome 冲突的根源
+      }
       const pd = SYSTEM_PLANETS[pid];
       const saved = visitedPlanets[pid];
+      const savedChunks = ce && ce.map ? ce.map : null;
       if (saved){
-        World.init(pd.biome, saved.seed, saved.mods || null);
+        World.init(pd.biome, saved.seed, saved.mods || null, savedChunks);
         prepState = { pid, center: [saved.shipPos[0], saved.shipPos[2]] };
       } else {
-        World.init(pd.biome, (Math.random() * 1e9) | 0, null);
+        World.init(pd.biome, (Math.random() * 1e9) | 0, null, savedChunks);
         prepState = { pid, center: [0, 0] };
       }
       worldLoadedFor = pid;
+      worldLoadedGalaxy = Space.getCurrentGalaxySeed();
       clearScanMarkers();   // 换星球：上一颗星球的矿物/兴趣点标记全部作废
     }
   }
@@ -1513,7 +1646,12 @@ const Game = (() => {
   const _qBasis = new THREE.Quaternion(), _mBasis3 = new THREE.Matrix4();
   const _skyUp = new THREE.Vector3(), _skyE = new THREE.Vector3(), _skyN = new THREE.Vector3(), _skyDir = new THREE.Vector3();
   const _sunDirL = new THREE.Vector3();
-  function enterPlanetSeamless(pid){
+  let landingLock = false;   // 落地过渡防重入（区块快照加载期间仍处于太空态，逐帧检测会重复触发）
+  async function enterPlanetSeamless(pid){
+    if (landingLock) return;
+    landingLock = true;
+    try {
+    await ensurePlanetChunks(pid);   // 区块快照就绪后再落地（未就绪时 prepPlanet 会本帧跳过）
     const pd = SYSTEM_PLANETS[pid];
     const planet = Space.planets.find(p => p.def.id === pid);
     const wasNew = visitedPlanets[pid] === undefined && pid !== landedPlanet;
@@ -1600,6 +1738,9 @@ const Game = (() => {
       World.biome.name + ' · 当地时间 ' + timeLabel(entryTime) +
       (target ? ` · 已锁定信标「${target.label}」` : '') + ' — E 就地降落', 4000);
     lockPointer();
+    } finally {
+      landingLock = false;
+    }
   }
   // 太空中接近星球 → 后台预载 + 地表贴附渲染 → 连续再入
   function seamlessApproach(){
@@ -1610,6 +1751,8 @@ const Game = (() => {
       if (d < bestD){ bestD = d; best = p; }
     }
     if (!best){ detachPreview(); return; }
+    // 提前预取目标星球的完整区块快照（进入激活范围前开始，落地时已就绪）
+    if (bestD < Space.lodRange() + 600) ensurePlanetChunks(best.def.id);
     // 接近时大气光晕渐强
     const glow = best.mesh.children[0];
     if (glow && glow.material)
@@ -1850,9 +1993,15 @@ const Game = (() => {
     const prevSeed = Space.getCurrentGalaxySeed();
     const targetSeed = warpAnim.seed;
     const leavingHome = prevSeed === HOME_GALAXY_SEED;
+    // 跃迁前：当前星球的内存档案与待落盘区块全部按旧星系种子入库（防跨星系串档）
+    if (worldLoadedFor !== null){
+      savePlanetState();
+      await flushPendingWorldChunks(worldLoadedFor, worldLoadedGalaxy, 4000);
+    }
     // 归档当前星系的星球档案（信标/建筑）+ 地图标记——返回时恢复，离开时不留痕迹在别星系
     galaxyArchives[prevSeed] = visitedPlanets;
     galaxyArchives[prevSeed + '_marks'] = mapMarks;
+    clearPlanetChunkCache();   // 星系切换：旧星系区块快照缓存失效
     detachPreview();
     const gal = await Space.warpGalaxy(targetSeed);
     previewGroup = null;        // 旧太空场景已销毁
@@ -2250,32 +2399,6 @@ const Game = (() => {
     return migrationPromise;
   }
 
-  // v2 整体档 → 人物/世界拆分迁移（幂等：只处理仍为 v2 的槽位）
-  async function migrateV2Slots(){
-    try {
-      const idx = await listSaves();
-      let changed = false;
-      const newIdx = [];
-      for (const e of idx){
-        const d = await SaveStore.getSlot(e.key);
-        if (d && d.v === 2 && typeof d.currentPlanet === 'number' && d.player){
-          const sp = splitV2(d);
-          const chKey = newId('starforge_ch_'), wdKey = newId('starforge_wd_');
-          await putChar(chKey, sp.ch, { key: chKey, name: sp.ch.name, time: Date.now(), playMin: 0, credits: (sp.ch.player && sp.ch.player.credits) || 0 });
-          await putWorld(wdKey, sp.wd, { key: wdKey, name: sp.wd.name, time: Date.now(), planetName: (SYSTEM_PLANETS[sp.wd.currentPlanet] || {}).name || '未知星球', creative: sp.wd.creative, playMin: 0 });
-          const entry = { key: e.key, name: e.name || '旧档案', time: e.time || Date.now(), charKey: chKey, worldKey: wdKey, charName: sp.ch.name, worldName: sp.wd.name,
-            creative: sp.wd.creative, planetName: (SYSTEM_PLANETS[sp.wd.currentPlanet] || {}).name || '未知星球', credits: (sp.ch.player && sp.ch.player.credits) || 0, playMin: e.playMin || 0 };
-          await SaveStore.putSlot(e.key, { v: 3, kind: 'session', ...entry });
-          newIdx.push(entry);
-          changed = true;
-        } else {
-          newIdx.push(e);
-        }
-      }
-      if (changed) await writeIndex(newIdx);
-    } catch(e){ console.error('[save] v2 迁移失败', e); }
-  }
-
   async function listSaves(){
     if (migrationPromise) await migrationPromise;
     try {
@@ -2299,7 +2422,7 @@ const Game = (() => {
   }
   function buildCharData(){
     return {
-      v: 3, kind: 'char', name: charName,
+      v: 4, kind: 'char', name: charName,
       appearance: Player.appearance,
       player: Player.serialize(),      // 含 stats/inv/hotIdx/credits/appearance
       techState, questIdx, playTime,
@@ -2337,18 +2460,36 @@ const Game = (() => {
     if (i >= 0) idx[i] = meta; else idx.unshift(meta);
     return SaveStore.atomicWrite(key, data, idx, WORLD_INDEX_KEY);
   }
-  function buildWorldData(){
+  // 世界记录 v4：mods 不再落盘（完整区块快照走 chunks 库）；includeMods=true 仅用于联机上传
+  function stripPlanetsMods(src){
+    const out = {};
+    for (const k in src){
+      const p = src[k];
+      if (!p) continue;
+      out[k] = { machines: p.machines, shipPos: p.shipPos, seed: p.seed, biome: p.biome };
+    }
+    return out;
+  }
+  function stripArchives(src){
+    const out = {};
+    for (const k in src){
+      out[k] = k.endsWith('_marks') ? src[k] : stripPlanetsMods(src[k]);
+    }
+    return out;
+  }
+  function buildWorldData(includeMods){
     // 仅当内存中的地形/机器确属当前星球时才归档（跃迁后在太空存档时 worldLoadedFor 为 null）
     if (worldLoadedFor !== null && worldLoadedFor === currentPlanet) savePlanetState();
     const STATION_STATES = ['station', 'docked', 'dockAnim', 'stationed', 'stationWalk', 'undockAnim'];
     return {
-      v: 3, kind: 'world', name: worldName,
+      v: 4, kind: 'world', name: worldName,
+      terrainV: 1,               // 地形生成器版本（联机一致性/未来升级预留）
       state: STATION_STATES.includes(state) ? 'space' : state,
       currentPlanet, dayTime, flags, market,
       placedCount, creative, dropMult,
       galaxySeed: Space.getCurrentGalaxySeed(), galaxyCount,
-      planets: visitedPlanets,
-      galaxyArchives,
+      planets: includeMods ? visitedPlanets : stripPlanetsMods(visitedPlanets),
+      galaxyArchives: includeMods ? galaxyArchives : stripArchives(galaxyArchives),
       mapMarks,
       playerPlace: { pos: Player.pos.toArray(), yaw: Player.yaw, pitch: Player.pitch },
       warpLock,                 // 曲速导航锁定
@@ -2378,27 +2519,6 @@ const Game = (() => {
     return w;
   }
 
-  // v2 旧档 → 人物/世界拆分（读档/迁移时幂等执行）
-  function splitV2(d){
-    const ch = {
-      v: 3, kind: 'char', name: d.name || '旅行者',
-      appearance: (d.player && d.player.appearance) || null,
-      player: d.player, techState: d.techState, questIdx: d.questIdx,
-      playTime: d.playTime || 0, fuelLoaded: d.fuelLoaded || 0,
-      playerShip: d.playerShip, shipGarage: d.shipGarage,
-    };
-    const wd = {
-      v: 3, kind: 'world', name: d.name || '未命名世界',
-      state: d.state, currentPlanet: d.currentPlanet, dayTime: d.dayTime,
-      flags: d.flags, market: d.market, placedCount: d.placedCount || {},
-      creative: !!d.creative, dropMult: d.dropMult || 1,
-      galaxySeed: d.galaxySeed, galaxyCount: d.galaxyCount,
-      planets: d.planets, galaxyArchives: d.galaxyArchives, mapMarks: d.mapMarks,
-      playerPlace: d.player ? { pos: d.player.pos, yaw: d.player.yaw, pitch: d.player.pitch } : { pos: [0, 40, 0], yaw: 0, pitch: 0 },
-      shipState: d.shipState, warpLock: d.warpLock,
-    };
-    return { ch, wd };
-  }
   // saveTo(key)：人物+世界各自落盘，配对写入指定槽位；saveTo(null, name)：新建槽位
   let saveBusy = false, saveAgain = false, saveChain = null, pendingKey = null, pendingName = null;
   function saveTo(key, name){
@@ -2420,9 +2540,10 @@ const Game = (() => {
       try {
         // 人物独立落盘（首次存档自动建档）
         if (!activeCharKey) activeCharKey = newId('starforge_ch_');
-        await putChar(activeCharKey, charPayload, { key: activeCharKey, name: charName, time: Date.now(), playMin: (playTime / 60) | 0, credits: Player.credits });
-        // 世界独立落盘（首次存档自动建档）
         if (!activeWorldKey) activeWorldKey = newId('starforge_wd_');
+        await flushAllChunks();   // 完整区块快照先于世界记录落盘（Minecraft 式）
+        await putChar(activeCharKey, charPayload, { key: activeCharKey, name: charName, time: Date.now(), playMin: (playTime / 60) | 0, credits: Player.credits });
+        // 世界独立落盘
         await putWorld(activeWorldKey, worldPayload, { key: activeWorldKey, name: worldName, time: Date.now(), planetName: SYSTEM_PLANETS[currentPlanet].name, creative, playMin: (playTime / 60) | 0 });
         // 配对槽位（人物×世界）
         const idx = await listSaves();
@@ -2442,7 +2563,7 @@ const Game = (() => {
         entry.planetName = SYSTEM_PLANETS[currentPlanet].name;
         entry.credits = Player.credits;
         entry.playMin = (playTime / 60) | 0;
-        const ok = await SaveStore.atomicWrite(key, { v: 3, kind: 'session', ...entry }, idx);
+        const ok = await SaveStore.atomicWrite(key, { v: 4, kind: 'session', ...entry }, idx);
         if (ok) activeSaveKey = key;
         else UI.bigMessage('存档失败', '浏览器存储空间不足，请删除旧档');
         return ok;
@@ -2471,22 +2592,17 @@ const Game = (() => {
     try { d = await SaveStore.getSlot(key); }
     catch(e){ console.error('[save] getSlot 失败', e); }
     if (!d){ UI.bigMessage('读档失败', '档案数据丢失'); return false; }
-    // v2 旧档：就地拆分迁移为 人物/世界/配对（幂等）
-    if (typeof d === 'object' && d.v === 2 && typeof d.currentPlanet === 'number' && d.player){
-      try {
-        const sp = splitV2(d);
-        const chKey = newId('starforge_ch_'), wdKey = newId('starforge_wd_');
-        await putChar(chKey, sp.ch, { key: chKey, name: sp.ch.name, time: Date.now(), playMin: 0, credits: (sp.ch.player && sp.ch.player.credits) || 0 });
-        await putWorld(wdKey, sp.wd, { key: wdKey, name: sp.wd.name, time: Date.now(), planetName: (SYSTEM_PLANETS[sp.wd.currentPlanet] || {}).name || '未知星球', creative: sp.wd.creative, playMin: 0 });
-        d = { v: 3, kind: 'session', key, name: d.name || '旧档案', charKey: chKey, worldKey: wdKey, time: Date.now() };
-      } catch(e){ console.error('[save] v2 拆分失败', e); }
+    // v4 起：旧版（v≤3）存档不兼容——明确导出/删除，不静默迁移
+    if (d && typeof d === 'object' && d.kind === 'session' && d.v < 4){
+      await legacySaveAction(key, d);
+      return false;
     }
-    if (!d || typeof d !== 'object' || d.v !== 3 || d.kind !== 'session' || !d.charKey || !d.worldKey){
+    if (!d || typeof d !== 'object' || d.v !== 4 || d.kind !== 'session' || !d.charKey || !d.worldKey){
       UI.bigMessage('读档失败', '档案数据损坏'); return false;
     }
     const ch = await SaveStore.getSlot(d.charKey);
     const wd = await SaveStore.getSlot(d.worldKey);
-    if (!ch || ch.kind !== 'char' || !wd || wd.kind !== 'world'){
+    if (!ch || ch.kind !== 'char' || ch.v !== 4 || !wd || wd.kind !== 'world' || wd.v !== 4){
       UI.bigMessage('读档失败', '人物或世界数据丢失'); return false;
     }
     try {
@@ -2499,6 +2615,7 @@ const Game = (() => {
       activeWorldKey = d.worldKey;
       applyCharData(ch, wd.playerPlace);
       applyWorldData(wd);
+      clearPlanetChunkCache();   // 换档：区块快照缓存全部失效（防跨档串块）
       syncShipLoadout();   // 座驾模型/武器随档案恢复（太空未初始化时 setShipModel 自动跳过并记住型号）
       await genPlanet(currentPlanet, false, [Player.pos.x, Player.pos.z]);
       if (wd.state === 'space' && wd.shipState){
@@ -2551,6 +2668,7 @@ const Game = (() => {
   }
   async function deleteWorld(key){
     await SaveStore.deleteSlot(key);
+    await SaveStore.deleteChunksPrefix(key + '|');   // 级联清除该世界的完整区块快照
     const wi = await listWorlds();
     await SaveStore.putSlot(WORLD_INDEX_KEY, wi.filter(e => e.key !== key));
     const idx = await listSaves();
@@ -2567,7 +2685,7 @@ const Game = (() => {
       const wdm = (await listWorlds()).find(e => e.key === worldKey);
       entry = { key: newId('starforge_sv_'), name: (chm ? chm.name : '人物') + ' · ' + (wdm ? wdm.name : '世界'), time: Date.now(), charKey, worldKey };
       idx.push(entry);
-      await SaveStore.atomicWrite(entry.key, { v: 3, kind: 'session', ...entry }, idx);
+      await SaveStore.atomicWrite(entry.key, { v: 4, kind: 'session', ...entry }, idx);
     }
     return loadFrom(entry.key);
   }
@@ -2575,7 +2693,7 @@ const Game = (() => {
   async function createCharacter(name, appearance){
     const key = newId('starforge_ch_');
     const payload = {
-      v: 3, kind: 'char', name: name || '旅行者',
+      v: 4, kind: 'char', name: name || '旅行者',
       appearance: appearance || null,
       player: {
         pos: [0, 40, 0], yaw: 0, pitch: 0,
@@ -2619,9 +2737,19 @@ const Game = (() => {
         const e = idx.find(s => s.key === key);
         let bundle = d;
         if (d && d.kind === 'session'){
-          bundle = { v: 3, kind: 'bundle', session: d, char: await SaveStore.getSlot(d.charKey), world: await SaveStore.getSlot(d.worldKey) };
-        } else if (d && d.v === 2){
-          bundle = { v: 3, kind: 'bundle', legacy: d };
+          const world = await SaveStore.getSlot(d.worldKey);
+          // v4：完整区块快照一并打包（相对键，导入时重映射到新 worldKey）
+          const chunks = {};
+          if (world && world.kind === 'world'){
+            try {
+              const ckeys = await SaveStore.getChunkKeys(d.worldKey + '|');
+              for (let i = 0; i < ckeys.length; i += 400){
+                const got = await SaveStore.getChunks(ckeys.slice(i, i + 400));
+                for (const [k, rec] of got) chunks[k.slice(d.worldKey.length + 1)] = [rec.mod ? 1 : 0, Array.from(rec.data)];
+              }
+            } catch(err){ console.warn('[save] 区块快照导出失败', err); }
+          }
+          bundle = { v: 4, kind: 'bundle', session: d, char: await SaveStore.getSlot(d.charKey), world, chunks };
         }
         const fn = 'STARFORGE-档案-' + sanitizeName(e ? e.name : key) + '-' + new Date().toISOString().slice(0, 10) + '.json';
         const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
@@ -2646,19 +2774,14 @@ const Game = (() => {
     if (text === null){ UI.bigMessage('导入失败', '文件读取错误'); return false; }
     let d;
     try { d = JSON.parse(text); } catch(e){ UI.bigMessage('导入失败', '不是有效的 JSON 存档文件'); return false; }
-    // 支持三种：新人物×世界打包 / 旧版整体档 / 独立人物档或世界档
+    // 支持：人物×世界打包（含区块快照）/ 独立人物档 / 独立世界档（全部要求 v4）
     let ch = null, wd = null;
-    if (d && d.kind === 'bundle'){
-      if (d.legacy && d.legacy.v === 2){ const sp = splitV2(d.legacy); ch = sp.ch; wd = sp.wd; }
-      else { ch = d.char; wd = d.world; }
-    } else if (d && d.v === 2 && typeof d.currentPlanet === 'number' && d.player){
-      const sp = splitV2(d); ch = sp.ch; wd = sp.wd;
-    } else if (d && d.kind === 'char'){
-      ch = d;
-    } else if (d && d.kind === 'world'){
-      wd = d;
-    }
+    if (d && d.kind === 'bundle'){ ch = d.char; wd = d.world; }
+    else if (d && d.kind === 'char'){ ch = d; }
+    else if (d && d.kind === 'world'){ wd = d; }
     if (!ch && !wd){ UI.bigMessage('导入失败', '存档文件格式不受支持'); return false; }
+    if (ch && (ch.kind !== 'char' || ch.v !== 4)){ UI.bigMessage('导入失败', '人物档案版本过旧（需要 v4）'); return false; }
+    if (wd && (wd.kind !== 'world' || wd.v !== 4)){ UI.bigMessage('导入失败', '世界档案版本过旧（需要 v4）'); return false; }
     try {
       const name = (file.name || '导入档案').replace(/\.(json|txt)$/i, '').slice(0, 30) || '导入档案';
       let chKey = null, wdKey = null;
@@ -2669,6 +2792,16 @@ const Game = (() => {
       if (wd && wd.kind === 'world'){
         wdKey = newId('starforge_wd_');
         await putWorld(wdKey, wd, { key: wdKey, name: wd.name || name, time: Date.now(), planetName: (SYSTEM_PLANETS[wd.currentPlanet] || {}).name || '未知星球', creative: !!wd.creative, playMin: 0 });
+        // 区块快照导入（相对键重映射到新 worldKey）
+        if (d.chunks && typeof d.chunks === 'object'){
+          const entries = [];
+          for (const rel in d.chunks){
+            const rec = d.chunks[rel];
+            if (Array.isArray(rec) && rec.length === 2) entries.push({ key: wdKey + '|' + rel, rec: { v: 1, mod: !!rec[0], data: Uint16Array.from(rec[1]) } });
+            if (entries.length >= 800){ await SaveStore.putChunks(entries); entries.length = 0; }
+          }
+          if (entries.length) await SaveStore.putChunks(entries);
+        }
       }
       let ok = true;
       if (chKey && wdKey){
@@ -2677,7 +2810,7 @@ const Game = (() => {
         idx.push({ key, name, time: Date.now(), charKey: chKey, worldKey: wdKey, charName: ch.name, worldName: wd.name, creative: !!wd.creative,
           planetName: (SYSTEM_PLANETS[wd.currentPlanet] || {}).name || '未知星球',
           credits: (ch.player && ch.player.credits) || 0, playMin: ((ch.playTime || 0) / 60) | 0 });
-        ok = await SaveStore.atomicWrite(key, { v: 3, kind: 'session', ...idx[idx.length - 1] }, idx);
+        ok = await SaveStore.atomicWrite(key, { v: 4, kind: 'session', ...idx[idx.length - 1] }, idx);
       }
       if (ok){ UI.bigMessage('导入成功', name, 2000); return true; }
       UI.bigMessage('导入失败', '写入存储失败');
@@ -3310,6 +3443,7 @@ const Game = (() => {
     if (window.Net) Net.tick(dt);
     if (state === 'menu' || state === 'loading') return;
     if (paused) return;
+    flushChunkQueue(6);       // 后台完整区块落盘（Minecraft 式，修改区块优先）
     playTime += dt;
     Space.tickRotation(dt);   // 星球自转：任何状态下持续推进
     applyAtmoTint(dt);        // 大气颜色滤镜（接近/再入渐显，其余状态自动淡出）
@@ -4310,8 +4444,8 @@ const Game = (() => {
   };
   document.querySelectorAll('.boot-btn').forEach(b => b.addEventListener('mouseenter', () => Sound.play('hover')));
 
-  // 旧 localStorage 存档一次性迁移 → IndexedDB；随后 v2 整体档拆分迁移为 人物/世界（完成后按列表启用继续按钮）
-  migrateLegacy().then(() => migrateV2Slots()).catch(() => {});
+  // 旧 localStorage 存档一次性迁移 → IndexedDB（v≤3 旧档读档时提示导出/删除，不做自动迁移）
+  migrateLegacy().catch(() => {});
   SaveStore.open().then(() => {
     if (!SaveStore.available) UI.bigMessage('存档数据库不可用', '本会话存档仅存于内存', 8000);
   });
@@ -4346,7 +4480,7 @@ const Game = (() => {
       if (typeof refreshMapMarkList === 'function') refreshMapMarkList();
     },
     // 联机：世界整包上传 / 人物数据同步（30 秒周期 + 断开兜底）
-    buildNetWorld(){ return buildWorldData(); },
+    buildNetWorld(){ return buildWorldData(true); },   // 联机上传：含修改区块 RLE（服务器权威）
     buildCharData(){ return _snapshotChar(); },
     // 联机：传送到队友（地面/太空均支持）
     async tpTo(pid, p, st, who){

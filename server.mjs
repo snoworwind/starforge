@@ -87,7 +87,7 @@ if (CFG.reset){
 // ------------------------------------------------------------
 // 常量（与客户端 world.js 保持一致）
 // ------------------------------------------------------------
-const CHUNK = 16, WORLD_H = 64, CHUNK_CELLS = CHUNK * CHUNK * WORLD_H;
+const CHUNK = 16, WORLD_H = 96, CHUNK_CELLS = CHUNK * CHUNK * WORLD_H;
 const DAY_LEN = 480;                       // 秒/天（与 main.js 一致）
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_FRAME = 64 * 1024 * 1024;        // 单帧上限 64MB（世界上传包可能很大）
@@ -139,7 +139,7 @@ let saveTimer = null;
 
 function freshWorld(){
   return {
-    v: 2,
+    v: 4,
     name: '未命名世界', creative: false, dropMult: 4,
     galaxySeed: 0, galaxyCount: 1, currentPlanet: 0,
     dayTime: 0.3, dayAt: Date.now(),
@@ -347,7 +347,8 @@ function sanitizeName(raw){
 function worldPackage(){
   // 发给玩家的世界快照（不含其他玩家的私有数据）
   return {
-    v: 2, name: world.name, creative: !!world.creative, dropMult: world.dropMult || 4,
+    v: 4, name: world.name, creative: !!world.creative, dropMult: world.dropMult || 4,
+    terrainV: world.terrainV || 1,   // 地形生成器版本（联机两端一致性）
     galaxySeed: world.galaxySeed | 0, galaxyCount: world.galaxyCount || 1,
     currentPlanet: world.currentPlanet | 0,
     dayTime: dayTimeNow(),
@@ -373,6 +374,7 @@ function sanitizeUpload(raw){
   w.creative = !!raw.creative;
   w.dropMult = [1, 4, 7].includes(raw.dropMult) ? raw.dropMult : 4;
   w.galaxySeed = Number.isFinite(raw.galaxySeed) ? (raw.galaxySeed | 0) : 0;
+  w.terrainV = Number.isFinite(raw.terrainV) ? Math.max(1, raw.terrainV | 0) : 1;
   w.galaxyCount = Number.isFinite(raw.galaxyCount) ? Math.max(1, raw.galaxyCount | 0) : 1;
   w.currentPlanet = Number.isInteger(raw.currentPlanet) && raw.currentPlanet >= 0 && raw.currentPlanet < 32 ? raw.currentPlanet : 0;
   w.dayTime = Number.isFinite(raw.dayTime) ? Math.min(1, Math.max(0, raw.dayTime)) : 0.3;
@@ -424,7 +426,7 @@ function handleMessage(c, m){
     case 'hello': {
       if (c.named) return;
       if (CFG.password && String(m.password || '') !== CFG.password){ kick(c, 'auth'); return; }
-      if (m.v !== 2){ kick(c, 'version'); return; }
+      if (m.v !== 3){ kick(c, 'version'); return; }
       c.named = true;
       c.name = sanitizeName(m.name);
       c.role = m.role === 'host' ? 'host' : 'guest';

@@ -380,7 +380,7 @@ const Creatures = (() => {
     }
   }
   function updateSky(dt, plyPos, biome){
-    const sky = biome && biome.sky;
+    const sky = biome && biome.skywings;   // 浮翼配色挂在独立字段（biome.sky 是天空色数组，不可占用）
     if (!sky){
       // 生态无高空生物（或换到无天空群的星球）：清空旧群
       if (skyFlock.length){

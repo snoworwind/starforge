@@ -850,12 +850,17 @@ const World = (() => {
             continue;
           }
           const isWater = def.liquid;
+          // 半高块（非机器的 lowbox 建材）：渲染高度取数值（lowbox:true 为机器，不在此处理）
+          const lowH = (def.lowbox && !def.machine && typeof def.lowbox === 'number') ? def.lowbox : 0;
           for (let f = 0; f < FACES.length; f++){
             const face = FACES[f];
             const nDef = getDef(x + face.dir[0], y + face.dir[1], z + face.dir[2]);
             if (isWater){
               if (nDef.id === def.id) continue;
               if (nDef.solid && !nDef.transparent) continue;
+            } else if (lowH > 0){
+              // 半高块：底面贴地剔除，其余面无条件绘制（与邻块交界仍有可见面）
+              if (f === 3 && nDef.solid && !nDef.transparent) continue;
             } else {
               if (nDef.solid && !nDef.transparent && !nDef.cross && !nDef.machine) continue;
               if (nDef.id === def.id && def.transparent && !def.fancy) continue;
@@ -865,6 +870,7 @@ const World = (() => {
             const b = P.length / 3;
             for (const cnr of face.corners){
               let yy = y + cnr[1];
+              if (lowH > 0 && cnr[1] === 1) yy = y + lowH;   // 顶面/侧面上沿截到半高
               if (isWater && cnr[1] === 1) yy -= 0.12;
               P.push(x + cnr[0], yy, z + cnr[2]);
               N.push(face.dir[0], face.dir[1], face.dir[2]);

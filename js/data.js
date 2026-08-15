@@ -62,6 +62,10 @@ const BLOCKS = {
   lumberbot:{ id: 54, name: '伐木机器人', hard: 1.0, machine: 'lumberbot', tiles: { all: 'vent', top: 'metal_dark' }, drops: [{ item: 'lumberbot_b', n: 1 }] },
   collector:{ id: 55, name: '收集点', hard: 0.9, machine: 'collector', tiles: { all: 'chest_side', top: 'storage_top' }, drops: [{ item: 'collector_b', n: 1 }] },
   medbay:   { id: 56, name: '医疗站', hard: 1.4, machine: 'medbay', tiles: { all: 'metal_dark', top: 'medbay_top' }, drops: [{ item: 'medbay_b', n: 1 }] },
+  // ------ 装饰建材 ------
+  slab:     { id: 57, name: '石半砖', hard: 1.0, tiles: { all: 'slab' }, lowbox: 0.45, drops: [{ item: 'slab_b', n: 1 }] },
+  metal:    { id: 58, name: '金属块', hard: 2.0, tiles: { all: 'metal' }, drops: [{ item: 'metal_b', n: 1 }] },
+  concrete: { id: 59, name: '混凝土块', hard: 1.6, tiles: { all: 'concrete' }, drops: [{ item: 'concrete_b', n: 1 }] },
 };
 const BLOCK_BY_ID = {};
 for (const k in BLOCKS){ BLOCKS[k].key = k; BLOCK_BY_ID[BLOCKS[k].id] = BLOCKS[k]; if (BLOCKS[k].solid === undefined) BLOCKS[k].solid = true; }
@@ -116,6 +120,9 @@ const ITEMS = {
   lumberbot_b:{ name: '伐木机器人', cat: 'mach', iconBlock: 'lumberbot', block: 'lumberbot', stack: 10, desc: '放置充电桩后悬浮机器人自动巡林伐木，采集碳装满后自动送往附近的收集点。', price: 320 },
   collector_b:{ name: '收集点', cat: 'mach', iconBlock: 'collector', block: 'collector', stack: 20, desc: '伐木机器人的卸货站（12格），库存自动输出到面前的传送带/机器，可直通装配机。', price: 110 },
   medbay_b:  { name: '医疗站', cat: 'mach', iconBlock: 'medbay', block: 'medbay', stack: 50, desc: '站在旁边自动治疗：每消耗 1 钠 + 1 氧气回复 3 点生命。需电力。', price: 900 },
+  slab_b:    { name: '石半砖', cat: 'blk', iconBlock: 'slab', block: 'slab', stack: 250, desc: '半格高的石板：台阶、屋顶、花坛的优雅选择。', price: 5 },
+  metal_b:   { name: '金属块', cat: 'blk', iconBlock: 'metal', block: 'metal', stack: 250, desc: '锃亮的工业板材，科幻基地外墙。', price: 40 },
+  concrete_b:{ name: '混凝土块', cat: 'blk', iconBlock: 'concrete', block: 'concrete', stack: 250, desc: '素雅灰白的现代建材。', price: 12 },
 };
 for (const k in ITEMS){ ITEMS[k].id = k; if (!ITEMS[k].stack) ITEMS[k].stack = 250; }
 
@@ -136,6 +143,9 @@ const RECIPES = [
   { id: 'data',    out: { data: 1 },    in: { circuit: 1, carbon: 5 },where: 'both', time: 4.0 },
   { id: 'planks_b',out: { planks_b: 4 },in: { carbon: 4 },            where: 'both', time: 1.0 },
   { id: 'lamp_b',  out: { lamp_b: 2 },  in: { glass_b: 2, wire: 1 },  where: 'both', time: 1.5 },
+  { id: 'slab_b',  out: { slab_b: 4 },  in: { stone: 2 },             where: 'both', time: 1.0 },
+  { id: 'metal_b', out: { metal_b: 4 }, in: { iron: 4 },              where: 'both', time: 1.5 },
+  { id: 'concrete_b',out: { concrete_b: 4 }, in: { stone: 2, sand: 2 }, where: 'both', time: 1.5 },
   // --- 机器制造（便携+装配）---
   { id: 'furnace_b',  out: { furnace_b: 1 },  in: { stone: 12 },                              where: 'both', time: 2.0 },
   { id: 'beacon_b',   out: { beacon_b: 1 },   in: { iron: 4, glass_b: 2, wire: 2 },           where: 'both', time: 2.0 },

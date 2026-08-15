@@ -383,6 +383,18 @@ const Tex = (() => {
     for (let x = 4; x <= 11; x++){ px(x, 7, '#7dff8a'); px(x, 8, '#7dff8a'); }
     for (let i = 0; i < 16; i++){ px(i,0,'#68747d'); px(0,i,'#68747d'); px(i,15,'#333d44'); px(15,i,'#333d44'); }
   });
+  tile('slab', (px, r) => {
+    // 石半砖：上半平滑切面 + 底缘描线
+    speckle(px, r, ['#8c8c8c','#828282','#969696','#7a7a7a']);
+    for (let i = 0; i < 16; i++){ px(i,0,'#a8a8a8'); px(i,1,'#9c9c9c'); }
+    for (let i = 0; i < 16; i++){ px(i,15,'#5a5a5a'); }
+    for (let x = 2; x < 14; x += 4){ px(x,8,'#9c9c9c'); px(x+1,9,'#9c9c9c'); }
+  });
+  tile('concrete', (px, r) => {
+    speckle(px, r, ['#9aa3ab','#8f989f','#a5aeb6','#848d94']);
+    for (let i = 0; i < 16; i++){ px(i,0,'#b8c0c7'); px(0,i,'#a8b0b8'); }
+    px(3,4,'#7a828a'); px(4,5,'#7a828a'); px(11,9,'#7a828a'); px(12,10,'#7a828a');
+  });
 
   const texture = new THREE.CanvasTexture(canvas);
   // 像素风：近距最邻近采样（硬边像素块）；远距用最近 mip 层级消除闪烁/摩尔纹

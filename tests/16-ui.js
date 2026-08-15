@@ -46,6 +46,27 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     Net.disconnect();
   });
 
+  t.test('聊天框默认隐藏 + 玩家面板纳入 anyPanelOpen/closeAll', async function () {
+    await Net.joinRoom('127.0.0.1:17886');
+    A.ok(Net.active(), 'connected to test server');
+    Net.ensureChatUI();
+    Net.ensurePlayersUI();
+    var inp = document.getElementById('chatInput');
+    A.ok(inp, 'chat input created');
+    A.ok(inp.classList.contains('hidden'), 'chat input hidden until opened (fix: 不再凭空出现)');
+    Net.openChat();
+    A.ok(!inp.classList.contains('hidden'), 'openChat reveals input');
+    Net.closeChat();
+    A.ok(inp.classList.contains('hidden'), 'closeChat hides input again');
+    Net.togglePlayers();
+    var pp = document.getElementById('playersPanel');
+    A.ok(pp && !pp.classList.contains('hidden'), 'players panel open');
+    A.ok(window.UI.anyPanelOpen(), 'anyPanelOpen sees players panel');
+    window.UI.closeAll();
+    A.ok(pp.classList.contains('hidden'), 'closeAll hides players panel');
+    Net.disconnect();
+  });
+
   t.test('音量滑杆持久化：改动写回 localStorage 并恢复显示', function () {
     var slider = document.getElementById('volSlider');
     A.ok(slider, 'volume slider exists');

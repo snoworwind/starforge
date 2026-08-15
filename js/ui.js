@@ -14,12 +14,12 @@ const UI = (() => {
 
   // ---------- 通用 ----------
   function anyPanelOpen(){
-    return ['invPanel','machinePanel','techPanel','tradePanel','pausePanel','helpPanel','creativePanel','savePanel','galaxyPanel','settingsPanel','netPanel','mapPanel']
-      .some(id => !$(id).classList.contains('hidden'));
+    return ['invPanel','machinePanel','techPanel','tradePanel','pausePanel','helpPanel','creativePanel','savePanel','galaxyPanel','settingsPanel','netPanel','mapPanel','playersPanel']
+      .some(id => { const el = $(id); return el && !el.classList.contains('hidden'); });
   }
   function closeAll(){
-    ['invPanel','machinePanel','techPanel','tradePanel','pausePanel','helpPanel','creativePanel','savePanel','galaxyPanel','settingsPanel','netPanel','mapPanel']
-      .forEach(id => $(id).classList.add('hidden'));
+    ['invPanel','machinePanel','techPanel','tradePanel','pausePanel','helpPanel','creativePanel','savePanel','galaxyPanel','settingsPanel','netPanel','mapPanel','playersPanel']
+      .forEach(id => { const el = $(id); if (el) el.classList.add('hidden'); });
     openMachine = null;
     hideTooltip();
     dropCursor();

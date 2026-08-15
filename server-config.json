@@ -1,0 +1,10 @@
+{
+  "httpPort": 17888,
+  "wsPort": 17889,
+  "serverName": "STARFORGE 服务器",
+  "motd": "欢迎来到星穹熔炉",
+  "password": "",
+  "maxPlayers": 8,
+  "saveDir": "save",
+  "autosaveSec": 30
+}

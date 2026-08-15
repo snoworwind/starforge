@@ -546,43 +546,70 @@ const Game = (() => {
     if (window.Net) Net.onWorldReady();   // 联机：主机世界就绪，同步给访客
   }
 
-  // ---------- 联机加入：用主机的种子/改动/机器重建同一世界 ----------
+  // ---------- 联机加入：用服务器世界包重建同一世界（含全星球档案/星系/市场/标记） ----------
+  // 服务器按名字保存人物数据：you.char 存在 → 恢复背包/科技/飞船；否则沿用本机角色
+  async function applyLastCharForNet(){
+    // 主菜单加入且服务器无人物存档：沿用本机最近使用的角色
+    try {
+      const idx = await SaveStore.getSlot(CHAR_INDEX_KEY);
+      const arr = Array.isArray(idx) ? idx.slice().sort((a, b) => b.time - a.time) : [];
+      if (arr.length && arr[0].key){
+        const ch = await SaveStore.getSlot(arr[0].key);
+        if (ch && ch.kind === 'char'){ applyCharData(ch, null); return true; }
+      }
+    } catch(e){ console.warn('[net] 本机角色读取失败', e); }
+    return false;
+  }
   async function joinGame(init){
     Sound.begin();
+    const spawn = init.spawn || null;
+    const you = init.you || null;
     creative = !!init.creative;
     dropMult = init.dropMult || 1;
     activeSaveKey = null;
-    galaxyCount = 1;
-    Space.restoreGalaxy(init.galaxySeed !== undefined ? init.galaxySeed : HOME_GALAXY_SEED);
+    applyWorldData(init);   // 全量世界：星系种子/昼夜/市场/标记/多星球与星系档案/旗标
+    // 人物：服务器存档优先；主菜单加入且无服务器存档 → 沿用本机最近角色；游戏内加入 → 保留当前角色
+    let charApplied = false;
+    if (you && you.char && typeof you.char === 'object'){ applyCharData(you.char, null); charApplied = true; }
+    else if (state === 'menu') charApplied = await applyLastCharForNet();
+    if (!charApplied && state === 'menu'){
+      // 全新旅者：无任何人物档案 → 发放新手初始配置（与单机开局一致）
+      techState = { survival: true };
+      questIdx = 0; fuelLoaded = 0;
+      Player.credits = 250;
+      Player.inv.fill(null);
+      Player.addItem('carbon', 10, true);
+      Player.addItem('sodium', 5, true);
+      playerShip = { model: 'ship', cls: 'C', name: '拓荒者号', inv: Array(12).fill(null) };
+      shipGarage = [];
+    }
     $('boot').classList.add('hidden');
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     UI.closeAll();
     UI.buildHotbar();
-    techState = { survival: true };
-    flags = {}; questIdx = 0; fuelLoaded = 0;
-    for (const k in placedCount) delete placedCount[k];   // 联机加入同样重置放置类任务进度
-    visitedPlanets = {};
-    galaxyArchives = {};
-    mapMarks = {};
-    Player.credits = 250;
-    Player.inv.fill(null);
-    Player.addItem('carbon', 10, true);
-    Player.addItem('sodium', 5, true);
-    visitedPlanets[init.planet] = {
-      mods: init.mods || {}, machines: init.machines || [],
-      shipPos: [4, 40, 2], seed: init.seed, biome: SYSTEM_PLANETS[init.planet].biome,
-    };
-    await genPlanet(init.planet, false);
+    syncShipLoadout();
+    // 落点：服务器记住的上次位置（跨星球有效），否则当前星球的出生点
+    const landPid = (spawn && Number.isInteger(spawn.planet) && SYSTEM_PLANETS[spawn.planet]) ? spawn.planet : currentPlanet;
+    const landCenter = spawn && spawn.planet === landPid && Array.isArray(spawn.p) && spawn.p.length >= 3 && spawn.p.every(Number.isFinite)
+      ? [spawn.p[0], spawn.p[2]] : null;
+    await genPlanet(landPid, false, landCenter);
     dayTime = init.dayTime !== undefined ? init.dayTime : 0.3;
-    const sp = World.findSpawn();
-    Player.pos.copy(sp);
-    shipPos.copy(sp).add(new THREE.Vector3(4, 0, 2));
+    if (landCenter){
+      Player.pos.fromArray(spawn.p);
+      Player.yaw = Number.isFinite(spawn.yaw) ? spawn.yaw : 0;
+      Player.pos.y = Math.max(Player.pos.y, World.topAt(Math.floor(Player.pos.x), Math.floor(Player.pos.z)) + 1);
+    } else {
+      const sp = World.findSpawn();
+      Player.pos.copy(sp);
+    }
+    shipPos.copy(Player.pos).add(new THREE.Vector3(4, 0, 2));
     shipPos.y = World.topAt(Math.floor(shipPos.x), Math.floor(shipPos.z)) + 1;
     shipMesh.position.copy(shipPos);
     $('hud').classList.remove('hidden');
     $('quests').style.display = creative ? 'none' : '';
     if (creative) for (const k in TECH) techState[k] = true;
     UI.refreshAll();
-    UI.bigMessage('已加入联机世界', SYSTEM_PLANETS[init.planet].name + ' · ' + World.biome.name);
+    UI.bigMessage('已进入联机世界', SYSTEM_PLANETS[landPid].name + ' · ' + World.biome.name + (you && you.name ? ' · ' + you.name : ''));
     lockPointer();
   }
 
@@ -2380,6 +2407,11 @@ const Game = (() => {
       UI.bigMessage('飞行中无法存档', '请先降落', 1600);
       return Promise.resolve(false);
     }
+    // 联机成员：世界与人物都由服务器持久化（本机存档只适用于单机/房主本地备份）
+    if (window.Net && Net.role === 'guest'){
+      UI.bigMessage('联机世界由服务器保存', '世界与人物数据已同步到服务器，无需本机存档', 2600);
+      return Promise.resolve(false);
+    }
     if (saveBusy){ saveAgain = true; pendingKey = key; pendingName = name; return saveChain; }   // 写入中：合并到收尾重写（记住目标槽位）
     saveBusy = true;
     const charPayload = buildCharData();     // 此刻的完整状态快照（可能触发 RLE 序列化）
@@ -2659,7 +2691,9 @@ const Game = (() => {
 
   // ---------- 昼夜 ----------
   function updateDayNight(dt){
-    dayTime = (dayTime + dt / DAY_LEN) % 1;
+    // 联机：服务器权威昼夜（本地外推保持平滑）；单机：本地推进
+    if (window.Net && Net.timeSynced()) dayTime = Net.syncedTime();
+    else dayTime = (dayTime + dt / DAY_LEN) % 1;
     // 太阳方向：优先按真实太空几何投影到本地切平面（与太空中的恒星方位一致，换系无跳变）
     const curSp = Space.planets.find(p => p.def.id === currentPlanet);
     let sunH;
@@ -3232,7 +3266,7 @@ const Game = (() => {
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v87';
+  window.__V_MAIN = 'v88';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3843,7 +3877,7 @@ const Game = (() => {
       if (s.behind || s.x < 30 || s.x > window.innerWidth - 30 || s.y < 40 || s.y > window.innerHeight - 40)
         el.classList.add('edge');
       el.querySelector('.wm-tx').textContent =
-        `队友 P${mk.id} ${state === 'space' ? (dist / 100).toFixed(1) + 'ku' : dist.toFixed(0) + 'm'}`;
+        `${mk.name || ('P' + mk.id)} ${state === 'space' ? (dist / 100).toFixed(1) + 'ku' : dist.toFixed(0) + 'm'}`;
     }
   }
   let beaconMarkEls = [];
@@ -4136,7 +4170,11 @@ const Game = (() => {
   $('btnResume').onclick = () => { Sound.play('uiClose'); UI.closeAll(); lockPointer(); };
   $('btnSave').onclick = () => { Sound.play('uiClick'); UI.openSavePanel('save'); };
   $('btnSettings').onclick = () => { Sound.play('uiOpen'); $('pausePanel').classList.add('hidden'); $('settingsPanel').classList.remove('hidden'); refreshSettingsUI(); };
-  $('btnQuit').onclick = async () => { if (activeSaveKey) await save(); location.reload(); };
+  $('btnQuit').onclick = async () => {
+    if (window.Net) Net.disconnect();
+    if (activeSaveKey && !(window.Net && Net.role === 'guest')) await save();
+    location.reload();
+  };
   $('volSlider').oninput = e => Sound.setVolume(e.target.value / 100);
   $('dialogBox').addEventListener('mousedown', e => { e.stopPropagation(); advanceDialog(); });
 
@@ -4197,23 +4235,58 @@ const Game = (() => {
   };
   applySettings();
 
-  // ---------- 局域网联机面板 ----------
+  // ---------- 联机面板 ----------
+  function refreshNetPanelInfo(){
+    const st = $('netStatus');
+    if (st) st.textContent = Net.status();
+    const box = $('netPlayers');
+    if (!box) return;
+    const list = Net.getPlayers();
+    const info = Net.serverInfo;
+    const lines = [];
+    if (info && info.svName) lines.push(`<div class="net-sv">◈ ${info.svName}${info.motd ? ' — ' + info.motd : ''}</div>`);
+    if (info && info.hasWorld && info.worldName) lines.push(`<div class="net-sv">世界：${info.worldName}</div>`);
+    if (!list.length) lines.push('<div class="save-empty">暂无其他玩家</div>');
+    for (const p of list){
+      lines.push(`<div class="net-player">● ${p.name}${p.id === Net.myId ? '（我）' : ''}</div>`);
+    }
+    box.innerHTML = lines.join('');
+  }
   function openNetPanel(){
     $('pausePanel').classList.add('hidden');
     $('netPanel').classList.remove('hidden');
     if (!$('netAddr').value && (location.protocol === 'http:' || location.protocol === 'https:'))
       $('netAddr').value = location.hostname;
-    $('netStatus').textContent = Net.status();
+    const nn = $('netName');
+    if (nn && !nn.value){
+      try { nn.value = localStorage.getItem('starforge_net_name') || ''; } catch(e){}
+      if (!nn.value && charName && charName !== '旅行者') nn.value = charName;
+    }
+    refreshNetPanelInfo();
   }
   $('btnNet').onclick = () => { Sound.play('uiOpen'); openNetPanel(); };
   $('btnNetBoot').onclick = () => { Sound.begin(); Sound.play('uiOpen'); openNetPanel(); };
-  Net.statusChanged = () => { $('netStatus').textContent = Net.status(); };
+  Net.statusChanged = () => {
+    refreshNetPanelInfo();
+    const hud = $('netHud');
+    if (hud){
+      if (Net.active()){
+        hud.textContent = '⇄ ' + (Net.role === 'host' ? '主机' : '联机') + ' · 在线 ' + Net.getPlayers().length + ' · Enter 聊天 · O 玩家列表';
+        hud.classList.remove('hidden');
+      } else hud.classList.add('hidden');
+    }
+  };
   $('btnNetHost').onclick = async () => {
     Sound.play('uiClick');
     $('netStatus').textContent = '连接中…';
     try {
       await Net.hostRoom($('netAddr').value.trim());
-      UI.bigMessage('房间已创建', '好友加入后自动同步你的世界', 2600);
+      const sv = Net.serverInfo;
+      if (sv && sv.hasWorld){
+        UI.bigMessage('已连接服务器', '服务器已有世界「' + (sv.worldName || '') + '」，正在进入…', 3200);
+      } else {
+        UI.bigMessage('房间已创建', '开始游戏后世界自动上传到服务器', 3200);
+      }
     } catch(e){ $('netStatus').textContent = '未连接'; UI.bigMessage('创建失败', e.message, 3200); }
   };
   $('btnNetJoin').onclick = async () => {
@@ -4221,8 +4294,14 @@ const Game = (() => {
     $('netStatus').textContent = '连接中…';
     try {
       await Net.joinRoom($('netAddr').value.trim());
-      UI.bigMessage('已进入房间', '等待房主世界同步…', 2600);
+      if (Net.waitingWorld) UI.bigMessage('已进入房间', '服务器世界为空，等待房主创建…', 4000);
+      else UI.bigMessage('已进入房间', '正在同步服务器世界…', 2600);
     } catch(e){ $('netStatus').textContent = '未连接'; UI.bigMessage('加入失败', e.message, 3200); }
+  };
+  $('btnNetReset').onclick = () => {
+    if (!Net.active() || Net.role !== 'host'){ UI.bigMessage('仅房主可重置', '', 2000); return; }
+    Net.resetWorld();
+    UI.bigMessage('服务器世界已重置', '开始游戏后本机世界会重新上传', 3000);
   };
   $('btnNetLeave').onclick = () => {
     Sound.play('uiClose');
@@ -4248,10 +4327,54 @@ const Game = (() => {
 
   loop();
 
+  const _snapshotChar = buildCharData;   // api.buildCharData 属性名与闭包函数同名，需先取引用
   const api = {
     get state(){ return state; },
     get flags(){ return flags; },
     get market(){ return market; },
+    applyMarket(m){
+      if (!m || typeof m !== 'object') return;
+      for (const k of TRADE_GOODS){
+        if (Number.isFinite(m[k])) market[k] = Math.min(2, Math.max(0, m[k]));
+      }
+      if (UI.refreshTrade) UI.refreshTrade();
+    },
+    get mapMarks(){ return mapMarks; },
+    applyMapMarks(m){
+      if (!m || typeof m !== 'object') return;
+      mapMarks = m;
+      if (typeof refreshMapMarkList === 'function') refreshMapMarkList();
+    },
+    // 联机：世界整包上传 / 人物数据同步（30 秒周期 + 断开兜底）
+    buildNetWorld(){ return buildWorldData(); },
+    buildCharData(){ return _snapshotChar(); },
+    // 联机：传送到队友（地面/太空均支持）
+    async tpTo(pid, p, st, who){
+      try {
+        if (st === 'space'){
+          if (pid !== currentPlanet){ currentPlanet = pid; landedPlanet = pid; }
+          savePlanetState();
+          Space.enter(pid);
+          if (Array.isArray(p) && p.length >= 3 && p.every(Number.isFinite)) Space.shipState.pos.fromArray(p);
+          state = 'space';
+          $('spaceHud').classList.remove('hidden');
+          Sound.Music.setMode('space');
+        } else {
+          if (pid !== currentPlanet || worldLoadedFor !== pid || state !== 'planet'){
+            await genPlanet(pid, false, Array.isArray(p) ? [p[0], p[2]] : null);
+          }
+          if (Array.isArray(p) && p.length >= 3 && p.every(Number.isFinite)){
+            Player.pos.fromArray(p);
+            Player.pos.y = Math.max(Player.pos.y, World.topAt(Math.floor(Player.pos.x), Math.floor(Player.pos.z)) + 1);
+          }
+          state = 'planet';
+          $('spaceHud').classList.add('hidden');
+          Sound.Music.setMode(World.biome.haz ? 'danger' : 'planet');
+        }
+        UI.bigMessage('已传送', who ? '到达 ' + who + ' 身边' : '', 2200);
+        lockPointer();
+      } catch(e){ console.warn('[net] tp 失败', e); }
+    },
     get lastTech(){ return lastTech; },
     get creative(){ return creative; },
     get dropMult(){ return dropMult; },

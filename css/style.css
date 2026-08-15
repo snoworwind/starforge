@@ -547,6 +547,34 @@ canvas#game{position:fixed;inset:0;display:block;image-rendering:pixelated}
     100% 0,100% 18px,calc(100% - 2px) 18px,calc(100% - 2px) 2px,calc(100% - 18px) 2px,calc(100% - 18px) 0,
     100% 0,100% 100%,calc(100% - 18px) 100%,calc(100% - 18px) calc(100% - 2px),calc(100% - 2px) calc(100% - 2px),calc(100% - 2px) calc(100% - 18px),100% calc(100% - 18px),
     100% 100%,0 100%,0 calc(100% - 18px),2px calc(100% - 18px),2px calc(100% - 2px),18px calc(100% - 2px),18px 100%,0 100%)}
+
+/* ============ 联机：聊天 / 玩家列表 / HUD 状态 ============ */
+#netHud{position:absolute;top:14px;right:16px;font-family:var(--mono);font-size:11px;color:var(--dim);
+  letter-spacing:1px;text-align:right;text-shadow:0 1px 3px #000;pointer-events:none;max-width:60vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#chatBox{position:fixed;left:14px;bottom:118px;width:min(430px,44vw);z-index:60;pointer-events:none;
+  display:flex;flex-direction:column;gap:2px;opacity:0;transition:opacity .25s;font-family:var(--mono)}
+#chatBox.show{opacity:1}
+.chat-line{font-size:13px;color:#e8f6ff;text-shadow:0 1px 3px #000,0 0 6px #00000088;line-height:1.45;word-break:break-word}
+.chat-line.sys{color:var(--amber);font-style:italic}
+.chat-line .chat-name{color:var(--cyan);margin-right:6px;font-weight:bold}
+#chatInput{position:fixed;left:14px;bottom:82px;width:min(430px,44vw);z-index:60;font:13px var(--mono);
+  background:rgba(6,12,20,.88);border:1px solid var(--cyan-d);border-left:3px solid var(--cyan);color:var(--txt);
+  padding:8px 10px;outline:none;box-shadow:0 0 16px #00000099}
+#chatInput::placeholder{color:var(--dim)}
+#playersPanel{position:fixed;top:70px;right:16px;width:min(340px,80vw);z-index:70;
+  background:linear-gradient(165deg,rgba(7,15,26,.94),rgba(9,19,32,.9));border:1px solid var(--cyan-d);
+  clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100% - 14px))}
+#playersPanel .panel-head{display:flex;justify-content:space-between;align-items:center;
+  padding:10px 14px;border-bottom:1px solid #16324a;color:var(--amber);letter-spacing:2px;font-size:14px}
+#playersPanel .pclose{background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer}
+.players-list{padding:10px;display:flex;flex-direction:column;gap:6px;max-height:52vh;overflow:auto}
+.player-row{display:flex;align-items:center;gap:8px;padding:7px 10px;background:#0c1826cc;border:1px solid #1d3a52;font-size:12px}
+.player-row .player-name{color:var(--cyan);font-weight:bold;min-width:0;flex-shrink:0}
+.player-row .player-st{color:var(--dim);flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.player-row .tp-btn{flex-shrink:0;padding:4px 10px;font-size:11px;letter-spacing:1px}
+.net-players{margin-top:2px;display:flex;flex-direction:column;gap:3px;max-height:110px;overflow:auto}
+.net-sv{font-size:12px;color:var(--amber);letter-spacing:1px;margin:2px 0}
+.net-player{font-size:12px;color:var(--txt)}
 .warpAim{position:fixed;left:50%;top:50%;z-index:79;transform:translate(-50%,26px);pointer-events:none;white-space:nowrap;
   font-size:12px;color:#c9a8ff;text-shadow:0 1px 3px #000,0 0 8px rgba(180,140,255,.6);font-family:var(--mono,monospace)}
 .warpArrow{color:#b58aff;text-shadow:0 0 10px #b58affcc,0 0 22px #b58aff66,0 1px 3px #000}

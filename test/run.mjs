@@ -10,9 +10,11 @@
      test-results.xml   — JUnit 格式（CI 集成）
      退出码             — 0=全过，1=有失败/异常 */
 import { chromium } from 'playwright-core';
-import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readdir, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import http from 'node:http';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -23,6 +25,43 @@ const BASE = `http://127.0.0.1:${PORT}/index.html?test=1`;
 
 // 启动静态服务器（serve.mjs 导入即监听 17899）
 await import('./serve.mjs');
+
+// 启动跨平台联机服务器（隔离存档目录；tests/12-net.js 通过 http/ws 连接它做协议测试）
+const NET_HTTP = 17887, NET_WS = 17886;
+const NET_SAVE = join(ROOT, '.test-net-save');
+await rm(NET_SAVE, { recursive: true, force: true });
+const netServer = spawn(process.execPath, [
+  join(ROOT, 'server.mjs'),
+  '--save-dir', NET_SAVE,
+  '--reset',
+  '--port-http', String(NET_HTTP),
+  '--port-ws', String(NET_WS),
+], { stdio: 'ignore' });
+netServer.on('error', () => {});
+process.on('exit', () => { try { netServer.kill(); } catch(e){} });
+for (let i = 0; i < 40; i++){
+  // 等待联机服务器就绪（ws 端口可连为止）
+  const up = await new Promise(res => {
+    const req = http.get({ host: '127.0.0.1', port: NET_HTTP, path: '/__status', timeout: 500 }, r => { res(true); r.resume(); });
+    req.on('error', () => res(false));
+    req.on('timeout', () => { req.destroy(); res(false); });
+  });
+  if (up) break;
+  await new Promise(r => setTimeout(r, 250));
+}
+// 安全自检（Node 侧原始请求；浏览器会规范化 URL，无法在页面内测路径穿越）
+try {
+  const code = await new Promise((res, rej) => {
+    const req = http.request({ host: '127.0.0.1', port: NET_HTTP, path: '/..%2fserver.mjs' }, r => { r.resume(); res(r.statusCode); });
+    req.on('error', rej);
+    req.end();
+  });
+  if (code !== 403) throw new Error(`路径穿越防护异常：期望 403，实际 ${code}`);
+  console.log('[net-server] 联机服务器就绪（路径穿越防护 403 OK）');
+} catch (e){
+  console.error(`[net-server] 自检失败：${e.message}`);
+  process.exit(1);
+}
 
 function arg(name, fallback) {
   // 支持 --name=value 与 --name value 两种写法

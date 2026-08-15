@@ -919,6 +919,16 @@ const World = (() => {
     }
     return { seed, mods };
   }
+  // ---------- 联机增量同步 ----------
+  function chunkModified(cx, cz){
+    const c = chunks.get(ckey(cx, cz));
+    return !!(c && c.modified);
+  }
+  function serializeChunk(cx, cz){
+    const c = chunks.get(ckey(cx, cz));
+    if (!c || !c.modified) return null;
+    return rleEncode(c.data);
+  }
   function init(biomeKey, worldSeed, mods){
     dispose();
     seed = worldSeed;
@@ -963,7 +973,7 @@ const World = (() => {
     get materials(){ return [solidMat, waterMat]; },
     get farMesh(){ return ensureFarMesh(); },
     init, pregen, stream, update, get, set, getDef, raycast, topAt, findSpawn,
-    serialize, dispose, inBounds, setCurve, setScanPulse, surfaceColorAt, mapColorAt, mapColorRGB, mapHeightAt,
+    serialize, serializeChunk, chunkModified, dispose, inBounds, setCurve, setScanPulse, surfaceColorAt, mapColorAt, mapColorRGB, mapHeightAt,
     setViewDist, setFarDist, setShadows,
     get structures(){ return structures; },
   };

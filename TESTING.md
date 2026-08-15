@@ -7,7 +7,7 @@
 
 ## 0. 一句话总结
 
-游戏本体是纯浏览器 Three.js 游戏（无构建系统）。测试方案 = **用 Playwright 无头启动真实浏览器 → 加载 `index.html?test=1`（自动注入测试接口 `window.__SF_TEST__`）→ 注入 `tests/*.js` 套件 → 在页面内执行 → 收集 JSON/JUnit 结果**。全程无需人工、无需真实 GPU（软件渲染 WebGL）、无需启动游戏的 `server.ps1`。
+游戏本体是纯浏览器 Three.js 游戏（无构建系统）。测试方案 = **用 Playwright 无头启动真实浏览器 → 加载 `index.html?test=1`（自动注入测试接口 `window.__SF_TEST__`）→ 注入 `tests/*.js` 套件 → 在页面内执行 → 收集 JSON/JUnit 结果**。全程无需人工、无需真实 GPU（软件渲染 WebGL）。联机套件（`12-net.js`）由 `run.mjs` **自动拉起一个隔离存档的 `server.mjs`**（端口 17887/17886，退出自动关闭）供其测试协议。
 
 ---
 
@@ -23,17 +23,18 @@ wrsk/
 │   ├── space.js  station.js  net.js  creatures.js  savestore.js  audio.js
 │   └── (three.min.js / GLTFLoader.js / SVGLoader.js / models.js / modellib.js / humanoid.js / textures.js)
 ├── tests/
-│   ├── 01-data.js … 11-charworld.js      # ★ 11 个测试套件（文件名排序 = 执行顺序）
+│   ├── 01-data.js … 12-net.js           # ★ 12 个测试套件（文件名排序 = 执行顺序；12 = 联机协议）
 ├── test/
-│   ├── run.mjs                 # ★ Node 编排器（Playwright 无头运行）
+│   ├── run.mjs                 # ★ Node 编排器（Playwright 无头运行 + 拉起联机服务器）
 │   └── serve.mjs               # 测试专用静态服务器（端口 17899）
+├── server.mjs                  # 跨平台联机服务器（run.mjs 会以隔离存档目录拉起实例）
 ├── package.json                # scripts + playwright-core 依赖
 ├── TESTING.md                  # 本手册
 ├── test-results/               # 运行产物（gitignore）：test-results.json / .xml
-└── .gitignore                  # 忽略 node_modules/ 与 test-results/
+└── .gitignore                  # 忽略 node_modules/、test-results/、.test-net-save/、save/
 ```
 
-**改动边界（重要）**：对游戏本体的唯一改动是 `index.html` 末尾的**条件加载器**——URL 不带 `?test` 时它完全不执行，正常游玩零影响。测试接口、套件、运行器全部是**独立新增文件**，未侵入游戏逻辑。
+**改动边界（重要）**：测试接口、套件、运行器与游戏本体分离——`index.html` 末尾的**条件加载器**在 URL 不带 `?test` 时完全不执行，正常游玩零影响。游戏模块暴露的最小测试钩子（如 `World.serializeChunk`、`Factory.applyData`、`Creatures.snapshot`）同时服务于联机同步功能本身，非测试专用。
 
 ---
 
@@ -62,7 +63,7 @@ node test/run.mjs --browser=chrome        # 用 Chrome（默认 edge）
 - `test-results/test-results.xml`：JUnit 格式（CI 直接吞）。
 - **退出码 `0` = 全部通过；`1` = 有失败或致命异常**。CI 用退出码判定即可。
 
-预期基线（当前）：**11 套件 · 69 用例 · 69 通过 · 约 40 秒**。
+预期基线（当前）：**13 套件 · 81 用例 · 81 通过 · 约 75 秒**。
 
 ---
 
@@ -71,17 +72,19 @@ node test/run.mjs --browser=chrome        # 用 Chrome（默认 edge）
 ```
 node test/run.mjs
   1. import test/serve.mjs        → 启动 http://127.0.0.1:17899 静态服务器（副作用：listen）
-  2. chromium.launch(channel:'msedge', headless, args:[--enable-unsafe-swiftshader, --use-angle=swiftshader, --use-gl=angle])
-  3. context.addInitScript        → 在页面任何脚本前写 localStorage.starforge_settings（低画质降载）
-  4. page.goto('.../index.html?test=1')
+  2. spawn server.mjs（隔离存档 .test-net-save，端口 17887/17886，--reset）
+     └─ 轮询 /__status 等它就绪 → Node 侧原始请求自检路径穿越防护（403）→ 退出时 kill
+  3. chromium.launch(channel:'msedge', headless, args:[--enable-unsafe-swiftshader, --use-angle=swiftshader, --use-gl=angle])
+  4. context.addInitScript        → 在页面任何脚本前写 localStorage.starforge_settings（低画质降载）
+  5. page.goto('.../index.html?test=1')
      └─ index.html 末尾条件加载器检测到 ?test → append <script src="js/test-api.js">
      └─ test-api.js 载入：暴露 window.__SF_TEST__，并 neutraliseAudio()（见 §9）
-  5. page.waitForFunction(窗口.__SF_TEST__.ready)
-  6. 按文件名排序读 tests/*.js → page.addScriptTag({content}) 逐个注入
+  6. page.waitForFunction(窗口.__SF_TEST__.ready)
+  7. 按文件名排序读 tests/*.js → page.addScriptTag({content}) 逐个注入
      └─ 每个文件调用 __SF_TEST__.suite(name, fn) 注册套件
-  7. page.evaluate(() => __SF_TEST__.runAll({grep}))
+  8. page.evaluate(() => __SF_TEST__.runAll({grep}))
      └─ runAll 顺序执行每个套件的 before → 各 test → after，收集 pass/fail/耗时/pageErrors
-  8. 写 test-results.json + test-results.xml，打印摘要，process.exit(0|1)
+  9. 写 test-results.json + test-results.xml，打印摘要，process.exit(0|1)
 ```
 
 **低画质预设**（第 3 步注入的 localStorage）：
@@ -126,7 +129,8 @@ node test/run.mjs
 - **`window.UI`**：`anyPanelOpen(), closeAll(), toggle(id), buildHotbar(), refreshInv(), refreshAll(), updateResearch(dt), researching(get/set), openMachinePanel, bigMessage, refreshQuests, refreshHUD, ...`。
 - **`window.Space`**：`scene, planets, shipState{pos,speed,yaw,pitch,roll,pos...}, enter(planetId), getCurrentGalaxySeed(), restoreGalaxy(seed), warpGalaxy(seed), SHIP_CLASSES, SHIP_MODEL_NAMES, ...`。
 - **`window.SaveStore`**：`open(), getSlot(key), putSlot(key,data), deleteSlot(key), getIndex(), putIndex(arr), atomicWrite(key,data,idx), isMigrated(), setMigrated(), available`。
-- **`window.Station` / `window.Net` / `window.Creatures` / `window.ModelLib`**：较少被测试直接调用，需要时读各自源文件末尾的 `return {...}`。
+- **`window.Station` / `window.Creatures` / `window.ModelLib`**：较少被测试直接调用，需要时读各自源文件末尾的 `return {...}`。
+- **`window.Net`**（联机客户端）：`hostRoom(addr) / joinRoom(addr) / disconnect() / active() / role / myId / myName / serverInfo / waitingWorld / getPlayers() / getRemotes() / requestTp(id) / resetWorld() / timeSynced() / syncedTime()`。`addr` 支持 `host:port` 自定义端口（联机套件用 `Net.joinRoom('127.0.0.1:17886')` 走真实客户端路径）。
 
 ### 4.3 数据定义（都在 `api.defs` 里）
 
@@ -530,6 +534,8 @@ node test/run.mjs --headed --grep=factory
 | `Factory not initialized`（历史版本） | 已修：`Factory.group` 非公开；boot 后再 `placeMachine` |
 | 某用例偶发失败 | 大概率是确定性被破坏或依赖墙钟；按 §9 排查 |
 | `ERR_SOCKET_BAD_PORT` | `serve.mjs` 端口解析失败；默认 17899，若被占用改 `SF_TEST_PORT` 环境变量 |
+| 联机套件 `ws 连接失败` | `run.mjs` 拉起的 `server.mjs` 没起来：确认本机 Node ≥ 18、端口 17887/17886 未被占用（旧测试进程残留可先任务管理器结束 node） |
+| 联机套件 `Failed to fetch` | 浏览器跨域读取服务器 HTTP 响应失败：确认 `server.mjs` 响应带 `Access-Control-Allow-Origin`；页面内无法测路径穿越（浏览器会规范化 URL），该项由 `run.mjs` Node 侧自检 |
 
 ### 12.4 WebGL / 浏览器
 
@@ -575,6 +581,8 @@ node test/run.mjs --headed --grep=factory
 ```bash
 npm test                                        # 全套无头
 npm run test:headed                             # 全套有头
+npm run test:net                                # 只跑联机协议/集成套件（net / net-join）
+npm run test:e2e                                # 双浏览器真实联机端到端（自动拉起服务器）
 node test/run.mjs --grep=factory                # 只跑 factory 套件（正则）
 node test/run.mjs --grep=^(data|world|factory)$ # 多套件正则
 node test/run.mjs --browser=chrome              # 换 Chrome

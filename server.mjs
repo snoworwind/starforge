@@ -572,7 +572,8 @@ function handleMessage(c, m){
     case 'pos': {
       // 位置中继：服务器记录最后位置（传送/重生用），转发给其他玩家
       if (!take(c.buckets.pos)) return;   // 高频消息唯一无上限路径 → 令牌桶限速（客户端 10/s，突发 40）
-      if (!Array.isArray(m.p) || m.p.length < 3 || !m.p.every(v => Number.isFinite(v) && Math.abs(v) <= 1e6) || !Number.isFinite(m.yaw)) return;
+      // 严格三元素坐标：拒绝超长数组（中继放大：任意长度的 p 原样广播给所有在线玩家）
+      if (!Array.isArray(m.p) || m.p.length !== 3 || !m.p.every(v => Number.isFinite(v) && Math.abs(v) <= 1e6) || !Number.isFinite(m.yaw)) return;
       if (Number.isInteger(m.planet)) c.lastPlanet = m.planet;
       c.lastSt = typeof m.st === 'string' ? m.st.slice(0, 24) : '';
       c.lastPos = { planet: c.lastPlanet, p: m.p.slice(0, 3), st: c.lastSt, yaw: m.yaw };
@@ -583,9 +584,12 @@ function handleMessage(c, m){
         world.players[c.name].lastSeen = Date.now();
       }
       // 优化：外观只在 hello/外观变化时发（app 字段仅透传已有消息，不额外包装）
-      const out = { t: 'pos', id: c.id, planet: c.lastPlanet, st: c.lastSt, p: m.p, yaw: m.yaw };
-      if (m.app) out.app = m.app;
-      if (m.act !== undefined) out.act = m.act;
+      const out = { t: 'pos', id: c.id, planet: c.lastPlanet, st: c.lastSt, p: m.p.slice(0, 3), yaw: m.yaw };
+      if (m.app){
+        const appJson = JSON.stringify(m.app);
+        if (appJson.length <= 800) out.app = m.app;   // 外观上限与 hello 一致，防超大对象中继放大
+      }
+      if (Number.isFinite(m.act)) out.act = m.act;   // 动作位仅限数值（客户端只发 0/1）
       broadcast(out, c);
       break;
     }

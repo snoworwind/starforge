@@ -54,6 +54,27 @@ __SF_TEST__.suite('world', function (t, api) {
     A.ok(typeof s.mods === 'object', 'serialize mods object');
   });
 
+  t.test('建材方块：半砖（半高碰撞）/金属块/混凝土块', function () {
+    var x = 64, z = 64, y = Math.min(api.topAt(x, z) + 1, 95);
+    // 半砖：数值 lowbox = 0.45（可站上的半高块）
+    api.setBlock(x, y, z, 'slab');
+    A.eq(api.blockKeyAt(x, y, z), 'slab', 'slab placed');
+    var d = window.World.getDef(x, y, z);
+    A.eq(d.lowbox, 0.45, 'slab lowbox height 0.45');
+    A.ok(d.solid, 'slab is solid');
+    api.setBlock(x, y, z, 'air');
+    // 金属块
+    api.setBlock(x, y, z, 'metal');
+    A.eq(api.blockKeyAt(x, y, z), 'metal', 'metal placed');
+    A.eq(window.World.getDef(x, y, z).tiles.all, 'metal', 'metal tile');
+    api.setBlock(x, y, z, 'air');
+    // 混凝土块
+    api.setBlock(x, y, z, 'concrete');
+    A.eq(api.blockKeyAt(x, y, z), 'concrete', 'concrete placed');
+    A.eq(window.World.getDef(x, y, z).tiles.all, 'concrete', 'concrete tile');
+    api.setBlock(x, y, z, 'air');
+  });
+
   t.test('stream 生成预算：单帧含邻块不超过 4，多帧后视距内无破洞', function () {
     var p = api.pos();
     // 传送 512 格外（远超视距）：旧区块全部卸载，触发全新流式生成

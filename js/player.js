@@ -575,7 +575,11 @@ const Player = (() => {
         for (let x = x0; x <= x1; x++){
           const d = World.getDef(x, y, z);
           if (!d.solid) continue;
-          if (d.lowbox && py > y + 0.2) continue;   // 低矮机器：可站上
+          if (d.lowbox){
+            // true = 低矮机器（0.2 格）；数值 = 半高建材的顶面高度（可站上该高度）
+            const lb = d.lowbox === true ? 0.2 : d.lowbox;
+            if (py > y + lb) continue;
+          }
           return true;
         }
     return false;

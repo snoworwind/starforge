@@ -392,7 +392,7 @@ function makeClient(socket){
     dead: false, buf: Buffer.alloc(0), frag: [], fragOp: 0, fragSize: 0,
     lastTraffic: Date.now(), lastPong: Date.now(),
     lastPlanet: -1, lastSt: '', lastPos: null, lastYaw: 0,
-    charT: 0, lastCharAt: 0,
+    charT: 0, lastCharAt: 0, token: '',
     buckets: {
       blk: makeBucket(40, 20), mac: makeBucket(20, 10), macdata: makeBucket(4, 1),
       cre: makeBucket(4, 2), chat: makeBucket(5, 1), char: makeBucket(2, 0.1),
@@ -526,7 +526,7 @@ function handleMessage(c, m){
     case 'hello': {
       if (c.named) return;
       if (CFG.password && String(m.password || '') !== CFG.password){ kick(c, 'auth'); return; }
-      if (m.v !== 3){ kick(c, 'version'); return; }
+      if (m.v !== 4){ kick(c, 'version'); return; }   // v4：身份令牌协议（同名档案防冒领）
       c.named = true;
       c.name = sanitizeName(m.name);
       c.role = 'guest';
@@ -536,6 +536,29 @@ function handleMessage(c, m){
         else sendText(c, JSON.stringify({ t: 'chat', sys: 1, text: '已有主机在线（或主机密钥不符），你以成员身份加入' }));
       }
       if (m.app && typeof m.app === 'object' && JSON.stringify(m.app).length < 800) c.app = m.app;
+      // 身份令牌：人物档案按名字持久化，绑定首次使用该名字时签发的本机密钥。
+      // 重连必须出示匹配令牌才能载入该档案；否则拒绝（防同名冒领他人背包/位置/外观）。
+      let claimToken = null;
+      if (world){
+        const rec = world.players[c.name];
+        if (rec){
+          if (rec.token){
+            if (typeof m.token === 'string' && m.token.length > 0 && m.token.length <= 64 && m.token === rec.token){
+              claimToken = rec.token;
+            } else {
+              kick(c, 'name-taken'); return;   // 档案已有归属且令牌不符：拒绝冒领
+            }
+          } else {
+            // 旧存档迁移（无令牌字段）：首个重连者领取该档案（升级前的存量数据无法追溯原主人）
+            rec.token = crypto.randomBytes(16).toString('hex');
+            claimToken = rec.token;
+          }
+        }
+      }
+      c.token = claimToken || crypto.randomBytes(16).toString('hex');
+      if (world && !world.players[c.name]){
+        world.players[c.name] = { token: c.token, lastSeen: Date.now() };
+      }
       // 回送服务器信息（role = 服务器裁定后的实际角色；players = 当前在线名单，晚加入也能看到先到者）
       sendText(c, JSON.stringify({
         t: 'ws-id', id: c.id, svName: CFG.serverName, motd: CFG.motd,
@@ -544,6 +567,7 @@ function handleMessage(c, m){
         worldName: world ? world.name : null,
         worldTime: world ? dayTimeNow() : null,
         auth: 'ok',
+        token: c.token,
       }));
       if (world){
         sendInit(c);
@@ -582,7 +606,7 @@ function handleMessage(c, m){
       c.lastPos = { planet: c.lastPlanet, p: m.p.slice(0, 3), st: c.lastSt, yaw: m.yaw };
       c.lastYaw = m.yaw;
       if (world && c.name){
-        world.players[c.name] = world.players[c.name] || {};
+        world.players[c.name] = world.players[c.name] || { token: c.token };
         world.players[c.name].pos = c.lastPos;
         world.players[c.name].lastSeen = Date.now();
       }
@@ -665,7 +689,7 @@ function handleMessage(c, m){
       if (!m.char || typeof m.char !== 'object') return;
       const size = JSON.stringify(m.char).length;
       if (size > 512 * 1024) return;
-      world.players[c.name] = world.players[c.name] || {};
+      world.players[c.name] = world.players[c.name] || { token: c.token };
       world.players[c.name].char = m.char;
       world.players[c.name].lastSeen = Date.now();
       c.lastCharAt = Date.now();

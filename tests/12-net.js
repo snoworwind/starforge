@@ -37,7 +37,7 @@ __SF_TEST__.suite('net', function (t, api) {
   t.before(async function () {
     var c = wsClient();
     await c.open;
-    c.send({ t: 'hello', v: 3, name: '测试清理者', role: 'host', hostKey: HOSTKEY });
+    c.send({ t: 'hello', v: 4, name: '测试清理者', role: 'host', hostKey: HOSTKEY });
     var id = await c.next(function (m) { return m.t === 'ws-id'; });
     if (id.hasWorld) {
       c.send({ t: 'reset-world' });
@@ -90,7 +90,7 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('握手 → 空世界 → 上传 → 访客自动收 init', async function () {
     var host = wsClient(); await host.open;
-    host.send({ t: 'hello', v: 3, name: '测试房主', role: 'host', app: { suit: '#123456' } });
+    host.send({ t: 'hello', v: 4, name: '测试房主', role: 'host', app: { suit: '#123456' } });
     var id = await host.next(function (m) { return m.t === 'ws-id'; });
     A.eq(id.auth, 'ok', '认证通过');
     A.eq(id.role, 'host', '空世界首个声明者为真实主机');
@@ -107,7 +107,7 @@ __SF_TEST__.suite('net', function (t, api) {
     HOSTKEY = hk.key;
     await sleep(300);
     var guest = wsClient(); await guest.open;
-    guest.send({ t: 'hello', v: 3, name: '测试访客', role: 'guest' });
+    guest.send({ t: 'hello', v: 4, name: '测试访客', role: 'guest' });
     var init = await guest.next(function (m) { return m.t === 'init'; });
     A.eq(init.world.name, '联机测试世界', '世界名');
     A.eq(init.world.planets['0'].seed, 777, '星球种子');
@@ -122,7 +122,7 @@ __SF_TEST__.suite('net', function (t, api) {
   t.test('方块改动：整块 RLE + 增量 + 持久化到新访客', async function () {
     // 先连入拿到现有世界（世界已有密钥，必须出示才能声明主机）
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '方块甲', role: 'host', hostKey: HOSTKEY });
+    a.send({ t: 'hello', v: 4, name: '方块甲', role: 'host', hostKey: HOSTKEY });
     await a.next(function (m) { return m.t === 'init' || m.t === 'world-missing'; });
     // 整块（未知区块必须带 full RLE；区块数据长度 = 16×16×96）
     var full = [];
@@ -136,7 +136,7 @@ __SF_TEST__.suite('net', function (t, api) {
     }
     rle.push(run, cur);
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '方块乙', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '方块乙', role: 'guest' });
     await b.next(function (m) { return m.t === 'init'; });
     b.send({ t: 'blk', planet: 0, x: 5, y: 3, z: 4, b: 1, full: rle });
     await a.next(function (m) { return m.t === 'blk' && m.b === 1; });
@@ -144,7 +144,7 @@ __SF_TEST__.suite('net', function (t, api) {
     await a.next(function (m) { return m.t === 'blk' && m.b === 2; });
     // 持久化验证：第三个连接拿到两份改动
     var c = wsClient(); await c.open;
-    c.send({ t: 'hello', v: 3, name: '方块丙', role: 'guest' });
+    c.send({ t: 'hello', v: 4, name: '方块丙', role: 'guest' });
     var init = await c.next(function (m) { return m.t === 'init'; });
     A.ok(init.world.planets['0'].mods['0,0'], '修改区块已持久化');
     a.close(); b.close(); c.close();
@@ -159,7 +159,7 @@ __SF_TEST__.suite('net', function (t, api) {
       if (orig) orig.call(a.ws, e);
       try { seen.push(JSON.parse(e.data)); } catch (err) {}
     };
-    a.send({ t: 'hello', v: 3, name: '旁观者', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '旁观者', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     // 攻击者：完成 WebSocket 握手后直接发状态修改消息，完全跳过 hello（无密码/无名字）
     var atk = wsClient(); await atk.open;
@@ -171,7 +171,7 @@ __SF_TEST__.suite('net', function (t, api) {
     A.eq(seen.some(function (m) { return m.t === 'chat' && m.text === '未认证注入'; }), false, '旁观者未收到未认证聊天');
     // 新连接读取服务器世界：攻击者的方块改动不得落盘
     var c = wsClient(); await c.open;
-    c.send({ t: 'hello', v: 3, name: '验证者', role: 'guest' });
+    c.send({ t: 'hello', v: 4, name: '验证者', role: 'guest' });
     var init = await c.next(function (m) { return m.t === 'init'; });
     A.eq(init.world.planets['0'].mods['1,1'], undefined, '未认证 blk 未写入世界（chunk 1,1 不存在）');
     a.close(); atk.close(); c.close();
@@ -179,13 +179,13 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('机器增删 + 运行数据合并持久化', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '机器甲', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '机器甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     a.send({ t: 'mac', planet: 0, op: 'add', x: 8, y: 2, z: 8, type: 'furnace', dir: 0, data: { fuel: null } });
     a.send({ t: 'mac-data', planet: 0, arr: [{ x: 8, y: 2, z: 8, data: { fuel: { item: 'carbon', n: 3 }, prog: 0.5 } }] });
     await sleep(300);
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '机器乙', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '机器乙', role: 'guest' });
     var init = await b.next(function (m) { return m.t === 'init'; });
     var mach = (init.world.planets['0'].machines || []).filter(function (m) { return m.x === 8; })[0];
     A.ok(mach && mach.type === 'furnace', '机器已持久化');
@@ -195,7 +195,7 @@ __SF_TEST__.suite('net', function (t, api) {
     a.send({ t: 'mac', planet: 0, op: 'remove', x: 8, y: 2, z: 8 });
     await sleep(300);
     var c = wsClient(); await c.open;
-    c.send({ t: 'hello', v: 3, name: '机器丙', role: 'guest' });
+    c.send({ t: 'hello', v: 4, name: '机器丙', role: 'guest' });
     var init2 = await c.next(function (m) { return m.t === 'init'; });
     A.eq((init2.world.planets['0'].machines || []).some(function (m) { return m.x === 8; }), false, '机器已删除');
     a.close(); b.close(); c.close();
@@ -203,10 +203,10 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('聊天中继 + 服务器命令', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '聊天甲', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '聊天甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '聊天乙', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '聊天乙', role: 'guest' });
     await b.next(function (m) { return m.t === 'init'; });
     b.send({ t: 'chat', text: '大家好' });
     var chat = await a.next(function (m) { return m.t === 'chat' && !m.sys; });
@@ -220,10 +220,10 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('位置中继 + 一键传送 + 市场/标记/生物中继', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '传送甲', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '传送甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '传送乙', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '传送乙', role: 'guest' });
     var bInit = await b.next(function (m) { return m.t === 'init'; });
     var bId = bInit.you.id;
     b.send({ t: 'pos', planet: 0, st: 'planet', p: [11, 22, 33], yaw: 1.5, act: 1 });
@@ -257,10 +257,10 @@ __SF_TEST__.suite('net', function (t, api) {
       if (orig) orig.call(a.ws, e);
       try { var m = JSON.parse(e.data); if (m.t === 'pos') seen.push(m); } catch (err) {}
     };
-    a.send({ t: 'hello', v: 3, name: '旁观甲', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '旁观甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '中继乙', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '中继乙', role: 'guest' });
     var bInit = await b.next(function (m) { return m.t === 'init'; });
     var bId = bInit.you.id;
     // 1) 超长坐标数组：整体拒绝（不得中继，也不得覆盖服务器记录的最后位置）
@@ -289,7 +289,7 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('服务器权威昼夜时间广播', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '时间甲', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '时间甲', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var t1 = await a.next(function (m) { return m.t === 'time'; });
     var t2 = await a.next(function (m) { return m.t === 'time'; });
@@ -300,24 +300,59 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('人物数据按名字持久化 + 同名重连恢复 + 离线上报', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '人物甲', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '人物甲', role: 'guest' });
+    var idA = await a.next(function (m) { return m.t === 'ws-id' && m.auth === 'ok'; });
+    A.ok(idA.token && idA.token.length >= 16, '首次使用名字签发身份令牌');
     await a.next(function (m) { return m.t === 'init'; });
     a.send({ t: 'pos', planet: 0, st: 'planet', p: [42, 30, 42], yaw: 0.5 });
     a.send({ t: 'char', char: { name: '人物甲', inv: [{ item: 'carbon', n: 9 }], credits: 100, player: { pos: [42, 30, 42], inv: [{ item: 'carbon', n: 9 }], credits: 100 }, techState: { survival: true } } });
     // 等第三个旁观者确认离线后再重连（避免重名改名）
     var watch = wsClient(); await watch.open;
-    watch.send({ t: 'hello', v: 3, name: '旁观者', role: 'guest' });
+    watch.send({ t: 'hello', v: 4, name: '见证者', role: 'guest' });
     await watch.next(function (m) { return m.t === 'init'; });
     a.close();
     await watch.next(function (m) { return m.t === 'left' && m.name === '人物甲'; }, 8000);
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '人物甲', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '人物甲', role: 'guest', token: idA.token });
     var init = await b.next(function (m) { return m.t === 'init'; });
     A.eq(init.you.name, '人物甲', '同名重连不改名');
     A.eq(init.you.char.credits, 100, '人物数据恢复');
     A.eq(init.you.char.inv[0].n, 9, '背包恢复');
     A.ok(init.spawn && init.spawn.p[0] === 42, '重生点恢复');
     watch.close(); b.close();
+  });
+
+  t.test('同名冒领防护：无令牌/错令牌被拒，持令牌可载入档案', async function () {
+    // 先造档案：名字 X + 令牌 T
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 4, name: '守擂者', role: 'guest' });
+    var idA = await a.next(function (m) { return m.t === 'ws-id' && m.auth === 'ok'; });
+    await a.next(function (m) { return m.t === 'init'; });
+    a.send({ t: 'char', char: { name: '守擂者', credits: 777, player: { credits: 777, inv: [], pos: [1, 40, 1] }, techState: {} } });
+    // 等旁观者确认离线，避免重名自动加 #2
+    var watch = wsClient(); await watch.open;
+    watch.send({ t: 'hello', v: 4, name: '旁观看客', role: 'guest' });
+    await watch.next(function (m) { return m.t === 'init'; });
+    a.close();
+    await watch.next(function (m) { return m.t === 'left' && m.name === '守擂者'; }, 8000);
+    // 冒领者：不带令牌 → 拒绝
+    var atk = wsClient(); await atk.open;
+    atk.send({ t: 'hello', v: 4, name: '守擂者', role: 'guest' });
+    var err1 = await atk.next(function (m) { return m.t === 'ws-err'; });
+    A.eq(err1.reason, 'name-taken', '无令牌冒领被拒');
+    atk.close();
+    // 冒领者：错误令牌 → 拒绝
+    var atk2 = wsClient(); await atk2.open;
+    atk2.send({ t: 'hello', v: 4, name: '守擂者', role: 'guest', token: 'x'.repeat(32) });
+    var err2 = await atk2.next(function (m) { return m.t === 'ws-err'; });
+    A.eq(err2.reason, 'name-taken', '错令牌冒领被拒');
+    atk2.close();
+    // 本人：持令牌 → 档案载入
+    var me = wsClient(); await me.open;
+    me.send({ t: 'hello', v: 4, name: '守擂者', role: 'guest', token: idA.token });
+    var init = await me.next(function (m) { return m.t === 'init'; });
+    A.eq(init.you.char.credits, 777, '本人持令牌载入档案');
+    watch.close(); me.close();
   });
 
   t.test('密码校验与满员拒绝', async function () {
@@ -332,12 +367,12 @@ __SF_TEST__.suite('net', function (t, api) {
   t.test('主机所有权：无密钥声明被降级，持密钥可重新声明', async function () {
     A.ok(HOSTKEY, '前置测试已签发密钥');
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '冒牌主机', role: 'host' });   // 不带密钥
+    a.send({ t: 'hello', v: 4, name: '冒牌主机', role: 'host' });   // 不带密钥
     var idA = await a.next(function (m) { return m.t === 'ws-id'; });
     A.eq(idA.role, 'guest', '世界已有归属时无密钥声明主机被降级为成员');
     a.close();
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '回归主机', role: 'host', hostKey: HOSTKEY });
+    b.send({ t: 'hello', v: 4, name: '回归主机', role: 'host', hostKey: HOSTKEY });
     var idB = await b.next(function (m) { return m.t === 'ws-id'; });
     A.eq(idB.role, 'host', '持密钥可在主机离线后重新声明');
     b.close();
@@ -345,11 +380,11 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('主机在线时他人抢座被降级', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '在线主机', role: 'host', hostKey: HOSTKEY });
+    a.send({ t: 'hello', v: 4, name: '在线主机', role: 'host', hostKey: HOSTKEY });
     var idA = await a.next(function (m) { return m.t === 'ws-id'; });
     A.eq(idA.role, 'host', '主机上线');
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '抢座者', role: 'host', hostKey: HOSTKEY });
+    b.send({ t: 'hello', v: 4, name: '抢座者', role: 'host', hostKey: HOSTKEY });
     var idB = await b.next(function (m) { return m.t === 'ws-id'; });
     A.eq(idB.role, 'guest', '主机在线时即使持密钥也被降级');
     a.close(); b.close();
@@ -357,10 +392,10 @@ __SF_TEST__.suite('net', function (t, api) {
 
   t.test('晚加入玩家的 ws-id 名单包含先到玩家', async function () {
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '先到者', role: 'guest' });
+    a.send({ t: 'hello', v: 4, name: '先到者', role: 'guest' });
     await a.next(function (m) { return m.t === 'init'; });
     var b = wsClient(); await b.open;
-    b.send({ t: 'hello', v: 3, name: '后到者', role: 'guest' });
+    b.send({ t: 'hello', v: 4, name: '后到者', role: 'guest' });
     var idB = await b.next(function (m) { return m.t === 'ws-id'; });
     A.ok((idB.players || []).some(function (p) { return p.name === '先到者'; }), '晚加入者能看到先到玩家');
     A.ok((idB.players || []).some(function (p) { return p.name === '后到者'; }), '名单包含自己');

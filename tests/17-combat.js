@@ -63,6 +63,27 @@ __SF_TEST__.suite('combat', function (t, api) {
     window.Creatures.kill(s);
   });
 
+  t.test('守卫攻击有前摇：先蓄力红眼再命中', function () {
+    var p = api.pos();
+    var s = window.Creatures.debugSpawnSentinel(p[0] + 1, p[2]);
+    api.setStat('shield', 0);
+    api.setStat('hp', 40);
+    var hp0 = api.stats().hp;
+    var sawWindup = false;
+    // 第一段：只步进到「观察到前摇」或「掉血」为止——前摇必须先于掉血出现
+    for (var i = 0; i < 60 && api.stats().hp === hp0; i++){
+      window.Creatures.tick(1 / 30, window.Player.pos);
+      if (s.userData.windup > 0) sawWindup = true;
+    }
+    A.ok(sawWindup, 'windup (eye charge) observed before any damage');
+    // 第二段：前摇结束 → 命中
+    for (var j = 0; j < 60 && api.stats().hp === hp0; j++){
+      window.Creatures.tick(1 / 30, window.Player.pos);
+    }
+    A.ok(api.stats().hp < hp0, 'damage landed after windup (hp=' + api.stats().hp + ')');
+    window.Creatures.kill(s);
+  });
+
   t.test('生物 AI 地形查询不触发区块生成（topAtNoGen）', function () {
     var p = api.pos();
     // 部署在未加载区域（> 生成半径）：AI 悬浮查询绝不触发生成

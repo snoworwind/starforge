@@ -2093,6 +2093,9 @@ const Game = (() => {
     const pos = Space.getGalaxySpritePos(warpLock.seed);
     if (!pos) return;
     const dir = pos.clone().sub(Space.shipState.pos).normalize();
+    // 先结算「持有曲率电池」的收集任务（q_warp），再消耗电池：否则电池一扣，
+    // 该任务永远停留在 0/1，主线在最后一关前永久卡死
+    checkQuest();
     Player.removeItem('warpcell', 1);
     spaceInput.pulse = false;
     Space.shipState.pulsing = false;
@@ -2129,6 +2132,7 @@ const Game = (() => {
       UI.bigMessage('缺少曲率电池', '精炼厂合成（需科技「曲率理论」）或空间站购买');
       return;
     }
+    checkQuest();   // 与 engageWarpJump 一致：消耗电池前先结算持有电池的收集任务
     Player.removeItem('warpcell', 1);
     Sound.play('pulseStart');
     Sound.loops.pulse.start();
@@ -3555,12 +3559,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v118';
+    bd.textContent = 'build v119';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v118';
+  window.__V_MAIN = 'v119';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4717,7 +4721,7 @@ const Game = (() => {
       UI.refreshHUD && UI.refreshHUD();   // 入舱战利品即时反映到 HUD
       return n - left;
     },
-    techDone, completeTech, currentQuests, currentQuestId, onBlockMined, onBlockPlaced, lockPointer,
+    techDone, completeTech, currentQuests, currentQuestId, onBlockMined, onBlockPlaced, lockPointer, checkQuest,
     worldPaused,
     get playTime(){ return playTime; },
     setWarpLock,

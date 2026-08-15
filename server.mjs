@@ -516,6 +516,9 @@ function sanitizeUpload(raw){
 
 function handleMessage(c, m){
   if (!m || typeof m !== 'object' || typeof m.t !== 'string') return;
+  // 认证门槛：完成 hello（含密码/版本校验）前，仅允许握手与探活消息。
+  // 此前任何原始连接都能在未认证状态下改世界/广播/传送（密码形同虚设）。
+  if (!c.named && m.t !== 'hello' && m.t !== 'ping') return;
   switch (m.t){
     case 'hello': {
       if (c.named) return;

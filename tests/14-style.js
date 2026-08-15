@@ -59,4 +59,14 @@ __SF_TEST__.suite('style', function (t, api) {
       if (filter !== null) A.eq(filter, THREE.LinearFilter, 'model texture back to LinearFilter');
     }
   });
+
+  t.test('天气粒子按生态生成且可开关', function () {
+    var w = window.Game.debugWeather;
+    A.ok(w && w.on, 'weather active on lush biome, ' + JSON.stringify(w));
+    A.ok(w.n > 0, 'particles allocated');
+    document.querySelector('#setWeather button[data-q="off"]').onclick();
+    A.eq(window.Game.debugWeather.on, false, 'weather disabled');
+    document.querySelector('#setWeather button[data-q="on"]').onclick();
+    A.ok(window.Game.debugWeather.on, 'weather re-enabled');
+  });
 });

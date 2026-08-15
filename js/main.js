@@ -7,6 +7,14 @@
 const Game = (() => {
   const $ = id => document.getElementById(id);
 
+  // 世界是否冻结：单机下系统级面板（ESC 菜单/设置/帮助/存档）打开即暂停整个世界模拟。
+  // 联机时服务器世界仍在推进，本地不冻结（否则会与世界/其他玩家彻底脱同步）。
+  function worldPaused(){
+    if (window.Net && Net.active()) return false;
+    return ['pausePanel', 'settingsPanel', 'helpPanel', 'savePanel']
+      .some(id => { const el = $(id); return el && !el.classList.contains('hidden'); });
+  }
+
   // ---------- 渲染器 ----------
   const renderer = new THREE.WebGLRenderer({ canvas: $('game'), antialias: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -108,7 +116,6 @@ const Game = (() => {
   let fuelLoaded = 0;            // 飞船燃料（次数）
   let playTime = 0;
   let pointerLocked = false;
-  let paused = false;
   let creative = false;          // 创造模式
   let dropMult = 1;              // 生存难度产出倍率（简单×7 普通×4 困难×1）
 
@@ -3532,12 +3539,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v100-weather';
+    bd.textContent = 'build v101';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v100';
+  window.__V_MAIN = 'v101';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3580,7 +3587,7 @@ const Game = (() => {
     // 否则访客在「等待房主世界同步」的 menu/loading 态永远不重发 need-init，卡死在主菜单。
     if (window.Net) Net.tick(dt);
     if (state === 'menu' || state === 'loading') return;
-    if (paused) return;
+    if (worldPaused()) return;   // 单机系统面板打开：整个世界冻结（联机除外）
     flushChunkQueue(6);       // 后台完整区块落盘（Minecraft 式，修改区块优先）
     playTime += dt;
     Space.tickRotation(dt);   // 星球自转：任何状态下持续推进
@@ -4605,7 +4612,7 @@ const Game = (() => {
   listSaves().then(arr => { if (arr.length) $('btnContinue').disabled = false; }).catch(() => {});
 
   // 自动存档（星球上每60秒，仅当已有存档槽位）
-  setInterval(() => { if (state === 'planet' && !paused && activeSaveKey) save(); }, 60000);
+  setInterval(() => { if (state === 'planet' && !worldPaused() && activeSaveKey) save(); }, 60000);
   // 关页存档：beforeunload 尽力而为；visibilitychange 为可靠路径（IDB 异步写需要时间）
   window.addEventListener('beforeunload', () => { if ((state === 'planet' || state === 'space') && activeSaveKey) save(); });
   document.addEventListener('visibilitychange', () => {
@@ -4695,6 +4702,8 @@ const Game = (() => {
       return n - left;
     },
     techDone, completeTech, currentQuests, currentQuestId, onBlockMined, onBlockPlaced, lockPointer,
+    worldPaused,
+    get playTime(){ return playTime; },
     setWarpLock,
     get warpLockSeed(){ return warpLock ? warpLock.seed : null; },
     isGalaxyVisited(seed){ return seed === Space.getCurrentGalaxySeed() || seed === HOME_GALAXY_SEED || galaxyArchives[seed] !== undefined; },

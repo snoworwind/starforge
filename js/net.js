@@ -249,15 +249,14 @@ const Net = (() => {
   // ================= 世界包处理 =================
   function onInit(m){
     const w = m.world;
-    if (!w || !window.Game){
-      if (!w) return;
-      pendingInit = m;
-      return;
-    }
+    if (!w) return;
+    // 无论 Game 是否就绪都先落位同步状态：此前在 Game 未挂载时早退，
+    // gotInit 永远为 false → timeSynced() 恒假，该会话昼夜同步永久失效
     gotInit = true;
     waitingWorld = false;
     dayT = { v: Number.isFinite(w.dayTime) ? w.dayTime : 0.3, at: performance.now() };
     if (m.you && m.you.name) myName = m.you.name;
+    if (!window.Game){ pendingInit = m; return; }
     if (window.Game.state === 'loading'){ pendingInit = m; return; }   // 加载中：稍后应用
     applyInit(m);
   }

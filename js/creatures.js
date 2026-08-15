@@ -13,7 +13,30 @@ const Creatures = (() => {
   let vGroup = null, villagers = [];        // 村民（独立分组：不参与刷新清理，不可被攻击）
   const dying = [];                         // 播放死亡动画中的精模生物
   const spawnedVillages = new Set();
-  let lastSpawnPos = null, spawnDist = 80;
+  let batchCell = null;                     // 当前生物批次所在网格（跨玩家确定性生成）
+
+  // ---------- 联机：确定性 ID / 批次 ----------
+  // 生物批次按 24m 网格生成，种子 = 世界种子+网格坐标 → 同网格的玩家看到同一批生物
+  const CRE_CELL = 24;
+  function batchSeedOf(cx, cz){
+    let h = (World.seed ^ 0xC7EA5) >>> 0;
+    h = Math.imul(h ^ cx, 374761393);
+    h = Math.imul(h ^ cz, 668265263);
+    h = (h ^ (h >>> 13)) >>> 0;
+    return h;
+  }
+  function creatureNid(cx, cz, i){ return batchSeedOf(cx, cz) * 64 + i; }
+  function villagerNid(vx, vz, i){
+    let h = (World.seed ^ 0x7A9E1) >>> 0;
+    h = Math.imul(h ^ vx, 374761393);
+    h = Math.imul(h ^ vz, 668265263);
+    h = Math.imul(h ^ i, 2246822519);
+    h = (h ^ (h >>> 13)) >>> 0;
+    return h;
+  }
+
+  // ---------- 联机：远端快照（跨客户端生物对齐）----------
+  const ghosts = new Map();     // nid -> {g, tgt, last}（其他玩家批次的“投影”生物：纯视觉，不可交互）
 
   // 外部精模映射（CC0）：类型 → 模型名/朝向修正（使模型前方 = -Z）
   const GLB_MAP = {
@@ -76,7 +99,8 @@ const Creatures = (() => {
     villagers = [];
     dying.length = 0;
     spawnedVillages.clear();
-    lastSpawnPos = null;
+    ghosts.clear();
+    batchCell = null;
   }
 
   // ---------- 村民：统一人形管线（Humanoid），四肢关节可动 ----------
@@ -129,8 +153,10 @@ const Creatures = (() => {
         }
         const grig = rigFromClone(g);
         g.position.set(vx, gy + 1 + 0.02, vz);
+        const nid = villagerNid(st.x, st.z, i);
         g.userData = {
           villager: true, isGlb: true, rig: grig,
+          nid, rnd: mulberry32(nid),           // 联机：确定性行为随机源（跨客户端一致）
           name: VILLAGER_NAMES[(rnd() * VILLAGER_NAMES.length) | 0],
           home: { x: st.x, z: st.z },
           speed: 0.6 + rnd() * 0.4,
@@ -163,26 +189,29 @@ const Creatures = (() => {
     const info = biome.animal;
     if (!info) return;
 
-    // 只在玩家附近生成（太远则清理后重新生）
-    const p = plyPos;
-    if (lastSpawnPos && plyPos.distanceToSquared(lastSpawnPos) < 1600) return; // ~40m 内不刷新
+    // 批次按 24m 网格：跨网格才重生成。同网格的玩家（联机）生成同一批生物
+    const cx = Math.floor(plyPos.x / CRE_CELL), cz = Math.floor(plyPos.z / CRE_CELL);
+    if (batchCell === cx + ',' + cz) return;
+    batchCell = cx + ',' + cz;
 
-    lastSpawnPos = plyPos.clone();
-    // 清理旧生物（GLB 克隆几何共享模板跳过；体素回退全量）
+    // 清理旧批（GLB 克隆几何共享模板跳过；体素回退全量）。投影生物（ghosts）保留
     for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
     for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+    for (const g of list) group.remove(g);
+    for (const g of dying) group.remove(g);
     dying.length = 0;
-    group.clear();
     list = [];
 
     const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
+    const rnd = mulberry32(batchSeedOf(cx, cz));
+    const ccx = cx * CRE_CELL + CRE_CELL / 2, ccz = cz * CRE_CELL + CRE_CELL / 2;
     for (let i = 0; i < Math.min(info.count, 22); i++){
-      // 出生点选择：12~92 格随机环，避开水体与树木顶端
+      // 出生点选择：细胞中心 12~92 格随机环（确定性），避开水体与树木顶端
       let wx = 0, wz = 0, gy = 0, ok = false;
       for (let t = 0; t < 8 && !ok; t++){
-        const ang = Math.random() * Math.PI * 2;
-        const dist = 12 + Math.random() * spawnDist;
-        wx = p.x + Math.cos(ang) * dist; wz = p.z + Math.sin(ang) * dist;
+        const ang = rnd() * Math.PI * 2;
+        const dist = 12 + rnd() * 80;
+        wx = ccx + Math.cos(ang) * dist; wz = ccz + Math.sin(ang) * dist;
         gy = World.topAt(Math.floor(wx), Math.floor(wz));
         const dd = solidDefAt(wx, gy, wz);
         ok = !!dd && !dd.liquid && dd.key !== 'log' && dd.key !== 'leaves';
@@ -192,12 +221,14 @@ const Creatures = (() => {
       const foot = footOffset(g, typeDef);
       g.position.set(wx, gy + 1 + foot, wz);
       const glbClips = g.userData.clips || null;
+      const nid = creatureNid(cx, cz, i);
       g.userData = {
-        speed: typeDef.speed * (0.5 + Math.random()),
-        dir: Math.random() * Math.PI * 2,
-        state: 'idle', timer: 1 + Math.random() * 3,
+        nid, rnd: mulberry32(nid),            // 联机：确定性行为随机源（跨客户端一致）
+        speed: typeDef.speed * (0.5 + rnd()),
+        dir: rnd() * Math.PI * 2,
+        state: 'idle', timer: 1 + rnd() * 3,
         jumpVel: 0, onGround: true, jumpCd: 0,
-        typeDef, animT: Math.random() * 10, foot,
+        typeDef, animT: rnd() * 10, foot,
         hp: 4, isGlb: !!g.userData.isGlb,
         clips: glbClips,
         home: { x: wx, z: wz },             // 领地锚点：野生生物守巢，不再向玩家聚集
@@ -231,6 +262,20 @@ const Creatures = (() => {
         dying.splice(i, 1);
       }
     }
+    // 联机投影生物：向快照位置平滑移动，4 秒无更新则移除
+    const now = performance.now();
+    for (const [nid, gh] of ghosts){
+      const k = Math.min(1, dt * 6);
+      gh.g.position.x += (gh.tgt.x - gh.g.position.x) * k;
+      gh.g.position.y += (gh.tgt.y - gh.g.position.y) * k;
+      gh.g.position.z += (gh.tgt.z - gh.g.position.z) * k;
+      gh.g.rotation.y = -gh.tgt.dir - Math.PI / 2;
+      if (now - gh.last > 4000){
+        disposeObject3D(gh.g, { skipGeo: !!gh.g.userData.isGlb, skipTex: true, skipMat: !!gh.g.userData.isGlb });
+        group.remove(gh.g);
+        ghosts.delete(nid);
+      }
+    }
   }
 
   // 前方通行检测：超过 1 格的高台（树干/高墙/崖壁）或身体高度有实心方块（穿树穿墙）→ 阻挡
@@ -249,12 +294,24 @@ const Creatures = (() => {
   }
   // 方向障碍转向：随机折返，避免持续顶墙
   function dodge(u){
-    u.dir += (Math.random() < 0.5 ? 1 : -1) * (Math.PI * 0.55 + Math.random() * 0.9);
+    u.dir += (u.rnd() < 0.5 ? 1 : -1) * (Math.PI * 0.55 + u.rnd() * 0.9);
   }
 
   function tickOne(g, dt, plyPos){
     {
       const u = g.userData;
+      // 联机：远端快照对齐（确定性模拟的漂移修正；快照过期后回到本地模拟）
+      if (u.remote){
+        const r = u.remote;
+        r.t += dt;
+        const k = Math.min(1, dt * 6);
+        g.position.x += (r.x - g.position.x) * k;
+        g.position.y += (r.y - g.position.y) * k;
+        g.position.z += (r.z - g.position.z) * k;
+        u.dir = r.dir;
+        if (r.st) u.state = 'walk';
+        if (r.t > 2.5) u.remote = null;
+      }
       u.animT += dt;
       u.timer -= dt;
       // 村民越界（离村心 > 10 格）→ 立即回家，不等待计时
@@ -263,7 +320,7 @@ const Creatures = (() => {
         if (hx * hx + hz * hz > 10 * 10){
           u.state = 'walk';
           u.dir = Math.atan2(hz, hx);
-          u.timer = 2 + Math.random() * 3;
+          u.timer = 2 + u.rnd() * 3;
         }
       }
       if (u.timer <= 0){
@@ -272,18 +329,18 @@ const Creatures = (() => {
           if (u.villager){
             // 村民选向：向村心偏置（出圈一半概率朝家走），不再漫无目的乱跑
             const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
-            if (hx * hx + hz * hz > 6 * 6 && Math.random() < 0.65){
-              u.dir = Math.atan2(hz, hx) + (Math.random() - 0.5) * 1.2;
+            if (hx * hx + hz * hz > 6 * 6 && u.rnd() < 0.65){
+              u.dir = Math.atan2(hz, hx) + (u.rnd() - 0.5) * 1.2;
             } else {
-              u.dir = Math.random() * Math.PI * 2;
+              u.dir = u.rnd() * Math.PI * 2;
             }
           } else {
-            u.dir += (Math.random() - 0.5) * 1.5;
+            u.dir += (u.rnd() - 0.5) * 1.5;
           }
-          u.timer = 2 + Math.random() * 5;
+          u.timer = 2 + u.rnd() * 5;
         } else {
           u.state = 'idle';
-          u.timer = 1.5 + Math.random() * 3;
+          u.timer = 1.5 + u.rnd() * 3;
           if (u.baseSpeed !== undefined){ u.speed = u.baseSpeed; delete u.baseSpeed; }   // 逃窜结束恢复原速
         }
       }
@@ -333,7 +390,7 @@ const Creatures = (() => {
         g.rotation.y = -u.dir - Math.PI / 2;
         // 跳跃：约 1 格高的小跳（能跃上一格台阶，远够不到 4 格以上的树冠），概率降低 + 冷却
         if (u.jumpCd > 0) u.jumpCd -= dt;
-        if (u.typeDef.jump && u.onGround && u.jumpCd <= 0 && Math.random() < 0.0004){
+        if (u.typeDef.jump && u.onGround && u.jumpCd <= 0 && u.rnd() < 0.0004){
           u.jumpVel = 6.4;      // 跳高 ≈ 1.02 格（原 6 → 0.9；4.2 → 0.44 会连一格都上不去）
           u.onGround = false;
           u.jumpCd = 1.2;
@@ -416,7 +473,11 @@ const Creatures = (() => {
     }
     villagers = [];
     spawnedVillages.clear();
-    lastSpawnPos = null;
+    batchCell = null;
+    for (const [, gh] of ghosts){
+      disposeObject3D(gh.g, { skipGeo: !!gh.g.userData.isGlb, skipTex: true, skipMat: !!gh.g.userData.isGlb });
+    }
+    ghosts.clear();
   }
 
   // ---------- 激光武器交互：射线命中 / 受击逃窜 / 死亡掉落 ----------
@@ -433,20 +494,20 @@ const Creatures = (() => {
     }
     return best ? { g: best, dist: bestT } : null;
   }
-  function damage(g, dmg, fromPos){
+  function damage(g, dmg, fromPos, opts){
     const u = g.userData;
     if (u.hp === undefined) u.hp = 4;
     u.hp -= dmg;
     // 受击逃窜：背向攻击者加速跑
     u.state = 'walk';
-    u.timer = 2.5 + Math.random() * 2;
+    u.timer = 2.5 + u.rnd() * 2;
     if (fromPos) u.dir = Math.atan2(g.position.z - fromPos.z, g.position.x - fromPos.x);
     if (u.baseSpeed === undefined) u.baseSpeed = u.speed;   // 记录原速，逃窜结束后恢复
     u.speed = Math.max(u.speed, (u.typeDef.speed || 1) * 2.4);
-    if (u.hp <= 0){ kill(g); return true; }
+    if (u.hp <= 0){ kill(g, opts); return true; }
     return false;
   }
-  function kill(g){
+  function kill(g, opts){
     const i = list.indexOf(g);
     if (i >= 0) list.splice(i, 1);
     const u = g.userData;
@@ -464,14 +525,105 @@ const Creatures = (() => {
       disposeObject3D(g, { skipGeo: !!u.isGlb, skipTex: true });
       group.remove(g);
     }
-    if (window.Player){
+    if (window.Player && (!opts || !opts.noDrop)){
       Player.spawnParticles(g.position.x, g.position.y + 0.3, g.position.z, 0xd4544a, 14);
       Player.spawnDrop(g.position.x, g.position.y + 0.6, g.position.z, 'carbon', 1 + (Math.random() * 2 | 0));
     }
     Sound.play('breakBlk', 0.55);
   }
 
+  // ---------- 联机：快照 / 远端对齐 / 命中与击杀广播 ----------
+  function findLocal(nid){
+    for (const g of list){ if (g.userData.nid === nid) return g; }
+    for (const g of villagers){ if (g.userData.nid === nid) return g; }
+    return null;
+  }
+  // 快照：[nid, x×10, y×10, z×10, dir×100, walk?, hp, 村民?]
+  function snapshot(plyPos, maxD = 90){
+    if (!group) return null;
+    const out = [];
+    const push = g => {
+      const d = Math.hypot(g.position.x - plyPos.x, g.position.z - plyPos.z);
+      if (d > maxD) return;
+      out.push([
+        g.userData.nid,
+        Math.round(g.position.x * 10), Math.round(g.position.y * 10), Math.round(g.position.z * 10),
+        Math.round(g.userData.dir * 100),
+        g.userData.state === 'walk' ? 1 : 0,
+        Math.round(g.userData.hp || 0),
+        g.userData.villager ? 1 : 0,
+      ]);
+    };
+    for (const g of list) push(g);
+    for (const g of villagers) push(g);
+    return out.length ? out : null;
+  }
+  function ghostFor(entry){
+    // entry 与 snapshot 同构
+    const nid = entry[0];
+    const isV = entry[7] === 1;
+    let g;
+    if (isV){
+      g = buildVillager(Math.abs(nid) % 5);
+      const grig = rigFromClone(g);
+      g.userData = { ghost: true, isGlb: true, rig: grig, nid };
+      vGroup.add(g);
+    } else {
+      const info = (World.biome && World.biome.animal) || { type: 'strider', body: 0x888888, legs: 0x666666, eye: 0xffffff };
+      const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
+      g = buildCreature(typeDef, { body: info.body, legs: info.legs, eye: info.eye }, info.type);
+      const foot = footOffset(g, typeDef);
+      g.userData = { ghost: true, nid, foot, isGlb: !!g.userData.isGlb, typeDef };
+      group.add(g);
+    }
+    return g;
+  }
+  function applyRemote(arr){
+    if (!group || !Array.isArray(arr) || arr.length > 256) return;
+    const now = performance.now();
+    for (const e of arr){
+      if (!Array.isArray(e) || e.length < 7 || !Number.isFinite(e[0]) || !e.slice(1, 5).every(Number.isFinite)) continue;
+      const nid = e[0];
+      const tgt = { x: e[1] / 10, y: e[2] / 10, z: e[3] / 10, dir: e[4] / 100, st: e[5] === 1, hp: e[6] | 0, villager: e[7] === 1 };
+      const g = findLocal(nid);
+      if (g){
+        const u = g.userData;
+        if (!u.villager && tgt.hp !== u.hp && tgt.hp >= 0) u.hp = tgt.hp;   // 血量对齐
+        u.remote = { ...tgt, t: 0 };
+      } else {
+        let gh = ghosts.get(nid);
+        if (!gh){
+          const g2 = ghostFor(e);
+          g2.position.set(tgt.x, tgt.y, tgt.z);
+          gh = { g: g2, tgt, last: now };
+          ghosts.set(nid, gh);
+        }
+        gh.tgt = tgt;
+        gh.last = now;
+      }
+    }
+  }
+  function remoteHit(nid, dmg){
+    const g = findLocal(nid);
+    if (g && !g.userData.villager) damage(g, dmg, null, { noDrop: true, remote: true });
+  }
+  function remoteKill(nid){
+    const g = findLocal(nid);
+    if (g && !g.userData.villager){
+      kill(g, { noDrop: true, remote: true });
+      return true;
+    }
+    const gh = ghosts.get(nid);
+    if (gh){
+      disposeObject3D(gh.g, { skipGeo: !!gh.g.userData.isGlb, skipTex: true, skipMat: !!gh.g.userData.isGlb });
+      group.remove(gh.g);
+      ghosts.delete(nid);
+    }
+    return false;
+  }
+
   return { init, update, tick, reset, rayHit, damage, kill, nearestVillager,
+    snapshot, applyRemote, remoteHit, remoteKill,
     debugList(){ return list; },
     debugVillagers(){ return villagers; },
   };

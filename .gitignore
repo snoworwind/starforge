@@ -1,6 +1,11 @@
 # 测试依赖与产物
 node_modules/
 test-results/
+.test-net-save/
+.e2e-save/
+
+# 联机服务器存档（世界/玩家数据，按机器本地生成）
+save/
 
 # 系统 / 编辑器文件
 .DS_Store

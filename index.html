@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>STARFORGE 星穹熔炉 — 体素星际工厂</title>
-<link rel="stylesheet" href="css/style.css?v=st86">
+<link rel="stylesheet" href="css/style.css?v=st88">
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -21,7 +21,7 @@
     <div class="boot-menu" id="bootMenu">
       <button id="btnNew" class="boot-btn">▶ 开始新纪元</button>
       <button id="btnContinue" class="boot-btn" disabled>↻ 继续档案</button>
-      <button id="btnNetBoot" class="boot-btn">⇄ 局域网联机</button>
+      <button id="btnNetBoot" class="boot-btn">⇄ 联机</button>
       <button id="btnSettingsBoot" class="boot-btn">⚙ 画面设置</button>
       <button id="btnHelp" class="boot-btn">? 操作指南</button>
     </div>
@@ -126,6 +126,12 @@
       <p>采矿机放在矿脉上 · 传送带自动转弯/爬坡</p>
       <p>电力：火力(烧煤)→太阳能/风力→核反应堆</p>
       <p><b>发射燃料</b>＝碳×25+氧×10（背包或精炼厂合成）</p></div>
+    <div class="help-col"><h3>跨平台联机</h3>
+      <p>服务器：<b>start-server.bat</b>（Windows）/ <b>start-server.sh</b>（macOS/Linux）</p>
+      <p>房主「创建房间」→ 开始游戏，世界自动上传；好友输入 IP「加入房间」</p>
+      <p><b>Enter</b> 聊天（/help 查看命令）· <b>O</b> 玩家列表</p>
+      <p>玩家列表点「传送」可瞬间到达队友身边</p>
+      <p>世界与人物数据由服务器自动保存，房主下线游戏照常继续</p></div>
   </div>
 </div>
 
@@ -169,6 +175,8 @@
   </div>
   <div id="creditHud">₪ <span id="creditVal">0</span></div>
   <div id="clockHud"></div>
+  <!-- 联机状态 -->
+  <div id="netHud" class="hidden"></div>
 </div>
 
 <!-- ====== 背包 / 合成 ====== -->
@@ -288,23 +296,33 @@
   </div>
 </div>
 
-<!-- ====== 局域网联机 ====== -->
+<!-- ====== 联机 ====== -->
 <div id="netPanel" class="panel hidden">
-  <div class="panel-head"><span>◈ 局域网联机</span><span class="head-info" id="netStatus">未连接</span><button class="pclose" data-close="netPanel">✕</button></div>
+  <div class="panel-head"><span>◈ 跨平台联机</span><span class="head-info" id="netStatus">未连接</span><button class="pclose" data-close="netPanel">✕</button></div>
   <div class="panel-body net-body">
-    <div class="net-step"><b>第一步</b>：任意一人双击游戏目录里的「<b>启动联机主机.bat</b>」开启房间服务</div>
-    <div class="net-step"><b>第二步</b>：好友用浏览器打开 <b>http://主机IP:17888</b> 即可载入游戏（无需拷贝文件）</div>
-    <div class="net-step"><b>第三步</b>：房主点「创建房间」并开始游戏；好友输入主机 IP 点「加入房间」，自动进入房主的世界</div>
+    <div class="net-step"><b>第一步</b>：任意一台电脑运行服务器（Windows：双击 <b>start-server.bat</b>；macOS/Linux：<b>./start-server.sh</b>）</div>
+    <div class="net-step"><b>第二步</b>：好友浏览器打开 <b>http://主机IP:17888</b> 即可载入游戏（无需拷贝文件）</div>
+    <div class="net-step"><b>第三步</b>：房主点「创建房间」并开始游戏，世界自动上传服务器；好友点「加入房间」自动进入同一世界</div>
+    <div id="netPlayers" class="net-players"></div>
     <div class="set-row" style="margin-top:6px">
-      <span class="set-label">主机 IP</span>
+      <span class="set-label">服务器</span>
       <input type="text" id="netAddr" class="net-addr" placeholder="如 192.168.1.5（通过主机网页打开时自动填写）">
+    </div>
+    <div class="set-row">
+      <span class="set-label">昵 称</span>
+      <input type="text" id="netName" class="net-addr" maxlength="16" placeholder="你的名字（自动记住）">
+    </div>
+    <div class="set-row">
+      <span class="set-label">密 码</span>
+      <input type="password" id="netPass" class="net-addr" maxlength="32" placeholder="服务器设置了密码才需要">
     </div>
     <div class="net-btns">
       <button class="boot-btn small" id="btnNetHost">⌂ 创建房间（房主）</button>
       <button class="boot-btn small" id="btnNetJoin">⇄ 加入房间</button>
       <button class="boot-btn small" id="btnNetLeave">✕ 断开</button>
+      <button class="boot-btn small" id="btnNetReset" title="清除服务器上的世界存档">⟲ 重置服务器世界</button>
     </div>
-    <div class="net-hint">世界（含方块/机器改动）自动同步 · 队友有绿色标记 · 各自背包独立 · 防火墙弹窗请允许访问</div>
+    <div class="net-hint">世界由服务器持久保存（房主下线也能继续玩）· 方块/机器/昼夜/市场/标记自动同步 · 队友绿色标记 · <b>Enter</b> 聊天 · <b>O</b> 玩家列表（可一键传送）· 各自背包/科技独立并由服务器记住 · 防火墙弹窗请允许访问</div>
   </div>
 </div>
 
@@ -315,7 +333,7 @@
     <button class="boot-btn" id="btnResume">继续游戏</button>
     <button class="boot-btn" id="btnSave">存档</button>
     <button class="boot-btn" id="btnSettings">画面设置</button>
-    <button class="boot-btn" id="btnNet">局域网联机</button>
+    <button class="boot-btn" id="btnNet">联机</button>
     <button class="boot-btn" id="btnHelp2">操作指南</button>
     <button class="boot-btn" id="btnQuit">返回主菜单</button>
     <div class="pause-vol">音量 <input type="range" id="volSlider" min="0" max="100" value="70"></div>
@@ -418,29 +436,29 @@ window.addEventListener('unhandledrejection', e => {
   console.error('[GAME PROMISE ERROR]', e.reason && (e.reason.stack || e.reason.message || e.reason));
 });
 </script>
-<script src="js/three.min.js?v=st87"></script>
-<script src="js/GLTFLoader.js?v=st87"></script>
-<script src="js/SVGLoader.js?v=st87"></script>
-<script src="js/models.js?v=st87"></script>
-<script src="js/modellib.js?v=st87"></script>
-<script src="js/humanoid.js?v=st87"></script>
-<script src="js/textures.js?v=st86"></script>
-<script src="js/audio.js?v=st86"></script>
-<script src="js/data.js?v=st86"></script>
-<script src="js/world.js?v=st86"></script>
-<script src="js/factory.js?v=st86"></script>
-<script src="js/creatures.js?v=st86"></script>
-<script src="js/player.js?v=st86"></script>
-<script src="js/space.js?v=st86"></script>
-<script src="js/station.js?v=st86"></script>
-<script src="js/savestore.js?v=st86"></script>
-<script src="js/ui.js?v=st86"></script>
-<script src="js/net.js?v=st86"></script>
-<script src="js/main.js?v=st86"></script>
+<script src="js/three.min.js?v=st88"></script>
+<script src="js/GLTFLoader.js?v=st88"></script>
+<script src="js/SVGLoader.js?v=st88"></script>
+<script src="js/models.js?v=st88"></script>
+<script src="js/modellib.js?v=st88"></script>
+<script src="js/humanoid.js?v=st88"></script>
+<script src="js/textures.js?v=st88"></script>
+<script src="js/audio.js?v=st88"></script>
+<script src="js/data.js?v=st88"></script>
+<script src="js/world.js?v=st88"></script>
+<script src="js/factory.js?v=st88"></script>
+<script src="js/creatures.js?v=st88"></script>
+<script src="js/player.js?v=st88"></script>
+<script src="js/space.js?v=st88"></script>
+<script src="js/station.js?v=st88"></script>
+<script src="js/savestore.js?v=st88"></script>
+<script src="js/ui.js?v=st88"></script>
+<script src="js/net.js?v=st88"></script>
+<script src="js/main.js?v=st88"></script>
 <script>
 // 版本自检（内联于入口文档）：确认浏览器实际加载的模块版本；缺失/不匹配 = 在跑旧缓存或别的目录副本
 (function(){
-  var need = 'v87';
+  var need = 'v88';
   var got = {
     main: window.__V_MAIN || '旧版!',
     station: window.__V_STATION || (window.Station ? '旧版!' : '未加载!'),
@@ -460,7 +478,7 @@ window.addEventListener('unhandledrejection', e => {
 (function(){
   if (/\btest\b/.test(location.search + location.hash)){
     var s = document.createElement('script');
-    s.src = 'js/test-api.js?v=st86';
+    s.src = 'js/test-api.js?v=st88';
     document.body.appendChild(s);
   }
 })();

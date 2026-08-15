@@ -1111,6 +1111,16 @@ const Factory = (() => {
       if (m.mesh) m.mesh.scale.setScalar(1);
     }
   }
+  // ---------- 联机：远端机器运行数据合并（进度/燃料/皮带物品；不增删机器）----------
+  function applyData(arr){
+    if (!Array.isArray(arr)) return false;
+    for (const d of arr){
+      if (!d || !Number.isInteger(d.x) || !Number.isInteger(d.y) || !Number.isInteger(d.z)) continue;
+      const m = at(d.x, d.y, d.z);
+      if (m && d.data && typeof d.data === 'object' && !Array.isArray(d.data)) m.data = d.data;
+    }
+    return true;
+  }
   function reset(){
     for (const m of machines.values()) disposeBeltMats(m);   // 皮带专属材质/贴图随清空一并释放
     machines = new Map();
@@ -1126,7 +1136,7 @@ const Factory = (() => {
     scene.add(itemGroup);
   }
 
-  return { init, place, remove, at, update, serialize, deserialize, reset,
+  return { init, place, remove, at, update, serialize, deserialize, applyData, reset,
     canMachineAccept, machineInsert,
     get power(){ return power; }, get machines(){ return machines; }, DIRS };
 })();

@@ -8,6 +8,8 @@
     "test": "node test/run.mjs",
     "test:headed": "node test/run.mjs --headed",
     "test:factory": "node test/run.mjs --grep=factory",
+    "test:net": "node test/run.mjs --grep=net",
+    "test:e2e": "node test/e2e-net.mjs",
     "serve": "node test/serve.mjs"
   },
   "devDependencies": {

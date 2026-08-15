@@ -63,6 +63,7 @@ const Sound = (() => {
   S.uiClose   = () => { const t = ctx.currentTime; osc('sine', 1000, t, 0.12, 0.14, null, 420); };
   S.uiError   = () => { const t = ctx.currentTime; osc('square', 220, t, 0.1, 0.14); osc('square', 180, t + 0.11, 0.14, 0.14); };
   S.hover     = () => { const t = ctx.currentTime; osc('sine', 2200, t, 0.025, 0.05); };
+  S.msg       = () => { const t = ctx.currentTime; osc('sine', 1046, t, 0.06, 0.1, null, 1400); osc('sine', 1318, t + 0.07, 0.08, 0.1, null, 1700); };
   S.pickup    = () => { const t = ctx.currentTime; osc('sine', 620, t, 0.05, 0.14, null, 880); osc('sine', 1240, t + 0.04, 0.07, 0.1, null, 1760); };
   S.craft     = () => { const t = ctx.currentTime;
     osc('square', 440, t, 0.08, 0.1); osc('square', 660, t + 0.07, 0.08, 0.1); osc('sine', 880, t + 0.14, 0.18, 0.16, null, 1320);

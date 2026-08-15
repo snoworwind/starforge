@@ -309,6 +309,9 @@ canvas#game{position:fixed;inset:0;display:block;image-rendering:pixelated}
 .q-item .qbox{color:var(--dim)}
 .q-item.done{color:var(--green);text-decoration:line-through;opacity:.7}
 .q-item.done .qbox{color:var(--green)}
+.q-item.side{color:var(--gold)}
+.q-item.side .qbox{color:var(--gold)}
+.q-item.side.ready{color:var(--green)}
 .q-item .qp{color:var(--amber);font-family:var(--mono);font-size:11px}
 .q-guide{margin-top:8px;padding-top:6px;border-top:1px dashed #1d3a52;font-size:11px;color:var(--dim);line-height:1.6}
 .q-guide b{color:var(--cyan);font-family:var(--mono)}

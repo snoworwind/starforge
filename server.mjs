@@ -504,15 +504,25 @@ function sanitizeUpload(raw){
       w.planets[pid] = out;
     }
   }
-  if (raw.galaxyArchives && typeof raw.galaxyArchives === 'object') w.galaxyArchives = raw.galaxyArchives;
+  // 上传包内自由字段大小上限：防超大对象注入内存/存档/init 广播
+  if (raw.galaxyArchives && typeof raw.galaxyArchives === 'object'){
+    if (JSON.stringify(raw.galaxyArchives).length <= 512 * 1024) w.galaxyArchives = raw.galaxyArchives;
+  }
   if (raw.market && typeof raw.market === 'object'){
+    let n = 0;
     for (const [k, v] of Object.entries(raw.market)){
-      if (Number.isFinite(v)) w.market[k] = Math.min(2, Math.max(0, v));
+      if (n >= 128) break;
+      if (typeof k !== 'string' || k.length > 32) continue;
+      if (Number.isFinite(v)){ w.market[k] = Math.min(2, Math.max(0, v)); n++; }
     }
   }
   if (raw.mapMarks && typeof raw.mapMarks === 'object') w.mapMarks = sanitizeMarks(raw.mapMarks);
-  if (raw.flags && typeof raw.flags === 'object') w.flags = raw.flags;
-  if (raw.warpLock && typeof raw.warpLock === 'object') w.warpLock = raw.warpLock;
+  if (raw.flags && typeof raw.flags === 'object'){
+    if (JSON.stringify(raw.flags).length <= 64 * 1024) w.flags = raw.flags;
+  }
+  if (raw.warpLock && typeof raw.warpLock === 'object'){
+    if (JSON.stringify(raw.warpLock).length <= 1024) w.warpLock = raw.warpLock;
+  }
   if (!Object.keys(w.planets).length) w.planets['0'] = { mods: {}, machines: [], shipPos: [0, 40, 0], seed: 0, biome: 'green' };
   return w;
 }
@@ -652,8 +662,11 @@ function handleMessage(c, m){
     case 'market': {
       if (!take(c.buckets.market)) return;
       if (!world || !m.market || typeof m.market !== 'object') return;
+      let n = 0;
       for (const [k, v] of Object.entries(m.market)){
-        if (Number.isFinite(v)) world.market[k] = Math.min(2, Math.max(0, v));
+        if (n >= 128) break;   // 键数上限：防一条消息注入海量键拖垮内存/存档/广播
+        if (typeof k !== 'string' || k.length > 32) continue;
+        if (Number.isFinite(v)){ world.market[k] = Math.min(2, Math.max(0, v)); n++; }
       }
       scheduleSave();
       broadcast({ t: 'market', market: world.market }, c);

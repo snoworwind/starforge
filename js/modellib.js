@@ -12,6 +12,7 @@
 const ModelLib = (() => {
   const ready = {};    // name -> { scene(蒙皮模板), clips, box(Box3), maxDim }
   let inited = false;
+  let pixelOn = false; // 像素风：模型贴图最邻近采样（与方块像素纹理风格统一）
 
   function b64ToArr(b64){
     const s = atob(b64);
@@ -69,6 +70,19 @@ const ModelLib = (() => {
 
   function has(name){ init(); return !!ready[name]; }
 
+  // 像素风切换：所有模板贴图 magFilter 切换（克隆共享同一 Texture 引用，全局生效）
+  function setPixel(on){
+    pixelOn = !!on;
+    for (const name in ready){
+      ready[name].scene.traverse(o => {
+        if (o.material && o.material.map){
+          o.material.map.magFilter = pixelOn ? THREE.NearestFilter : THREE.LinearFilter;
+          o.material.map.needsUpdate = true;
+        }
+      });
+    }
+  }
+
   // 模板访问（测试/诊断用）：scene 含蒙皮网格与骨架，clips 为动画片段
   function getTemplate(name){ init(); return ready[name] ? { scene: ready[name].scene, clips: ready[name].clips } : null; }
 
@@ -98,6 +112,7 @@ const ModelLib = (() => {
           if (src.map){
             m.map = src.map;
             m.map.encoding = THREE.LinearEncoding;   // 避免 sRGB 双重解码变暗
+            if (pixelOn) m.map.magFilter = THREE.NearestFilter;
           }
           if (src.vertexColors) m.vertexColors = true;
           if (o.isSkinnedMesh) m.skinning = true;    // r128 渲染器按 material.skinning 装配蒙皮管线
@@ -122,7 +137,7 @@ const ModelLib = (() => {
     return wrap;
   }
 
-  return { init, has, get, getTemplate };
+  return { init, has, get, getTemplate, setPixel };
 })();
 window.ModelLib = ModelLib;
 ModelLib.init();   // 页面加载即解析（进入游戏前就绪；失败时调用方自动回退体素模型）

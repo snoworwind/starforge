@@ -5,6 +5,7 @@ __SF_TEST__.suite('net', function (t, api) {
   var HTTP = 'http://127.0.0.1:17887';
   var WS = 'ws://127.0.0.1:17886';
   var sleep = api.sleep;
+  var HOSTKEY = '';   // 主机所有权密钥（服务器在首次世界上传时签发，后续声明主机必须出示）
 
   function wsClient() {
     var ws = new WebSocket(WS);
@@ -36,7 +37,7 @@ __SF_TEST__.suite('net', function (t, api) {
   t.before(async function () {
     var c = wsClient();
     await c.open;
-    c.send({ t: 'hello', v: 3, name: '测试清理者', role: 'host' });
+    c.send({ t: 'hello', v: 3, name: '测试清理者', role: 'host', hostKey: HOSTKEY });
     var id = await c.next(function (m) { return m.t === 'ws-id'; });
     if (id.hasWorld) {
       c.send({ t: 'reset-world' });
@@ -83,6 +84,7 @@ __SF_TEST__.suite('net', function (t, api) {
     host.send({ t: 'hello', v: 3, name: '测试房主', role: 'host', app: { suit: '#123456' } });
     var id = await host.next(function (m) { return m.t === 'ws-id'; });
     A.eq(id.auth, 'ok', '认证通过');
+    A.eq(id.role, 'host', '空世界首个声明者为真实主机');
     await host.next(function (m) { return m.t === 'world-missing'; });
     host.send({ t: 'world-upload', world: {
       v: 4, name: '联机测试世界', creative: false, dropMult: 4,
@@ -90,6 +92,10 @@ __SF_TEST__.suite('net', function (t, api) {
       planets: { '0': { mods: {}, machines: [], shipPos: [5, 30, 5], seed: 777, biome: 'green' } },
       galaxyArchives: {}, market: { carbon: 1.2 }, mapMarks: { '0': [{ x: 3, z: 4, y: 30, label: '矿点', gal: false }] }, flags: { x: 1 }, warpLock: null,
     } });
+    // 首次上传签发主机所有权密钥
+    var hk = await host.next(function (m) { return m.t === 'host-key'; });
+    A.ok(typeof hk.key === 'string' && hk.key.length >= 16, '签发主机密钥');
+    HOSTKEY = hk.key;
     await sleep(300);
     var guest = wsClient(); await guest.open;
     guest.send({ t: 'hello', v: 3, name: '测试访客', role: 'guest' });
@@ -105,9 +111,9 @@ __SF_TEST__.suite('net', function (t, api) {
   });
 
   t.test('方块改动：整块 RLE + 增量 + 持久化到新访客', async function () {
-    // 先连入拿到现有世界
+    // 先连入拿到现有世界（世界已有密钥，必须出示才能声明主机）
     var a = wsClient(); await a.open;
-    a.send({ t: 'hello', v: 3, name: '方块甲', role: 'host' });
+    a.send({ t: 'hello', v: 3, name: '方块甲', role: 'host', hostKey: HOSTKEY });
     await a.next(function (m) { return m.t === 'init' || m.t === 'world-missing'; });
     // 整块（未知区块必须带 full RLE；区块数据长度 = 16×16×96）
     var full = [];
@@ -246,6 +252,44 @@ __SF_TEST__.suite('net', function (t, api) {
     var err = await a.next(function (m) { return m.t === 'ws-err'; });
     A.eq(err.reason, 'version', '版本不匹配被拒');
     a.close();
+  });
+
+  t.test('主机所有权：无密钥声明被降级，持密钥可重新声明', async function () {
+    A.ok(HOSTKEY, '前置测试已签发密钥');
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 3, name: '冒牌主机', role: 'host' });   // 不带密钥
+    var idA = await a.next(function (m) { return m.t === 'ws-id'; });
+    A.eq(idA.role, 'guest', '世界已有归属时无密钥声明主机被降级为成员');
+    a.close();
+    var b = wsClient(); await b.open;
+    b.send({ t: 'hello', v: 3, name: '回归主机', role: 'host', hostKey: HOSTKEY });
+    var idB = await b.next(function (m) { return m.t === 'ws-id'; });
+    A.eq(idB.role, 'host', '持密钥可在主机离线后重新声明');
+    b.close();
+  });
+
+  t.test('主机在线时他人抢座被降级', async function () {
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 3, name: '在线主机', role: 'host', hostKey: HOSTKEY });
+    var idA = await a.next(function (m) { return m.t === 'ws-id'; });
+    A.eq(idA.role, 'host', '主机上线');
+    var b = wsClient(); await b.open;
+    b.send({ t: 'hello', v: 3, name: '抢座者', role: 'host', hostKey: HOSTKEY });
+    var idB = await b.next(function (m) { return m.t === 'ws-id'; });
+    A.eq(idB.role, 'guest', '主机在线时即使持密钥也被降级');
+    a.close(); b.close();
+  });
+
+  t.test('晚加入玩家的 ws-id 名单包含先到玩家', async function () {
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 3, name: '先到者', role: 'guest' });
+    await a.next(function (m) { return m.t === 'init'; });
+    var b = wsClient(); await b.open;
+    b.send({ t: 'hello', v: 3, name: '后到者', role: 'guest' });
+    var idB = await b.next(function (m) { return m.t === 'ws-id'; });
+    A.ok((idB.players || []).some(function (p) { return p.name === '先到者'; }), '晚加入者能看到先到玩家');
+    A.ok((idB.players || []).some(function (p) { return p.name === '后到者'; }), '名单包含自己');
+    a.close(); b.close();
   });
 });
 

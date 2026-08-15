@@ -58,6 +58,15 @@ const Net = (() => {
   function storedName(){
     try { return localStorage.getItem(NAME_KEY) || ''; } catch(e){ return ''; }
   }
+  function hostKeyStoreKey(host, port){
+    return 'starforge_net_hostkey_' + String(host || '').trim() + ':' + port;
+  }
+  function storedHostKey(host, port){
+    try { return localStorage.getItem(hostKeyStoreKey(host, port)) || ''; } catch(e){ return ''; }
+  }
+  function saveHostKey(host, port, key){
+    try { localStorage.setItem(hostKeyStoreKey(host, port), String(key || '')); } catch(e){}
+  }
   function pickName(){
     const el = document.getElementById('netName');
     if (el && el.value.trim()) return el.value.trim();
@@ -80,7 +89,12 @@ const Net = (() => {
       const to = setTimeout(() => fail(new Error('连接超时：请确认服务器已启动（双击 start-server.bat / 启动联机主机.bat，macOS/Linux 用 start-server.sh）')), 8000);
       ws2.onopen = () => {
         role = roleHint;
-        broadcast({ t: 'hello', v: 3, name: pickName(), role: roleHint, password: password(), app: (window.Player && Player.appearance) || null });
+        // 主机：出示本机保存的所有权密钥（服务器据此裁定实际角色，防伪造主机身份）
+        let u;
+        try { u = new URL(url); } catch(e){ u = { hostname: defaultAddr(), port: String(WS_PORT) }; }
+        const hello = { t: 'hello', v: 3, name: pickName(), role: roleHint, password: password(), app: (window.Player && Player.appearance) || null };
+        if (roleHint === 'host') hello.hostKey = storedHostKey(u.hostname, u.port);
+        broadcast(hello);
       };
       ws2.onmessage = e => {
         let m;
@@ -91,6 +105,10 @@ const Net = (() => {
           const me = Array.isArray(m.players) ? m.players.find(p => p.id === m.id) : null;
           myName = me && me.name ? me.name : pickName();
           if (m.auth !== 'ok'){ fail(new Error('服务器拒绝：' + (m.auth || '未知'))); return; }
+          // 服务器裁定的实际角色（伪造/抢占主机会被降级为成员）
+          if (m.role === 'host' || m.role === 'guest') role = m.role;
+          // 完整在线名单：晚加入也能看到先到的玩家（含自己）
+          if (Array.isArray(m.players)) for (const p of m.players) players.set(p.id, { id: p.id, name: p.name });
           serverInfo = { svName: m.svName, motd: m.motd, hasWorld: m.hasWorld, worldName: m.worldName };
           connected = true;
           ensurePatched();
@@ -102,6 +120,12 @@ const Net = (() => {
           }
           onStatus();
           if (!settled){ settled = true; res(myId); }
+          return;
+        }
+        if (m.t === 'host-key'){
+          // 服务器签发的主机所有权密钥：按 服务器地址 持久保存，之后重连声明主机时出示
+          let u;
+          try { u = new URL(url); saveHostKey(u.hostname, u.port, m.key); } catch(e){}
           return;
         }
         if (m.t === 'ws-err'){
@@ -134,17 +158,27 @@ const Net = (() => {
       const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
       return openSocket(scheme + host + ':' + p, roleHint);
     };
+    // 状态探测（https 页面用 https，避免混合内容被浏览器拦截）
+    async function probeStatus(){
+      try {
+        const scheme = location.protocol === 'https:' ? 'https://' : 'http://';
+        const r = await fetch(scheme + host + ':' + HTTP_PORT + '/__status', { signal: AbortSignal.timeout(3000) });
+        if (!r.ok) return null;
+        return await r.json();
+      } catch (e){ return null; }
+    }
     try {
       return await tryUrl(port);
     } catch (e1){
-      if (port !== WS_PORT) throw e1;   // 自定义端口：不做探测
       // 端口被改过？向 HTTP 状态端点询问 WebSocket 端口后重试一次
-      try {
-        const st = await fetch('http://' + host + ':' + HTTP_PORT + '/__status', { signal: AbortSignal.timeout(3000) }).then(r => r.json());
-        if (st && Number.isFinite(st.wsPort) && st.wsPort !== WS_PORT){
-          return await tryUrl(st.wsPort);
-        }
-      } catch (e2){}
+      const st = await probeStatus();
+      if (st && Number.isFinite(st.wsPort) && st.wsPort !== port){
+        try { return await tryUrl(st.wsPort); } catch(e2){}
+      }
+      // 满员：握手前 503 拒绝，WebSocket 拿不到原因 → 用状态端点给出准确提示
+      if (st && Array.isArray(st.players) && Number.isFinite(st.maxPlayers) && st.players.length >= st.maxPlayers){
+        throw new Error('服务器已满（' + st.maxPlayers + '/' + st.maxPlayers + '）');
+      }
       throw e1;
     }
   }

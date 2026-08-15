@@ -584,7 +584,9 @@ const Player = (() => {
         onGround = false;
         Sound.play('jump');
       } else if (stats.jet > 0){
-        vel.y = Math.min(vel.y + 22 * dt, 6);
+        // 喷气背包：净推力 = 33 - 22（重力）= 11 m/s²，可真正爬升并制动坠落
+        // （原 22 与重力 22 逐帧精确抵消：空中按住空格既不上升也不减速，只是耗燃料）
+        vel.y = Math.min(vel.y + 33 * dt, 8.5);
         stats.jet -= 28 * dt;
         Sound.loops.jet.start();
       }

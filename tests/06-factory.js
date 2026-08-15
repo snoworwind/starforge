@@ -333,4 +333,45 @@ __SF_TEST__.suite('factory', function (t, api) {
     api.removeMachine(X + 1, y, Z);
     api.setBlock(X, y - 1, Z, 'air');
   });
+
+  t.test('crafter/furnace: 换配方后旧产出掉落而非静默丢弃新产出', function () {
+    var y = groundY() + 1;
+    // 装配机：先造齿轮（产出占槽）→ 切换配方造线圈 → 齿轮掉落、线圈入产出槽
+    api.placeMachine('solar', X, y, Z + 2, 0);
+    api.placeMachine('assembler', X, y, Z, 0);
+    api.setMachineRecipe(X, y, Z, 'gear');
+    api.machineInsert(X, y, Z, 'iron');
+    api.machineInsert(X, y, Z, 'iron');
+    api.tickFactory(3.0, 1);
+    var m = api.machineAt(X, y, Z);
+    A.ok(m.data.out && m.data.out.item === 'gear' && m.data.out.n === 1, 'gear buffered (out=' + JSON.stringify(m.data.out) + ')');
+    // 模拟 UI 切配方：退还材料、清进度（UI 不取走产出槽）
+    api.setMachineRecipe(X, y, Z, 'wire');
+    var realM = window.Factory.at(X, y, Z);
+    realM.data.in = {}; realM.data.prog = 0;
+    api.machineInsert(X, y, Z, 'copper');
+    var drops0 = window.Player.dropCount;
+    api.tickFactory(3.0, 1);
+    m = api.machineAt(X, y, Z);
+    A.ok(m.data.out && m.data.out.item === 'wire', 'wire buffered, not discarded (out=' + JSON.stringify(m.data.out) + ')');
+    A.ok(window.Player.dropCount > drops0, 'old gear dropped (drops ' + drops0 + '→' + window.Player.dropCount + ')');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 2);
+    // 熔炉：先烧玻璃（产出占槽）→ 换铁矿石冶炼 → 玻璃掉落、铁锭入产出槽
+    api.placeMachine('furnace', X + 1, y, Z, 0);
+    api.machineInsert(X + 1, y, Z, 'sand');
+    api.machineInsert(X + 1, y, Z, 'sand');
+    api.machineInsert(X + 1, y, Z, 'coal');
+    api.tickFactory(3.0, 1);
+    var f = api.machineAt(X + 1, y, Z);
+    A.ok(f.data.out && f.data.out.item === 'glass_b', 'glass buffered (out=' + JSON.stringify(f.data.out) + ')');
+    api.machineInsert(X + 1, y, Z, 'iron_ore');
+    api.machineInsert(X + 1, y, Z, 'coal');
+    var drops1 = window.Player.dropCount;
+    api.tickFactory(3.0, 1);
+    f = api.machineAt(X + 1, y, Z);
+    A.ok(f.data.out && f.data.out.item === 'iron', 'iron buffered, not discarded (out=' + JSON.stringify(f.data.out) + ')');
+    A.ok(window.Player.dropCount > drops1, 'old glass dropped (drops ' + drops1 + '→' + window.Player.dropCount + ')');
+    api.removeMachine(X + 1, y, Z);
+  });
 });

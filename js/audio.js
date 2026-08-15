@@ -107,6 +107,12 @@ const Sound = (() => {
   S.coin      = () => { const t = ctx.currentTime; osc('square', 1319, t, 0.06, 0.1); osc('square', 1760, t + 0.06, 0.16, 0.1); };
   S.buy       = () => { S.coin(); const t = ctx.currentTime; osc('sine', 880, t + 0.1, 0.15, 0.08, null, 1100); };
   S.laserHit  = () => { const t = ctx.currentTime; noise(t, 0.05, 0.1, 'bandpass', 2500, 1000, 4); };
+  S.creatureHit = () => { const t = ctx.currentTime; noise(t, 0.07, 0.24, 'bandpass', 900, 420, 2); osc('sine', 190, t, 0.09, 0.2, null, 80); };
+  S.creatureDie = () => { const t = ctx.currentTime;
+    osc('sawtooth', 240, t, 0.3, 0.22, null, 38);
+    osc('sine', 150, t + 0.05, 0.24, 0.2, null, 46);
+    noise(t, 0.32, 0.26, 'lowpass', 1100, 110);
+  };
   S.shipDamage= () => { const t = ctx.currentTime; noise(t, 0.3, 0.3, 'lowpass', 1500, 200); osc('sawtooth', 120, t, 0.25, 0.25, null, 45); };
   S.dock      = () => { const t = ctx.currentTime;
     osc('sine', 220, t, 0.4, 0.16, null, 110); noise(t + 0.25, 0.2, 0.1, 'lowpass', 600, 150);

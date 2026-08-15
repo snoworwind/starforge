@@ -871,7 +871,7 @@ const Player = (() => {
         shootT += dt;
         if (shootT > 0.28){
           shootT = 0;
-          Sound.play('dig', 1.4 + Math.random() * 0.4);
+          Sound.play('laserHit');   // 命中生物的激光灼烧音（原挖矿音不符合战斗反馈）
           spawnParticles(_beamTo.x - 0.25, _beamTo.y, _beamTo.z - 0.25, 0xff6a55, 3);
           Creatures.damage(cHit.g, isCreative() ? 4 : laserMul < 1 ? 0.5 : 1, pos);
         }

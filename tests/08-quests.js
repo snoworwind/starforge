@@ -117,6 +117,9 @@ __SF_TEST__.suite('quests', function (t, api) {
 
   t.test('村庄委托：接受 → 交付领赏 → 未足提示', function () {
     return api.boot('normal', { fresh: true }).then(function () {
+      // 清除 newGame 赠送的起始物资（碳×10 钠×5）：委托物品随机抽取，
+      // 若抽到碳/钠，剩余起始物资会破坏“物品扣除归零”与“不足时保持进行中”的判定
+      api.clearInv();
       // 第一次对话：无委托 → 发放新委托并持久化到旗标
       var sq = window.Game.debugSideQuestTalk();
       A.ok(sq && sq.item && sq.need > 0 && sq.reward > 0, 'side quest offered: ' + JSON.stringify(sq));

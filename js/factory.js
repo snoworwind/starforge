@@ -944,7 +944,8 @@ const Factory = (() => {
       } else if (m.type === 'assembler' || m.type === 'refinery'){
         const d = m.data;
         const r = d && d.recipe ? RECIPE_BY_ID[d.recipe] : null;
-        if (r && Object.keys(r.in).every(k => (d.in[k] || 0) >= r.in[k])) use += POWER_USE[m.type];
+        // 原料已扣除的进行中合成仍计入需求：否则开工下一帧需求归零 → sat 虚高 → 供电不足也全速白跑
+        if (r && (d.prog > 0 || Object.keys(r.in).every(k => (d.in[k] || 0) >= r.in[k]))) use += POWER_USE[m.type];
       } else if (m.type === 'medbay'){
         if (medbayWants(m)) use += POWER_USE.medbay;
       }

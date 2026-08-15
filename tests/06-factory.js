@@ -296,4 +296,22 @@ __SF_TEST__.suite('factory', function (t, api) {
     api.removeMachine(X, y, Z + 2);
     api.setStat('hp', 8);
   });
+
+  t.test('power: 装配机开工扣料后仍计入电网需求（供电不足不得全速白跑）', function () {
+    var y = groundY() + 1;
+    api.placeMachine('solar', X, y, Z + 2, 0);       // 10kW
+    api.placeMachine('assembler', X, y, Z, 0);       // 12kW
+    api.setMachineRecipe(X, y, Z, 'gear');
+    api.machineInsert(X, y, Z, 'iron');
+    api.machineInsert(X, y, Z, 'iron');
+    api.tickFactory(0.5, 1);   // 第 1 tick：原料足 → 计入 12kW 需求并扣料开工
+    var m = api.machineAt(X, y, Z);
+    A.ok(m.data.prog > 0, 'craft started (prog=' + m.data.prog + ')');
+    A.eq(m.data.in.iron, 0, 'inputs deducted');
+    api.tickFactory(1.0, 1);   // 第 2 tick：原料已扣，但制作中仍须计费
+    A.eq(api.power().use, 12, 'mid-craft demand stays 12kW (got ' + api.power().use + ')');
+    A.ok(api.power().sat < 1, 'sat throttled below 1 (10kW < 12kW, sat=' + api.power().sat + ')');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 2);
+  });
 });

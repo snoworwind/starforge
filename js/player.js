@@ -576,14 +576,19 @@ const Player = (() => {
     vel.x += (wish.x - vel.x) * Math.min(1, accel * dt);
     vel.z += (wish.z - vel.z) * Math.min(1, accel * dt);
 
-    // 跳跃 / 喷气背包
+    // 液体检测（脚部/眼部任一在水中或熔岩中；用上一帧位置判定，1 帧滞后无感）
+    const liqFeet = World.getDef(Math.floor(pos.x), Math.floor(pos.y + 0.1), Math.floor(pos.z));
+    const liqEye  = World.getDef(Math.floor(pos.x), Math.floor(pos.y + 1.2), Math.floor(pos.z));
+    const inLiquid = liqFeet.liquid || liqEye.liquid;
+
+    // 跳跃 / 喷气背包（水中不用喷气背包——游泳代替）
     if (isCreative()) stats.jet = stats.jetMax;
     if (keys['Space']){
       if (onGround){
         vel.y = 7.4;
         onGround = false;
         Sound.play('jump');
-      } else if (stats.jet > 0){
+      } else if (stats.jet > 0 && !inLiquid){
         // 喷气背包：净推力 = 33 - 22（重力）= 11 m/s²，可真正爬升并制动坠落
         // （原 22 与重力 22 逐帧精确抵消：空中按住空格既不上升也不减速，只是耗燃料）
         vel.y = Math.min(vel.y + 33 * dt, 8.5);
@@ -594,8 +599,21 @@ const Player = (() => {
     if (!keys['Space'] || onGround || stats.jet <= 0) Sound.loops.jet.stop();
     if (onGround) stats.jet = Math.min(stats.jetMax, stats.jet + 40 * dt);
 
-    vel.y -= 22 * dt;
-    vel.y = Math.max(vel.y, -40);
+    // 液体物理：浮力/阻力/游泳（在重力与碰撞之前结算——若放在碰撞后，
+    // 沉底玩家会被“重力下压→碰撞清零→浮力”逐帧抵消，永远浮不起来）
+    if (inLiquid){
+      // 水平阻力：水中挪动迟缓
+      vel.x *= Math.max(0, 1 - dt * 5);
+      vel.z *= Math.max(0, 1 - dt * 5);
+      // 浮力：趋向缓慢上浮（坠入水中快速减速 → 浮回水面），代替重力
+      vel.y += (2.6 - vel.y) * Math.min(1, dt * 4);
+      // 按住空格游泳上浮
+      if (keys['Space']) vel.y = Math.min(vel.y + 24 * dt, 5.5);
+      onGround = false;
+    } else {
+      vel.y -= 22 * dt;
+      vel.y = Math.max(vel.y, -40);
+    }
 
     // 轴分离碰撞
     const wasGround = onGround;
@@ -622,6 +640,9 @@ const Player = (() => {
     pos.copy(np);
     // 无限世界：仅限制高度
     if (pos.y < -10){ pos.y = 80; damage(2); }
+
+    // 熔岩湖（熔火之地）：液态伤害水体——接触持续灼烧（inLiquid 用上一帧位置判定）
+    if (inLiquid && biome && biome.lava) damageTick(dt, 3);
 
     // 脚步声
     if (onGround && wish.lengthSq() > 0){

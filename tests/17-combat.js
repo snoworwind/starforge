@@ -44,4 +44,14 @@ __SF_TEST__.suite('combat', function (t, api) {
     A.eq(window.Creatures.debugList().indexOf(s), -1, 'sentinel removed from list');
     A.ok(window.Player.dropCount > dropsBefore, 'loot dropped (before=' + dropsBefore + ', after=' + window.Player.dropCount + ')');
   });
+
+  t.test('生物 AI 地形查询不触发区块生成（topAtNoGen）', function () {
+    var p = api.pos();
+    // 部署在未加载区域（> 生成半径）：AI 悬浮查询绝不触发生成
+    var s = window.Creatures.debugSpawnSentinel(p[0] + 120, p[2]);
+    var g0 = window.World.genCount;
+    step(120);   // 4s @30fps（距离门控下仍按 4 帧一次降频 tick）
+    A.eq(window.World.genCount, g0, 'creature AI ticks generate zero chunks (gen=' + g0 + ')');
+    window.Creatures.kill(s);
+  });
 });

@@ -92,6 +92,7 @@ const DAY_LEN = 480;                       // 秒/天（与 main.js 一致）
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_FRAME = 64 * 1024 * 1024;        // 单帧上限 64MB（世界上传包可能很大）
 const MAX_CHAT = 200;
+const MAX_CHUNKS_PER_PLANET = 4096;        // 每星球修改区块上限（世界上传与增量改动共用）
 
 // ------------------------------------------------------------
 // RLE（与客户端 world.js serialize 完全一致的格式：[run, value] 成对）
@@ -261,6 +262,8 @@ function applyBlk(pid, x, y, z, b, full){
   const key = chunkKey(x, z);
   let arr = p.mods[key];
   if (!arr){
+    // 与世界上传的 4096 区块上限一致：增量改动不得无限铸造新区块（否则存档与内存无界膨胀）
+    if (Object.keys(p.mods).length >= MAX_CHUNKS_PER_PLANET) return false;
     if (!validRle(full)) return false;     // 未知区块必须携带整块 RLE
     p.mods[key] = full.slice();
     arr = p.mods[key];

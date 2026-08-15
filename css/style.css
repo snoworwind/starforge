@@ -1,14 +1,17 @@
 :root{
   --bg:#05070d; --panel:#0b1220ee; --panel2:#111c2f;
   --cyan:#35e0e8; --cyan-d:#0e6d78; --amber:#ffb347; --red:#ff5555;
-  --green:#7dff8a; --grid:#1d3a52; --txt:#c9e6ee; --dim:#5f7d8c;
+  --green:#7dff8a; --grid:#1d3a52; --txt:#c9e6ee; --dim:#7f9db0;
   --gold:#ffd166; --purple:#b48cff;
   --font:'Segoe UI',system-ui,sans-serif;
   --mono:'Consolas','Courier New',monospace;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
 input,textarea{-webkit-user-select:text;user-select:text;cursor:text}
-html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);font-family:var(--font);cursor:default}
+/* 无障碍：键盘焦点可见 + 偏好减少动效 */
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){*{animation:none !important;transition:none !important}}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);font-family:var(--font);font-size:14px;cursor:default}
 canvas#game{position:fixed;inset:0;display:block;image-rendering:pixelated}
 
 .hidden{display:none !important}

@@ -9,6 +9,12 @@ const Sound = (() => {
   let volume = 0.7;
   let started = false;
 
+  // 音量持久化（画面设置滑杆）
+  try {
+    const sv = parseFloat(localStorage.getItem('starforge_volume'));
+    if (Number.isFinite(sv) && sv >= 0 && sv <= 1) volume = sv;
+  } catch(e){}
+
   function ensure(){
     if (ctx) return true;
     try {
@@ -20,7 +26,10 @@ const Sound = (() => {
     } catch(e){ return false; }
   }
   function resume(){ if (ensure() && ctx.state === 'suspended') ctx.resume(); }
-  function setVolume(v){ volume = v; if (master) master.gain.value = v; }
+  function setVolume(v){ volume = v; if (master) master.gain.value = v; try { localStorage.setItem('starforge_volume', String(v)); } catch(e){} }
+  function getVolume(){ return volume; }
+  // 切后台再回来：浏览器会暂停 AudioContext，恢复可见时自动唤醒（音乐/音效无缝继续）
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resume(); });
 
   // ---------- 基础合成器 ----------
   function env(g, t, a, d, peak = 1, sustain = 0){
@@ -155,7 +164,10 @@ const Sound = (() => {
   };
 
   function play(name, ...args){
-    if (!ctx || ctx.state !== 'running') return;
+    if (!ctx) return;
+    // 首声防吞：上下文仍处于 suspended（未解锁）时先请求恢复
+    if (ctx.state === 'suspended') resume();
+    if (ctx.state !== 'running') return;
     try { if (S[name]) S[name](...args); } catch(e){}
   }
 
@@ -290,5 +302,5 @@ const Sound = (() => {
     Music.start();
   }
 
-  return { play, loops, begin, resume, setVolume, Music, get ctx(){ return ctx; } };
+  return { play, loops, begin, resume, setVolume, getVolume, Music, get ctx(){ return ctx; } };
 })();

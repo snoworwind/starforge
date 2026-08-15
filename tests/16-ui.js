@@ -45,4 +45,38 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     A.eq(inp.value, '', 'normal Enter clears input (send)');
     Net.disconnect();
   });
+
+  t.test('音量滑杆持久化：改动写回 localStorage 并恢复显示', function () {
+    var slider = document.getElementById('volSlider');
+    A.ok(slider, 'volume slider exists');
+    A.eq(slider.value, String(Math.round(Sound.getVolume() * 100)), 'slider shows persisted volume (default 70)');
+    slider.value = '35';
+    slider.oninput({ target: slider });
+    A.eq(JSON.parse(localStorage.getItem('starforge_volume')), 0.35, 'volume persisted to localStorage');
+    A.eq(Math.round(Sound.getVolume() * 100), 35, 'Sound.getVolume updated');
+    // 还原默认，避免影响后续
+    slider.value = '70';
+    slider.oninput({ target: slider });
+  });
+
+  t.test('机器面板按状态签名节流重建（不打断交互）', function () {
+    var y = api.topAt(60, 60) + 1;
+    api.placeMachine('chest', 60, y, 60, 0);
+    window.UI.openMachinePanel(window.Factory.at(60, y, 60));
+    var grid = document.querySelector('#machineBody .slot-grid');
+    A.ok(grid, 'chest grid built');
+    var firstSlot = grid.children[0];
+    var i;
+    for (i = 0; i < 10; i++) window.UI.tickMachinePanel(0.5);   // 10 个节流窗口
+    var grid2 = document.querySelector('#machineBody .slot-grid');
+    A.ok(grid2 === grid, 'DOM not rebuilt while chest static');
+    A.ok(grid2.children[0] === firstSlot, 'slot element identity preserved (drag/click 不被打断)');
+    // 物品变化 → 触发重建
+    api.machineInsert(60, y, 60, 'stone');
+    window.UI.tickMachinePanel(0.5);
+    var grid3 = document.querySelector('#machineBody .slot-grid');
+    A.ok(grid3 !== grid, 'DOM rebuilt after inventory change');
+    window.UI.closeAll();
+    api.removeMachine(60, y, 60);
+  });
 });

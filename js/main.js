@@ -3414,12 +3414,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v92-guards';
+    bd.textContent = 'build v93-audio';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v92';
+  window.__V_MAIN = 'v93';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4330,6 +4330,7 @@ const Game = (() => {
     location.reload();
   };
   $('volSlider').oninput = e => Sound.setVolume(e.target.value / 100);
+  if (Sound.getVolume) $('volSlider').value = Math.round(Sound.getVolume() * 100);   // 恢复持久化音量
   $('dialogBox').addEventListener('mousedown', e => { e.stopPropagation(); advanceDialog(); });
 
   // ---------- 画面设置面板 ----------

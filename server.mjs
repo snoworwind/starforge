@@ -392,7 +392,7 @@ function makeClient(socket){
     dead: false, buf: Buffer.alloc(0), frag: [], fragOp: 0, fragSize: 0,
     lastTraffic: Date.now(), lastPong: Date.now(),
     lastPlanet: -1, lastSt: '', lastPos: null, lastYaw: 0,
-    charT: 0, lastCharAt: 0, token: '',
+    charT: 0, lastCharAt: 0, token: '', lastPosDirtyAt: 0,
     buckets: {
       blk: makeBucket(40, 20), mac: makeBucket(20, 10), macdata: makeBucket(4, 1),
       cre: makeBucket(4, 2), chat: makeBucket(5, 1), char: makeBucket(2, 0.1),
@@ -619,6 +619,14 @@ function handleMessage(c, m){
         world.players[c.name] = world.players[c.name] || { token: c.token };
         world.players[c.name].pos = c.lastPos;
         world.players[c.name].lastSeen = Date.now();
+        // 位置持久化：pos 是唯一写 players 却不标脏的路径——崩溃会丢全部移动，
+        // 且 prunePlayers 按 lastSeen 排序会因陈旧时间误踢最近活跃玩家。
+        // 每客户端 10 秒节流标脏（配合 2 秒 debounce 存档，移动期间最多每 10 秒一次写盘）
+        const now = Date.now();
+        if (now - (c.lastPosDirtyAt || 0) >= 10000){
+          c.lastPosDirtyAt = now;
+          scheduleSave();
+        }
       }
       // 优化：外观只在 hello/外观变化时发（app 字段仅透传已有消息，不额外包装）
       const out = { t: 'pos', id: c.id, planet: c.lastPlanet, st: c.lastSt, p: m.p.slice(0, 3), yaw: m.yaw };

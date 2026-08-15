@@ -521,6 +521,8 @@ const Creatures = (() => {
       const dir = rnd() * Math.PI * 2;
       const timer = 1 + rnd() * 3;
       const animT = rnd() * 10;
+      if (!ok) continue;   // 无效地形候选不注册：否则以 (0,0) 初始值入列，
+      // 掷骰命中即产生幽灵兽群——永久占据名额并计入密度，抑制该细胞真实生成（水域生态尤甚）
       cands.push({ i, x: wx, z: wz, gy, speed, dir, timer, animT });
     }
     // 世界生成式兽群（确定性掷骰：跨客户端一致）；被杀候选（removed 掩码）与
@@ -712,8 +714,12 @@ const Creatures = (() => {
         const d2 = dx * dx + dz * dz;
         if (d2 < SPAWN_MIN * SPAWN_MIN || d2 >= SPAWN_MAX * SPAWN_MAX) continue;
         const nid = createHerd(st, c);
-        materializeHerd(herds.get(nid), info);
-        return;
+        if (materializeHerd(herds.get(nid), info)) return;
+        // 注册后地形被破坏（挖掉/被水淹）：回滚本次占用并继续尝试下一候选，
+        // 否则失败的记录留在 herds 里成为幽灵兽群，逐轮累积直到该细胞再也刷不出生物
+        herds.delete(nid);
+        st.mask &= ~(1 << c.i);
+        st.herdCount = Math.max(0, st.herdCount - 1);
       }
     }
   }
@@ -1387,6 +1393,13 @@ const Creatures = (() => {
       g.userData.spawnT = 0;          // 免淡入
       g.scale.setScalar(1);
       return g;
+    },
+    // 测试钩子：按当前生态动物类型强制注册一个候选细胞（跳过 3/帧 队列限制）
+    debugRegisterCell(cx, cz){
+      const info = (World.biome && World.biome.animal) || null;
+      if (!info) return false;
+      registerCell(cx | 0, cz | 0, info);
+      return true;
     },
     debugSkyFlock(){ return skyFlock; },
     debugList(){ return list; },

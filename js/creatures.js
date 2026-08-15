@@ -950,6 +950,11 @@ const Creatures = (() => {
       }
       u.animT += dt;
       u.timer -= dt;
+      // 受击闪红复原
+      if (u.flashT > 0){
+        u.flashT -= dt;
+        if (u.flashT <= 0) clearHitFlash(g);
+      }
       // 村民越界（离村心 > 10 格）→ 立即回家，不等待计时
       if (u.villager && u.state === 'idle'){
         const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
@@ -1162,7 +1167,7 @@ const Creatures = (() => {
     let best = null, bestT = maxDist;
     for (const g of list){
       _rv.copy(g.position).sub(origin);
-      _rv.y -= (g.userData.radius || 0.8) * 0.4;   // 命中判定中心略高于脚底
+      _rv.y += (g.userData.radius || 0.8) * 0.4;   // 命中判定球心从脚底抬到躯干中部（修正：此前 -= 把球心压到脚底以下，瞄身体反而偏）
       const t = _rv.dot(dir);
       if (t < 0.6 || t > bestT) continue;
       const r = g.userData.radius || 0.8;
@@ -1183,7 +1188,30 @@ const Creatures = (() => {
       u.speed = Math.max(u.speed, (u.typeDef.speed || 1) * 2.4);
     }
     if (u.hp <= 0){ kill(g, opts); return true; }
+    // 受击反馈：材质瞬时闪红（0.12s 后复原）+ 专属受击音
+    flashHit(g, u);
+    Sound.play('creatureHit');
     return false;
+  }
+  // 受击闪红：记录材质原 emissive，临时置红；tickOne 里到期复原
+  function flashHit(g, u){
+    u.flashT = 0.12;
+    g.traverse(o => {
+      const m = o.material;
+      if (m && m.emissive && m._baseEm === undefined){
+        m._baseEm = m.emissive.getHex();
+        m.emissive.setHex(0xff2211);
+      }
+    });
+  }
+  function clearHitFlash(g){
+    g.traverse(o => {
+      const m = o.material;
+      if (m && m.emissive && m._baseEm !== undefined){
+        m.emissive.setHex(m._baseEm);
+        delete m._baseEm;
+      }
+    });
   }
   function kill(g, opts){
     removeFromList(g);
@@ -1218,7 +1246,7 @@ const Creatures = (() => {
         Player.spawnDrop(g.position.x, g.position.y + 0.6, g.position.z, dr.item, dr.n || 1);
       }
     }
-    Sound.play('breakBlk', 0.55);
+    Sound.play('creatureDie');
   }
 
   // ---------- 联机：快照 / 远端对齐 / 命中与击杀广播 ----------

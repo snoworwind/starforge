@@ -45,6 +45,24 @@ __SF_TEST__.suite('combat', function (t, api) {
     A.ok(window.Player.dropCount > dropsBefore, 'loot dropped (before=' + dropsBefore + ', after=' + window.Player.dropCount + ')');
   });
 
+  t.test('生物受击闪红并自动复原', function () {
+    var p = api.pos();
+    var s = window.Creatures.debugSpawnSentinel(p[0] + 3, p[2]);
+    window.Creatures.damage(s, 1);   // 守卫 hp=10，存活 → 触发受击闪红
+    var red = false;
+    s.traverse(function (o){
+      if (o.material && o.material.emissive && o.material.emissive.getHex() === 0xff2211) red = true;
+    });
+    A.ok(red, 'creature materials flash red on hit');
+    step(10);   // 0.33s @30fps > flashT 0.12s
+    var red2 = false;
+    s.traverse(function (o){
+      if (o.material && o.material.emissive && o.material.emissive.getHex() === 0xff2211) red2 = true;
+    });
+    A.ok(!red2, 'hit flash restored after 0.12s');
+    window.Creatures.kill(s);
+  });
+
   t.test('生物 AI 地形查询不触发区块生成（topAtNoGen）', function () {
     var p = api.pos();
     // 部署在未加载区域（> 生成半径）：AI 悬浮查询绝不触发生成

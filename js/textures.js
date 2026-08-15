@@ -378,9 +378,11 @@ const Tex = (() => {
   });
 
   const texture = new THREE.CanvasTexture(canvas);
+  // 像素风：近距最邻近采样（硬边像素块）；远距用最近 mip 层级消除闪烁/摩尔纹
+  // （NearestMipmapNearest 在距离远处自动切换小 mip，仍是最近采样，像素感不丢）
   texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.generateMipmaps = false;
+  texture.minFilter = THREE.NearestMipmapNearestFilter;
+  texture.generateMipmaps = true;
 
   // 提取单 tile 独立贴图（机器材质用）
   const tileTexCache = {};
@@ -391,7 +393,7 @@ const Tex = (() => {
     const c = document.createElement('canvas'); c.width = TS; c.height = TS;
     c.getContext('2d').drawImage(canvas, (i % COLS) * TS, ((i / COLS) | 0) * TS, TS, TS, 0, 0, TS, TS);
     const t = new THREE.CanvasTexture(c);
-    t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false;
+    t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestMipmapNearestFilter; t.generateMipmaps = true;
     t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeatX, repeatY);
     tileTexCache[key] = t;
     return t;

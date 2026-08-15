@@ -20,4 +20,17 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
       A.ok(api.defs.BIOMES[st.planets[i].biome], 'planet ' + i + ' biome valid');
     }
   });
+
+  t.test('planet textures: nearest-mip sampling (no far moire)', function () {
+    api.enterSpace();
+    var ps = window.Space.planets;
+    A.ok(ps && ps.length >= 5, 'planets ready');
+    for (var i = 0; i < ps.length; i++) {
+      var tx = ps[i].tex;
+      A.ok(tx, 'planet ' + i + ' has texture');
+      A.eq(tx.magFilter, THREE.NearestFilter, 'planet ' + i + ' magFilter stays nearest (pixel look)');
+      A.eq(tx.minFilter, THREE.NearestMipmapNearestFilter, 'planet ' + i + ' minFilter = nearest-mip');
+      A.ok(tx.generateMipmaps, 'planet ' + i + ' generates mipmaps');
+    }
+  });
 });

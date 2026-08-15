@@ -94,7 +94,9 @@ const Space = (() => {
     const n = makeNoise(seed);
     const rnd = mulberry32((seed ^ 0xB10B) >>> 0);
     const pal = PLANET_PAL[biomeKey] || PLANET_PAL.lush;
-    const lin2byte = v => Math.round(Math.pow(Math.min(1, Math.max(0, v)), 1 / 2.2) * 255);
+    // 直通编码：色板与地面方块共用同一套 sRGB 值，而渲染管线无色彩管理。
+    // 此前 pow(1/2.2) 会把星球整体提亮发粉，造成「太空看亮、落地变暗」的割裂。
+    const lin2byte = v => Math.round(Math.min(1, Math.max(0, v)) * 255);
     // 海拔场（形状按生态；圆上采样保证经度无缝）
     function elev(wx, wy){
       switch (biomeKey){
@@ -176,7 +178,9 @@ const Space = (() => {
     c4.width = W; c4.height = H;
     c4.getContext('2d').drawImage(c, 0, 0);
     const t = new THREE.CanvasTexture(c);
-    t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter;
+    t.magFilter = THREE.NearestFilter;                    // 近距离仍是硬边像素风
+    t.minFilter = THREE.NearestMipmapNearestFilter;       // 远距最近 mip：消除整球缩小时的摩尔纹/闪烁
+    t.generateMipmaps = true;                             // 256×128 为 2 的幂，动态重绘（needsUpdate）自动重建 mip
     return { tex: t, canvas: c, ctx, cleanCanvas: c3, cleanCtx: c3.getContext('2d'), origCanvas: c4 };
   }
 
@@ -2783,4 +2787,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v102';
+window.__V_SPACE = 'v103';

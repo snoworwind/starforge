@@ -858,7 +858,7 @@ const UI = (() => {
           Player.credits -= buyP;
           bought++;
         }
-        if (bought){ Sound.play('buy'); Game.market[id] = Math.min(1.6, (Game.market[id] || 1) + 0.01 * bought); Game.flags.traded = true; }
+        if (bought){ Sound.play('buy'); Game.market[id] = Math.min(1.6, (Game.market[id] || 1) + 0.01 * bought); Game.flags.traded = true; if (Game.checkQuest) Game.checkQuest(); }
         else Sound.play('uiError');
         refreshTrade(); refreshHUD();
       };
@@ -870,7 +870,7 @@ const UI = (() => {
         for (let i = 0; i < n; i++){
           if (Player.removeItem(id, 1)){ Player.credits += sellP; sold++; }
         }
-        if (sold){ Sound.play('coin'); Game.market[id] = Math.max(0.5, (Game.market[id] || 1) - 0.012 * sold); Game.flags.traded = true; }
+        if (sold){ Sound.play('coin'); Game.market[id] = Math.max(0.5, (Game.market[id] || 1) - 0.012 * sold); Game.flags.traded = true; if (Game.checkQuest) Game.checkQuest(); }
         else Sound.play('uiError');
         refreshTrade(); refreshHUD();
       };

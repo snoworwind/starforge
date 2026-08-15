@@ -115,6 +115,52 @@ __SF_TEST__.suite('quests', function (t, api) {
     });
   });
 
+  t.test('q_warp 不因消耗电池而永久卡死（结算先于扣电池，站内购买即时结算）', async function () {
+    function toWarp() {
+      api.clearInv();
+      api.setFlag('checkedShip', true); api.pokeQuests();
+      api.give('carbon', 15); api.pokeQuests();
+      api.give('sodium', 8); api.pokeQuests();
+      api.give('stone', 12); api.pokeQuests();
+      api.placeEvent('furnace');
+      api.give('iron', 10); api.pokeQuests();
+      api.setFlag('shipRepaired', true); api.pokeQuests();
+      api.give('data', 99); api.research('metallurgy');
+      api.placeEvent('miner');
+      for (var i = 0; i < 6; i++) api.placeEvent('belt');
+      api.placeEvent('solar'); api.placeEvent('solar');
+      api.placeEvent('refinery');
+      api.give('fuel', 2); api.pokeQuests();
+      api.setFlag('launched', true); api.pokeQuests();
+      api.setFlag('docked', true); api.pokeQuests();
+      api.setFlag('traded', true); api.pokeQuests();
+      api.setFlag('newPlanet', true); api.pokeQuests();
+      api.placeEvent('reactor');
+      api.give('antimatter', 3); api.pokeQuests();
+      A.eq(api.questId(), 'q_warp', 'arrived at q_warp');
+    }
+
+    // 路径 A：站内购买电池的瞬间（交易回调 → checkQuest）即结算收集任务
+    await api.boot('normal', { fresh: true });
+    toWarp();
+    api.give('warpcell', 1);
+    window.Game.checkQuest();
+    A.eq(api.questId(), 'q_leave', 'holding a warpcell completes q_warp at check time');
+
+    // 路径 B：电池未经结算直接跃迁消耗（旧行为 → q_warp 永久卡死）
+    await api.boot('normal', { fresh: true });
+    toWarp();
+    api.give('warpcell', 1);   // 模拟「站内购买后未落地」：不触发任何任务轮询
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Game.warpTo(9999);   // 跃迁消耗电池
+    A.eq(api.questId(), 'q_leave', 'warp consumes cell AFTER quest settles');
+    A.eq(api.count('warpcell'), 0, 'cell consumed by warp');
+    // 主线终点在跃迁后可正常完结
+    api.setFlag('warpedOut', true); api.pokeQuests();
+    A.eq(api.questId(), null, 'quest line completes after warp');
+    await window.Game.tpTo(0, null, 'planet', 'reset');   // 复位状态，避免污染后续套件
+  });
+
   t.test('村庄委托：接受 → 交付领赏 → 未足提示', function () {
     return api.boot('normal', { fresh: true }).then(function () {
       // 清除 newGame 赠送的起始物资（碳×10 钠×5）：委托物品随机抽取，

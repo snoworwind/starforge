@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>STARFORGE 星穹熔炉 — 体素星际工厂</title>
-<link rel="stylesheet" href="css/style.css?v=st88">
+<link rel="stylesheet" href="css/style.css?v=st89">
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -394,13 +394,20 @@
       <span class="set-val" id="setNpcVal"></span>
     </div>
     <div class="set-row">
+      <span class="set-label">渲染风格</span>
+      <div class="set-opts" id="setStyle">
+        <button data-q="modern">现代</button>
+        <button data-q="pixel">像素</button>
+      </div>
+    </div>
+    <div class="set-row">
       <span class="set-label">逼真大气层</span>
       <div class="set-opts" id="setRealAtmo">
         <button data-q="on">开启</button>
         <button data-q="off">关闭</button>
       </div>
     </div>
-    <div class="set-hint" id="setHint">高画质（MC 光影风格）：全分辨率 + 实时阳光阴影 + 电影级调色 · 星球区块「极高」→ 太空更远即可看到最多方块地形 · 体积云：太空看到星球云层，地面天空飘浮云团 · 逼真大气层：天穹散射/晨昏霞光 + 太空星球大气辉光 · 区块渲染距离拉到头 = 无限 · 低配设备建议「流畅」</div>
+    <div class="set-hint" id="setHint">高画质（MC 光影风格）：全分辨率 + 实时阳光阴影 + 电影级调色 · 渲染风格「像素」：内部低分辨率渲染 + 最邻近放大，硬边像素块复古风，生物模型贴图同步像素化 · 星球区块「极高」→ 太空更远即可看到最多方块地形 · 体积云：太空看到星球云层，地面天空飘浮云团 · 逼真大气层：天穹散射/晨昏霞光 + 太空星球大气辉光 · 区块渲染距离拉到头 = 无限 · 低配设备建议「流畅」</div>
   </div>
 </div>
 
@@ -436,25 +443,25 @@ window.addEventListener('unhandledrejection', e => {
   console.error('[GAME PROMISE ERROR]', e.reason && (e.reason.stack || e.reason.message || e.reason));
 });
 </script>
-<script src="js/three.min.js?v=st88"></script>
-<script src="js/GLTFLoader.js?v=st88"></script>
-<script src="js/SVGLoader.js?v=st88"></script>
-<script src="js/models.js?v=st88"></script>
-<script src="js/modellib.js?v=st88"></script>
-<script src="js/humanoid.js?v=st88"></script>
-<script src="js/textures.js?v=st88"></script>
-<script src="js/audio.js?v=st88"></script>
-<script src="js/data.js?v=st88"></script>
-<script src="js/world.js?v=st88"></script>
-<script src="js/factory.js?v=st88"></script>
-<script src="js/creatures.js?v=st88"></script>
-<script src="js/player.js?v=st88"></script>
-<script src="js/space.js?v=st88"></script>
-<script src="js/station.js?v=st88"></script>
-<script src="js/savestore.js?v=st88"></script>
-<script src="js/ui.js?v=st88"></script>
-<script src="js/net.js?v=st88"></script>
-<script src="js/main.js?v=st88"></script>
+<script src="js/three.min.js?v=st89"></script>
+<script src="js/GLTFLoader.js?v=st89"></script>
+<script src="js/SVGLoader.js?v=st89"></script>
+<script src="js/models.js?v=st89"></script>
+<script src="js/modellib.js?v=st89"></script>
+<script src="js/humanoid.js?v=st89"></script>
+<script src="js/textures.js?v=st89"></script>
+<script src="js/audio.js?v=st89"></script>
+<script src="js/data.js?v=st89"></script>
+<script src="js/world.js?v=st89"></script>
+<script src="js/factory.js?v=st89"></script>
+<script src="js/creatures.js?v=st89"></script>
+<script src="js/player.js?v=st89"></script>
+<script src="js/space.js?v=st89"></script>
+<script src="js/station.js?v=st89"></script>
+<script src="js/savestore.js?v=st89"></script>
+<script src="js/ui.js?v=st89"></script>
+<script src="js/net.js?v=st89"></script>
+<script src="js/main.js?v=st89"></script>
 <script>
 // 版本自检（内联于入口文档）：确认浏览器实际加载的模块版本；缺失/不匹配 = 在跑旧缓存或别的目录副本
 (function(){
@@ -478,7 +485,7 @@ window.addEventListener('unhandledrejection', e => {
 (function(){
   if (/\btest\b/.test(location.search + location.hash)){
     var s = document.createElement('script');
-    s.src = 'js/test-api.js?v=st88';
+    s.src = 'js/test-api.js?v=st89';
     document.body.appendChild(s);
   }
 })();

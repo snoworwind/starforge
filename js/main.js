@@ -13,29 +13,47 @@ const Game = (() => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 20000);
   window.addEventListener('resize', () => {
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    resizeRenderer();
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
   });
 
   // ---------- 画面设置（ESC → 画面设置；持久化到 localStorage）----------
   const SETTINGS_KEY = 'starforge_settings';
-  const settings = { fov: 75, chunkDist: 16, farDist: 1536, quality: 'mid', planetLod: 'mid', clouds: 'on', realAtmo: 'on', npcShips: 7, mouseSens: 1 };
+  const settings = { fov: 75, chunkDist: 16, farDist: 1536, quality: 'mid', planetLod: 'mid', clouds: 'on', realAtmo: 'on', npcShips: 7, mouseSens: 1, style: 'modern' };
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch(e){}
   let lastQuality = null;
   function baseFov(){ return settings.fov; }
+  // 渲染分辨率：像素风 = 内部低分辨率渲染 + CSS 最邻近放大（硬边像素块，经典复古感）
+  function resizeRenderer(){
+    const w = window.innerWidth, h = window.innerHeight;
+    const q = settings.quality;
+    const cvs = renderer.domElement;
+    if (settings.style === 'pixel'){
+      // 内部缓冲按 50% 渲染（下限 640×360 保小窗清晰度），CSS image-rendering:pixelated 放大
+      renderer.setPixelRatio(1);
+      renderer.setSize(Math.max(640, Math.round(w * 0.5)), Math.max(360, Math.round(h * 0.5)), false);
+      cvs.style.width = w + 'px';
+      cvs.style.height = h + 'px';
+    } else {
+      cvs.style.width = ''; cvs.style.height = '';
+      renderer.setPixelRatio(q === 'low' ? 0.75 : q === 'high' ? Math.min(window.devicePixelRatio, 2) : Math.min(window.devicePixelRatio, 1.5));
+      renderer.setSize(w, h);
+    }
+  }
   function applySettings(){
     World.setViewDist(settings.chunkDist >= 33 ? 64 : settings.chunkDist);   // 拉满 = 无限（64 区块渐进生成）
     World.setFarDist(settings.farDist);
     // 画质：流畅=降采样渲染 · 标准=原生1x · 高画质=全分辨率+实时阳光阴影+电影级调色（MC光影风格）
     const q = settings.quality;
-    renderer.setPixelRatio(q === 'low' ? 0.75 : q === 'high' ? Math.min(window.devicePixelRatio, 2) : Math.min(window.devicePixelRatio, 1.5));
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    resizeRenderer();
     renderer.shadowMap.enabled = q === 'high';
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = q === 'high' ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
     renderer.toneMappingExposure = 1.18;
     $('game').style.filter = q === 'high' ? 'saturate(1.14) contrast(1.04)' : '';
+    // 像素风：外部模型（生物/飞船）贴图改用最邻近采样，与方块像素纹理风格统一
+    if (window.ModelLib && ModelLib.setPixel) ModelLib.setPixel(settings.style === 'pixel');
     World.setShadows(q === 'high');
     Space.setLodQuality(settings.planetLod);
     Space.setClouds(settings.clouds === 'on');
@@ -3396,12 +3414,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v86-station';
+    bd.textContent = 'build v89-pixel';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v88';
+  window.__V_MAIN = 'v89';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4334,6 +4352,8 @@ const Game = (() => {
       b.classList.toggle('on', b.dataset.q === settings.clouds));
     document.querySelectorAll('#setRealAtmo button').forEach(b =>
       b.classList.toggle('on', b.dataset.q === settings.realAtmo));
+    document.querySelectorAll('#setStyle button').forEach(b =>
+      b.classList.toggle('on', b.dataset.q === settings.style));
   }
   $('setFov').oninput = e => { settings.fov = +e.target.value; applySettings(); refreshSettingsUI(); };
   $('setChunk').oninput = e => { settings.chunkDist = +e.target.value; applySettings(); refreshSettingsUI(); };
@@ -4351,6 +4371,9 @@ const Game = (() => {
   });
   document.querySelectorAll('#setRealAtmo button').forEach(b => {
     b.onclick = () => { Sound.play('uiClick'); settings.realAtmo = b.dataset.q; applySettings(); refreshSettingsUI(); };
+  });
+  document.querySelectorAll('#setStyle button').forEach(b => {
+    b.onclick = () => { Sound.play('uiClick'); settings.style = b.dataset.q; applySettings(); refreshSettingsUI(); };
   });
   $('btnSettingsBoot').onclick = () => {
     Sound.begin(); Sound.play('uiOpen');

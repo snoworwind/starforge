@@ -71,6 +71,21 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     A.eq(window.__V_SPACE, main, 'space version in sync');
   });
 
+  t.test('单机系统面板打开 → 世界真正冻结，关闭后恢复', async function () {
+    A.eq(window.Game.worldPaused(), false, 'not paused at baseline');
+    // 打开暂停菜单，等主循环感知后取基准
+    document.getElementById('pausePanel').classList.remove('hidden');
+    await api.sleep(250);
+    A.ok(window.Game.worldPaused(), 'worldPaused() true while pause menu open');
+    var t0 = window.Game.playTime;
+    await api.sleep(350);
+    A.eq(window.Game.playTime, t0, 'playTime frozen while paused (got +' + (window.Game.playTime - t0).toFixed(3) + 's)');
+    document.getElementById('pausePanel').classList.add('hidden');
+    A.eq(window.Game.worldPaused(), false, 'worldPaused() false after closing');
+    await api.sleep(350);
+    A.ok(window.Game.playTime > t0, 'world resumes after closing pause menu');
+  });
+
   t.test('机器面板按状态签名节流重建（不打断交互）', function () {
     var y = api.topAt(60, 60) + 1;
     api.placeMachine('chest', 60, y, 60, 0);

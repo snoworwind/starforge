@@ -8,8 +8,9 @@
 
 const SaveStore = (() => {
   const DB_NAME = 'starforge';
-  const DB_VER = 1;
+  const DB_VER = 2;
   const STORE = 'saves';
+  const CHUNK_STORE = 'chunks';      // v2：完整区块快照（Minecraft 式区块落盘）
   const INDEX_KEY = '__index';       // 索引数组存放的保留键
   const MIGRATED_KEY = '__migrated'; // 旧 localStorage 迁移完成标记（保留键不与 starforge_sv_* 冲突）
 
@@ -25,6 +26,7 @@ const SaveStore = (() => {
         req.onupgradeneeded = () => {
           const db = req.result;
           if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+          if (!db.objectStoreNames.contains(CHUNK_STORE)) db.createObjectStore(CHUNK_STORE);
         };
         req.onsuccess = () => { opened = true; resolve(req.result); };
         req.onerror = () => { opened = true; mem = new Map(); resolve(null); };
@@ -135,8 +137,124 @@ const SaveStore = (() => {
     return putSlot(MIGRATED_KEY, 1);
   }
 
+  // ---------- 区块存储（v2：完整区块快照，Minecraft 式）----------
+  // key = worldKey|galaxySeed|planetId|cx,cz；record = { v, mod, data: Uint16Array RLE [run,blockId] }
+  const CHUNK_PREFIX = 'chunks/';   // 降级内存模式的命名空间前缀（避免与槽位键冲突）
+  function ck(key){ return CHUNK_PREFIX + key; }
+  async function putChunks(entries){
+    if (!entries || !entries.length) return true;
+    await open();
+    if (mem){
+      for (const e of entries) mem.set(ck(e.key), { v: e.rec.v, mod: e.rec.mod, data: Array.from(e.rec.data || []) });
+      return true;
+    }
+    try {
+      const db = await dbPromise;
+      if (!db) return false;
+      return await new Promise(resolve => {
+        let txn;
+        try {
+          txn = db.transaction(CHUNK_STORE, 'readwrite');
+          const st = txn.objectStore(CHUNK_STORE);
+          for (const e of entries) st.put(e.rec, ck(e.key));
+        } catch(e){ resolve(false); return; }
+        txn.oncomplete = () => resolve(true);
+        txn.onerror = () => resolve(false);
+        txn.onabort = () => resolve(false);
+      });
+    } catch(e){ return false; }
+  }
+  async function getChunks(keys){
+    await open();
+    const out = new Map();
+    if (!keys || !keys.length) return out;
+    if (mem){
+      for (const k of keys){
+        const v = mem.get(ck(k));
+        if (v) out.set(k, { v: v.v || 1, mod: !!v.mod, data: Array.isArray(v.data) ? Uint16Array.from(v.data) : v.data });
+      }
+      return out;
+    }
+    try {
+      const db = await dbPromise;
+      if (!db) return out;
+      const found = await new Promise(resolve => {
+        const res = [];
+        let txn;
+        try {
+          txn = db.transaction(CHUNK_STORE);
+          const st = txn.objectStore(CHUNK_STORE);
+          for (const k of keys){
+            const r = st.get(ck(k));
+            r.onsuccess = () => { if (r.result !== undefined) res.push([k, r.result]); };
+            r.onerror = () => {};
+          }
+        } catch(e){ resolve(res); return; }
+        txn.oncomplete = () => resolve(res);
+        txn.onerror = () => resolve(res);
+        txn.onabort = () => resolve(res);
+      });
+      for (const [k, v] of found){
+        if (!v) continue;
+        out.set(k, { v: v.v || 1, mod: !!v.mod, data: v.data instanceof Uint16Array ? v.data : Uint16Array.from(v.data || []) });
+      }
+      return out;
+    } catch(e){ return out; }
+  }
+  async function getChunkKeys(prefix){
+    await open();
+    const p = ck(prefix);
+    if (mem){
+      const out = [];
+      for (const k of mem.keys()) if (k.startsWith(p)) out.push(k.slice(CHUNK_PREFIX.length));
+      return out;
+    }
+    try {
+      const db = await dbPromise;
+      if (!db) return [];
+      return await new Promise(resolve => {
+        const out = [];
+        let txn;
+        try {
+          txn = db.transaction(CHUNK_STORE);
+          const rq = txn.objectStore(CHUNK_STORE).openCursor(IDBKeyRange.bound(p, p + '\uffff'));
+          rq.onsuccess = () => { const cur = rq.result; if (cur){ out.push(cur.key.slice(CHUNK_PREFIX.length)); cur.continue(); } };
+        } catch(e){ resolve(out); return; }
+        txn.oncomplete = () => resolve(out);
+        txn.onerror = () => resolve(out);
+        txn.onabort = () => resolve(out);
+      });
+    } catch(e){ return []; }
+  }
+  async function deleteChunksPrefix(prefix){
+    await open();
+    const p = ck(prefix);
+    if (mem){
+      let n = 0;
+      for (const k of [...mem.keys()]) if (k.startsWith(p)){ mem.delete(k); n++; }
+      return n;
+    }
+    try {
+      const db = await dbPromise;
+      if (!db) return 0;
+      return await new Promise(resolve => {
+        let n = 0;
+        let txn;
+        try {
+          txn = db.transaction(CHUNK_STORE, 'readwrite');
+          const rq = txn.objectStore(CHUNK_STORE).openCursor(IDBKeyRange.bound(p, p + '\uffff'));
+          rq.onsuccess = () => { const cur = rq.result; if (cur){ cur.delete(); n++; cur.continue(); } };
+        } catch(e){ resolve(0); return; }
+        txn.oncomplete = () => resolve(n);
+        txn.onerror = () => resolve(0);
+        txn.onabort = () => resolve(0);
+      });
+    } catch(e){ return 0; }
+  }
+
   return {
     open, getSlot, putSlot, deleteSlot, getIndex, putIndex, atomicWrite, isMigrated, setMigrated,
+    putChunks, getChunks, getChunkKeys, deleteChunksPrefix,
     get available(){ return opened && mem === null; },
   };
 })();

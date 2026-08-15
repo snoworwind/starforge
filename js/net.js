@@ -80,7 +80,7 @@ const Net = (() => {
       const to = setTimeout(() => fail(new Error('连接超时：请确认服务器已启动（双击 start-server.bat / 启动联机主机.bat，macOS/Linux 用 start-server.sh）')), 8000);
       ws2.onopen = () => {
         role = roleHint;
-        broadcast({ t: 'hello', v: 2, name: pickName(), role: roleHint, password: password(), app: (window.Player && Player.appearance) || null });
+        broadcast({ t: 'hello', v: 3, name: pickName(), role: roleHint, password: password(), app: (window.Player && Player.appearance) || null });
       };
       ws2.onmessage = e => {
         let m;

@@ -64,49 +64,120 @@ const Space = (() => {
     return { surface: _sunSurfTex, corona: _sunCoronaTex };
   }
 
-  // ---------- 像素星球贴图 ----------
+  // ---------- 像素星球贴图（256×128 原生，按生态绘制，经度无缝）----------
+  // 每生态一组色板（海/岸/低地/高地/特征色）+ 专属海拔结构——第一眼即可辨识
+  const PLANET_PAL = {
+    lush:     [0x2b62c8, 0xe8dca0, 0x6fbf44, 0x3e8a2e, 0x9fe06a],
+    desert:   [0x6db8c8, 0xf0e0a0, 0xe0c47a, 0xc89a52, 0xe8e0b0],
+    frozen:   [0x9fd4e8, 0xe8f2f8, 0xdfeef8, 0xffffff, 0xcfe8f8],
+    volcanic: [0xff6a1a, 0x5a4038, 0x3a3a42, 0x2a2a30, 0xff8a2a],
+    alien:    [0x7a4ad8, 0xb06fe0, 0x9a5fd0, 0x6a3ab8, 0xe08aff],
+    ocean:    [0x2b62c8, 0x4a82d8, 0x3e8ed6, 0x7cc44f, 0x6fbf44],
+    crystal:  [0x8fd8e8, 0xe8f6fa, 0xcfeef6, 0x7fe8e0, 0xaef7f2],
+    fungal:   [0x6a4a8a, 0xc06fd8, 0x9a4ab8, 0xe8a0f0, 0x7a3a9a],
+    ashen:    [0x9a7a5a, 0x8a8a8a, 0x6e6a66, 0x52504c, 0xa89888],
+    amber:    [0xd8b048, 0xe8c060, 0xe0a63a, 0xb08028, 0xf0d078],
+    ferrous:  [0x8a5a3a, 0xa86a4a, 0x7c4a30, 0x5e3824, 0xc8875a],
+    murk:     [0x2f7a5a, 0x2e8a72, 0x1e5a4c, 0x16453a, 0x4ee8b8],
+    salt:     [0xcfe8f0, 0xf0f2f4, 0xe8ecf0, 0xdde2e6, 0xffffff],
+    obsidian: [0x4a3a6a, 0x2a2a35, 0x1c1a26, 0x120f1a, 0x6a5a9a],
+    redmoss:  [0xb06050, 0xc25a48, 0x943a2a, 0x6e2a1e, 0xd88068],
+    hive:     [0xd89830, 0xd8862a, 0xb06a18, 0x8a5210, 0xe8a840],
+  };
   function planetTexture(biomeKey, seed){
     const b = BIOMES[biomeKey];
+    const W = 256, H = 128;
     const c = document.createElement('canvas');
-    c.width = 64; c.height = 32;
+    c.width = W; c.height = H;
     const ctx = c.getContext('2d');
-    const rnd = mulberry32(seed);
-    const base = new THREE.Color(b.tint);
-    const alt = new THREE.Color(b.sky[0], b.sky[1], b.sky[2]);
-    const noiseGen = makeNoise(seed);
-    for (let y = 0; y < 32; y++){
-      for (let x = 0; x < 64; x++){
-        const n = noiseGen.fbm2(x * 0.14, y * 0.22, 4) * 0.5 + 0.5;
-        let col;
-        if (n < 0.42) col = alt.clone().multiplyScalar(0.75);            // 海洋/低地
-        else {
-          col = base.clone().multiplyScalar(0.7 + n * 0.5);
-          if (rnd() < 0.04) col.multiplyScalar(1.3);
+    const img = ctx.createImageData(W, H);
+    const n = makeNoise(seed);
+    const rnd = mulberry32((seed ^ 0xB10B) >>> 0);
+    const pal = PLANET_PAL[biomeKey] || PLANET_PAL.lush;
+    const lin2byte = v => Math.round(Math.pow(Math.min(1, Math.max(0, v)), 1 / 2.2) * 255);
+    // 海拔场（形状按生态；圆上采样保证经度无缝）
+    function elev(wx, wy){
+      switch (biomeKey){
+        case 'desert': case 'amber': {
+          const d = Math.sin(wx * 3.2 + n.fbm2(wx * 0.02, wy * 0.02, 3) * 2.4);
+          return n.fbm2(wx * 0.014, wy * 0.014, 4) * 0.8 + d * 0.12;
         }
-        // 极冠
-        if ((y < 3 || y > 28) && biomeKey !== 'volcanic') col.lerp(new THREE.Color(0xffffff), 0.55);
-        ctx.fillStyle = '#' + col.getHexString();
-        ctx.fillRect(x, y, 1, 1);
+        case 'ocean': {
+          const v = n.fbm2(wx * 0.018, wy * 0.018, 3) * 0.5 + 0.5;
+          const m = Math.max(0, (v - 0.47) / 0.17);
+          return Math.pow(m, 1.5) * 1.4 - 0.55;
+        }
+        case 'volcanic': {
+          const ridge = Math.max(0, 1 - Math.abs(n.fbm2(wx * 0.03 + 40, wy * 0.03, 4)) * 1.7 - 0.18);
+          return ridge * 1.1 - 0.35 + n.fbm2(wx * 0.012, wy * 0.012, 4) * 0.3;
+        }
+        case 'frozen': case 'crystal': {
+          return n.fbm2(wx * 0.012, wy * 0.012, 4) * 0.75;
+        }
+        case 'alien': {
+          const v = n.fbm2(wx * 0.02, wy * 0.02, 3) * 0.5 + 0.5;
+          return Math.max(0, (v - 0.5) / 0.5) * 1.6 - 0.5;
+        }
+        case 'ashen': case 'salt': {
+          return n.fbm2(wx * 0.01, wy * 0.01, 3) * 0.4;
+        }
+        case 'murk': {
+          return n.fbm2(wx * 0.011, wy * 0.011, 3) * 0.5;
+        }
+        default: {
+          return n.fbm2(wx * 0.012, wy * 0.012, 4) + n.fbm2(wx * 0.05, wy * 0.05, 3) * 0.3;
+        }
       }
     }
-    // 放大到高分辨率画布（供实际地形回绘：贴图贴合方块地形）
-    const c2 = document.createElement('canvas');
-    c2.width = 256; c2.height = 128;
-    const ctx2 = c2.getContext('2d');
-    ctx2.imageSmoothingEnabled = false;
-    ctx2.drawImage(c, 0, 0, 256, 128);
+    const icy = biomeKey === 'frozen' || biomeKey === 'crystal';
+    for (let py = 0; py < H; py++){
+      const lat = (0.5 - (py + 0.5) / H) * Math.PI;
+      const wy = Math.sin(lat) * 40;
+      const polar = Math.max(0, Math.abs(lat) - (icy ? 0.72 : 1.05)) / (icy ? 0.6 : 0.35);
+      for (let px = 0; px < W; px++){
+        const lon = Math.PI - (px + 0.5) / W * (Math.PI * 2);
+        const wx = Math.cos(lon) * 40;
+        const e = elev(wx, wy);
+        let col;
+        if (e < 0){
+          const d = Math.min(1, -e * 2.2);
+          col = new THREE.Color(pal[0]).lerp(new THREE.Color(pal[1]), d);
+        } else if (e < 0.28){
+          col = new THREE.Color(pal[2]);
+        } else {
+          col = new THREE.Color(pal[2]).lerp(new THREE.Color(pal[3]), Math.min(1, (e - 0.28) * 2.2));
+        }
+        // 特征色点缀
+        if (biomeKey === 'murk' && e >= 0 && rnd() < 0.04) col.lerp(new THREE.Color(pal[4]), 0.85);
+        else if (icy && e >= 0.18 && rnd() < 0.025) col.lerp(new THREE.Color(pal[4]), 0.85);
+        else if (biomeKey === 'lush' && e >= 0 && rnd() < 0.02) col.lerp(new THREE.Color(pal[4]), 0.7);
+        else if (biomeKey === 'volcanic' && e < 0.05 && rnd() < 0.3) col.lerp(new THREE.Color(pal[0]), 0.9);   // 熔岩脉络
+        else if (biomeKey === 'ashen' && e >= 0 && rnd() < 0.015) col.lerp(new THREE.Color(pal[4]), 0.6);    // 灰烬亮斑
+        else if (biomeKey === 'salt' && e >= 0 && rnd() < 0.02) col.lerp(new THREE.Color(pal[4]), 0.8);      // 盐晶反光
+        // 极冠（火山/灰烬无冰帽）
+        if (polar > 0 && biomeKey !== 'volcanic' && biomeKey !== 'ashen'){
+          const p = Math.min(1, polar * (icy ? 1.4 : 0.9)) * (icy ? 0.95 : 0.55);
+          col.lerp(new THREE.Color(0xffffff), p);
+        }
+        const i = (py * W + px) * 4;
+        img.data[i] = lin2byte(col.r);
+        img.data[i + 1] = lin2byte(col.g);
+        img.data[i + 2] = lin2byte(col.b);
+        img.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
     // 干净副本：保存「模拟渲染」原貌，地表精绘弄脏后离开星球时还原
     const c3 = document.createElement('canvas');
-    c3.width = 256; c3.height = 128;
-    const ctx3 = c3.getContext('2d');
-    ctx3.drawImage(c2, 0, 0);
+    c3.width = W; c3.height = H;
+    c3.getContext('2d').drawImage(c, 0, 0);
     // 原始像素贴图快照（永不修改）：远离星球时整球回退到最初的手绘风贴图
     const c4 = document.createElement('canvas');
-    c4.width = 256; c4.height = 128;
-    c4.getContext('2d').drawImage(c2, 0, 0);
-    const t = new THREE.CanvasTexture(c2);
+    c4.width = W; c4.height = H;
+    c4.getContext('2d').drawImage(c, 0, 0);
+    const t = new THREE.CanvasTexture(c);
     t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter;
-    return { tex: t, canvas: c2, ctx: ctx2, cleanCanvas: c3, cleanCtx: ctx3, origCanvas: c4 };
+    return { tex: t, canvas: c, ctx, cleanCanvas: c3, cleanCtx: c3.getContext('2d'), origCanvas: c4 };
   }
 
   // 设置目标星球的表皮溶解（amt 0~1，dirWorld 为世界坐标方向；pid=-1 清除所有）
@@ -204,8 +275,8 @@ const Space = (() => {
           h = h * (1 - k) + hp * k;
         }
         // 裙边：边界顶点沿径向下压，遮住相邻 LOD 级的接缝
-        const skirt = (gx === 0 || gy === 0 || gx === G - 1 || gy === G - 1) ? 4 : 0;
-        const r = R + (h - 16 - 0.5 - skirt) * s;
+        const skirt = (gx === 0 || gy === 0 || gx === G - 1 || gy === G - 1) ? 6 : 0;
+        const r = R + (h - World.SEA_Y - 0.5 - skirt) * s;
         const iV = (gy * G + gx) * 3;
         pos[iV] = _ld.x * r; pos[iV + 1] = _ld.y * r; pos[iV + 2] = _ld.z * r;
         const c = cSampler(wx, wz);
@@ -370,7 +441,7 @@ const Space = (() => {
           const hp = poleRef(p, seed, lat > 0 ? 'hN' : 'hS', () => ringAvgH(hSampler, (lat > 0 ? 1 : -1) * POLAR_T0 / 0.004));
           h = h * (1 - k) + hp * k;   // 极区收敛到同纬度平均高度，消除极点麻花
         }
-        const r = R + (h - 16 - 1.5) * s;   // 下沉偏置：LOD 地形块与真实区块覆盖其上
+        const r = R + (h - World.SEA_Y - 1.5) * s;   // 下沉偏置：LOD 地形块与真实区块覆盖其上
         posA.setXYZ(i, _dv.x * r, _dv.y * r, _dv.z * r);
       }
     }
@@ -632,10 +703,12 @@ const Space = (() => {
   // 细节材质统一加 polygonOffset：贴面部件（屏/灯带/饰条）永远赢过墙体的深度比较，杜绝残余共面闪烁
   const _PO = { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 };
   const STATION_MATS = () => ({
-    hull:   new THREE.MeshLambertMaterial({ map: Tex.tileTexture('metal', 3, 3) }),
-    dark:   new THREE.MeshLambertMaterial({ map: Tex.tileTexture('metal_dark', 3, 3) }),
-    deck:   new THREE.MeshLambertMaterial({ color: 0x3a4148 }),
-    accent: new THREE.MeshLambertMaterial(Object.assign({ color: 0xc9641a }, _PO)),
+    hull:   new THREE.MeshPhongMaterial({ map: StationTex.tex('panel_a', 2, 2), specular: 0x22303c, shininess: 18 }),
+    hullB:  new THREE.MeshPhongMaterial({ map: StationTex.tex('panel_b', 2, 2), specular: 0x22303c, shininess: 18 }),
+    cargo:  new THREE.MeshPhongMaterial({ map: StationTex.tex('cargo_door', 1, 1), specular: 0x22303c, shininess: 16 }),
+    dark:   new THREE.MeshPhongMaterial({ map: StationTex.tex('panel_c', 2, 2), specular: 0x182026, shininess: 12 }),
+    deck:   new THREE.MeshPhongMaterial({ map: StationTex.tex('deck_plate', 2, 1), specular: 0x0a0e12, shininess: 8 }),
+    accent: new THREE.MeshPhongMaterial(Object.assign({ color: 0xc9641a, emissive: 0x2a1204, shininess: 20 }, _PO)),
     glowC:  new THREE.MeshBasicMaterial(Object.assign({ color: 0x35e0e8 }, _PO)),
     glowA:  new THREE.MeshBasicMaterial(Object.assign({ color: 0xffb347 }, _PO)),
     glowW:  new THREE.MeshBasicMaterial(Object.assign({ color: 0xdff4ff }, _PO)),
@@ -816,6 +889,94 @@ const Space = (() => {
     c.stroke();
     termTex.needsUpdate = true;
   }
+  // 站名屏：星系名 + 编号（CanvasTexture，256×64）
+  function makeStationSign(name){
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 64;
+    const x = c.getContext('2d');
+    x.fillStyle = '#071418'; x.fillRect(0, 0, 256, 64);
+    x.fillStyle = 'rgba(53,224,232,0.06)';
+    for (let y = 2; y < 64; y += 5) x.fillRect(0, y, 256, 1);
+    x.strokeStyle = '#35e0e8'; x.lineWidth = 2; x.strokeRect(2, 2, 252, 60);
+    x.fillStyle = '#35e0e8';
+    x.font = 'bold 26px Consolas, monospace';
+    x.textAlign = 'center';
+    x.fillText((name || '轨道站').slice(0, 10), 128, 30);
+    x.fillStyle = '#ffb347';
+    x.font = '12px Consolas, monospace';
+    x.fillText('◆ ORBITAL STATION · GALNET-UP', 128, 50);
+    const t = new THREE.CanvasTexture(c);
+    t.magFilter = THREE.LinearFilter;
+    return t;
+  }
+
+  // 站体 greeble 装饰层（确定性：随星系种子变化；避开停机坪/入口/走道）
+  function addStationGreebles(g, M){
+    const rnd = mulberry32((currentGalaxySeed ^ 0x5A7) >>> 0);
+    const place = (geo, mat, x, y, z, rx, ry, rz) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      if (rx || ry || rz) m.rotation.set(rx || 0, ry || 0, rz || 0);
+      g.add(m);
+      return m;
+    };
+    const box = (w, h, d, mat, x, y, z, ry) => place(new THREE.BoxGeometry(q1(w), q1(h), q1(d)), mat, x, y, z, 0, ry || 0, 0);
+    const cyl = (r, h, mat, x, y, z, seg) => place(new THREE.CylinderGeometry(q1(r), q1(r), q1(h), seg || 8), mat, x, y, z, 0, 0, 0);
+    const avoid = (x, z) => {
+      if (Math.abs(x) < 13 && z > 78) return true;            // 入口引导走廊
+      if (Math.abs(x) < 32 && z < 6) return true;            // 大厅平台前区
+      for (const pp of DOCK_L.pads){
+        const dx = x - pp[0], dz = z - pp[2];
+        if (dx * dx + dz * dz < 100) return true;            // 停机坪圆域
+      }
+      return false;
+    };
+    // 库顶（y=34）：天线阵 / 管道组 / 货箱簇
+    for (let i = 0; i < 30; i++){
+      const x = (rnd() * 2 - 1) * 33, z = -10 + rnd() * 82;
+      if (avoid(x, z)) continue;
+      const k = rnd();
+      if (k < 0.35){                        // 天线
+        const h = 3 + rnd() * 4;
+        cyl(0.3, h, M.dark, x, 34 + h / 2, z);
+        box(0.8, 1, 0.8, M.accent, x, 34 + h + 0.5, z);
+      } else if (k < 0.65){                 // 管道组（卧式）
+        const len = 5 + rnd() * 9;
+        place(new THREE.CylinderGeometry(0.5, 0.5, len, 8), M.hullB, x, 34.6, z, Math.PI / 2, rnd() < 0.5 ? 0 : Math.PI / 2, 0);
+        place(new THREE.CylinderGeometry(0.3, 0.3, len, 8), M.dark, x + 1.4, 34.6, z, Math.PI / 2, rnd() < 0.5 ? 0 : Math.PI / 2, 0);
+      } else {                              // 货箱簇
+        box(2.4, 2, 2.4, M.accent, x, 35, z, rnd() * Math.PI);
+        if (rnd() < 0.6) box(2.2, 1.6, 2.2, M.dark, x + (rnd() - 0.5) * 3, 36, z + (rnd() - 0.5) * 3, rnd() * Math.PI);
+      }
+    }
+    // 侧墙外（x=±40）：散热鳍 / 垂直管线
+    for (let i = 0; i < 16; i++){
+      const s = rnd() < 0.5 ? 1 : -1;
+      const z = -8 + rnd() * 78, y = 6 + rnd() * 24;
+      if (avoid(40 * s, z)) continue;
+      if (rnd() < 0.6) box(1.2, 4, 0.8, M.dark, 40.6 * s, y, z);
+      else cyl(0.4, 6, M.hullB, 41 * s, y, z, 8);
+    }
+    // 巨环外沿（y=-20，r≈74）：天线 / 航灯架
+    for (let i = 0; i < 20; i++){
+      const a = i / 20 * Math.PI * 2;
+      const x = Math.cos(a) * 74, z = -72 + Math.sin(a) * 74;
+      if (rnd() < 0.7) box(0.6, 5, 0.6, M.dark, x, -17.5, z, a);
+      else cyl(0.5, 2, M.accent, x, -19, z, 6);
+    }
+    // 太阳能翼板（±70, 12, -44）：桁架斜撑
+    for (let i = 0; i < 8; i++){
+      const s = rnd() < 0.5 ? 1 : -1;
+      const dx = -12 + rnd() * 24;
+      place(new THREE.BoxGeometry(0.6, 6, 0.6), M.dark, 70 * s, 9.5, -44 + dx, 0.5 * (rnd() < 0.5 ? 1 : -1), 0, 0);
+    }
+    // 塔顶（0, 72, -72）：雷达群
+    for (let i = 0; i < 6; i++){
+      const a = i / 6 * Math.PI * 2;
+      cyl(0.5, 4, M.dark, Math.cos(a) * 8, 74, -72 + Math.sin(a) * 8, 6);
+    }
+  }
+
   function buildStation(){
     const g = new THREE.Group();
     const M = STATION_MATS();
@@ -825,19 +986,19 @@ const Space = (() => {
     P.push(
       { g: 'box', p: [0, -2, 31], s: [80, 4, 102], m: 'dark' },              // 库底
       { g: 'box', p: [0, 32, 31], s: [80, 4, 102], m: 'dark' },              // 库顶
-      { g: 'box', p: [36, 15, 31], s: [8, 34, 102], m: 'hull', sym: 1 },     // 侧墙
+      { g: 'box', p: [36, 15, 31], s: [8, 34, 102], m: 'hullB', sym: 1 },    // 侧墙
       { g: 'box', p: [0, 15, -17], s: [80, 34, 6], m: 'hull' },              // 后墙
       { g: 'box', p: [0, 23.9, 79], s: [80, 12.4, 6], m: 'hull' },           // 前墙·上段（底缘嵌入侧段，消除共面）
       { g: 'box', p: [0, 1.1, 79], s: [80, 4.4, 6], m: 'hull' },             // 前墙·下段（顶缘嵌入侧段）
-      { g: 'box', p: [27, 9.9, 79], s: [26, 16.4, 6], m: 'hull', sym: 1 },   // 前墙·侧段（两端嵌入上下段）
+      { g: 'box', p: [27, 9.9, 79], s: [26, 16.4, 6], m: 'cargo', sym: 1 },  // 前墙·侧段（两端嵌入上下段）
       // 入口发光框（gate:1 = 独立材质：护盾激活时变红闪烁）
       { g: 'box', p: [0, 19, 82], s: [32, 2, 2], m: 'glowC', gate: 1 },
       { g: 'box', p: [0, 1, 82], s: [32, 2, 2], m: 'glowC', gate: 1 },
       { g: 'box', p: [15, 10, 82], s: [2, 18, 2], m: 'glowC', sym: 1, gate: 1 },
-      { g: 'box', p: [0, 26, 84], s: [24, 6, 2], m: 'screen' },              // 门楣站名屏
+      { g: 'box', p: [0, 26, 84], s: [24, 6, 2], m: 'screen', nameScreen: 1 },   // 门楣站名屏
       // ===== 主塔（车削）+ 尖塔 + 侧翼（强制对称）=====
       // 塔身后移至 z=-72：半径 44 的塔壁不得侵入机库大厅（后墙外沿 z=-20）
-      { g: 'lathe', prof: 'tower', p: [0, 4, -72], m: 'hull', seg: 20 },
+      { g: 'lathe', prof: 'tower', p: [0, 4, -72], m: 'hullB', seg: 20 },
       { g: 'cyl', p: [0, 88, -72], s: [2, 44], m: 'dark' },
       { g: 'box', p: [0, 112, -72], s: [3, 3, 3], m: 'glowA' },              // 塔顶信标
       { g: 'box', p: [46, 20, -72], s: [2, 12, 2], m: 'glowC', sym: 1 },     // 塔身灯带
@@ -854,7 +1015,7 @@ const Space = (() => {
       { g: 'box', p: [31.4, 18, 50], s: [2, 8, 20], m: 'screen', sym: 1 },   // 舷窗（探入室内，背面嵌入墙内，消除共面闪烁）
       { g: 'box', p: [0, 16, -13], s: [40, 12, 1], m: 'screen' },            // 大厅主屏
       // ===== 宏伟配件：巨型环形桁架 / 太阳能翼阵 / 燃料罐组 / 通讯塔 / 塔脊光带 =====
-      { g: 'lathe', prof: 'ring', p: [0, -20, -72], m: 'hull', seg: 40 },    // 环绕主塔的巨环（车削截面）
+      { g: 'lathe', prof: 'ring', p: [0, -20, -72], m: 'hullB', seg: 40 },   // 环绕主塔的巨环（车削截面）
       { g: 'box', p: [74, -20, -72], s: [3, 3, 3], m: 'glowA', sym: 1, nav: 1 },   // 环际航灯
       { g: 'box', p: [0, -20, 2], s: [3, 3, 3], m: 'glowA', nav: 1 },
       { g: 'box', p: [0, -20, -146], s: [3, 3, 3], m: 'glowA', nav: 1 },
@@ -941,8 +1102,16 @@ const Space = (() => {
     stationRing = dishRoot;
     // 交易终端行情大屏（滚动数据 CanvasTexture）
     buildTerminalScreen(g);
+    // 门楣站名屏：按星系名绘制（每个星系的空间站观感不同）
+    for (const d of P){
+      if (d.nameScreen && d._m){
+        d._m.material = new THREE.MeshBasicMaterial({ map: makeStationSign(galaxyName(currentGalaxySeed)) });
+      }
+    }
     // 换船电脑（SVG 建模，玩家停机坪旁）
     buildGarageKiosk(g);
+    // 站体细节装饰（greebles）：天线阵/管道/货箱/散热鳍——按星系种子确定性布置
+    addStationGreebles(g, M);
     // 站内工作人员（SVG 人形，闲置动画在 tickStation）
     for (const sd of STAFF_DEFS){
       const fig = buildStaffFigure(sd.c);
@@ -954,10 +1123,13 @@ const Space = (() => {
       g.add(fig);
       stationStaff.push(fig);
     }
-    // 库内主光源（暖白，让 Lambert 内壁不至于死黑）
+    // 库内主光源（暖白主光 + 大厅冷光，Phong 高光有层次）
     const bay = new THREE.PointLight(0xfff2dd, 0.75, 170);
     bay.position.set(0, 24, 24);
     g.add(bay);
+    const hall = new THREE.PointLight(0xbfe8ff, 0.55, 90);
+    hall.position.set(0, 12, -6);
+    g.add(hall);
     stationLights = [];
     return g;
   }
@@ -1681,41 +1853,60 @@ const Space = (() => {
   }
 
   // ---------- 初始化场景 ----------
-  // ---------- 体积云层（太空视角：星球外围缓慢流动的云壳）----------
+  // ---------- 体积云层（太空视角：每星球独立贴图——云量/形态随生态与种子变化）----------
   let cloudsOn = true;
-  let _cloudShellTex = null;
-  function cloudShellTexture(){
-    if (_cloudShellTex) return _cloudShellTex;
+  const cloudTexCache = new Map();   // biomeKey:seed -> CanvasTexture（容量封顶防泄漏）
+  function cloudShellTexture(biomeKey, seed){
+    const key = biomeKey + ':' + seed;
+    let t = cloudTexCache.get(key);
+    if (t) return t;
+    if (cloudTexCache.size > 96){
+      for (const k of cloudTexCache.keys()){ cloudTexCache.get(k).dispose(); cloudTexCache.delete(k); }
+    }
     const W = 256, H = 128;
     const c = document.createElement('canvas'); c.width = W; c.height = H;
     const x = c.getContext('2d');
     const img = x.createImageData(W, H);
-    const n = makeNoise(90210);
+    const n = makeNoise(seed);
+    // 云量阈值（越低云越多）：宜居/海洋多云，荒漠/熔火/灰烬少云
+    const CLOUD = {
+      lush: 0.55, ocean: 0.52, fungal: 0.5, murk: 0.42, alien: 0.4, hive: 0.38, redmoss: 0.36,
+      frozen: 0.44, crystal: 0.4, salt: 0.3, ferrous: 0.34, obsidian: 0.28, amber: 0.24,
+      desert: 0.2, volcanic: 0.16, ashen: 0.12,
+    };
+    const lo = CLOUD[biomeKey] !== undefined ? CLOUD[biomeKey] : 0.4;
+    const stormy = biomeKey === 'ferrous' || biomeKey === 'murk';   // 风暴带（经度向条带云）
     for (let py = 0; py < H; py++){
       for (let px = 0; px < W; px++){
         // 左右边界交叉淡化：经度方向无缝衔接
-        const t = px / W;
+        const t0 = px / W;
         const v1 = n.fbm2(px * 0.05, py * 0.08, 4) * 0.5 + 0.5;
         const v2 = n.fbm2((px - W) * 0.05, py * 0.08, 4) * 0.5 + 0.5;
-        const v = v1 * (1 - t) + v2 * t;
-        const a = THREE.MathUtils.smoothstep(v, 0.52, 0.76);
+        let v = v1 * (1 - t0) + v2 * t0;
+        if (stormy){
+          const band = Math.sin(px / W * Math.PI * 6 + n.fbm2(px * 0.01, py * 0.05, 2) * 2);
+          v += band * 0.16;
+        }
+        const a = THREE.MathUtils.smoothstep(v, lo, lo + 0.24);
         const i = (py * W + px) * 4;
         img.data[i] = 255; img.data[i + 1] = 255; img.data[i + 2] = 255;
         img.data[i + 3] = (a * 235) | 0;
       }
     }
     x.putImageData(img, 0, 0);
-    _cloudShellTex = new THREE.CanvasTexture(c);
-    return _cloudShellTex;
+    t = new THREE.CanvasTexture(c);
+    cloudTexCache.set(key, t);
+    return t;
   }
   function setClouds(on){
     cloudsOn = on;
     if (!initialized) return;
     for (const p of planets){
       if (on && !p.cloudShell){
+        const cseed = 90210 + p.def.id * 777 + p.def.biome.length * 131;
         const m = new THREE.Mesh(
-          new THREE.SphereGeometry(p.def.radius * 1.10, 32, 16),
-          new THREE.MeshLambertMaterial({ map: cloudShellTexture(), transparent: true, depthWrite: false, opacity: 0.85 }));
+          new THREE.SphereGeometry(p.def.radius * 1.32, 32, 16),
+          new THREE.MeshLambertMaterial({ map: cloudShellTexture(p.def.biome, cseed), transparent: true, depthWrite: false, opacity: 0.85 }));
         m.renderOrder = 1;   // 云壳晚于球体(-1)与体素皮肤(0)：不依赖不稳定的距离排序
         m.rotation.y = p.def.id * 1.7;
         p.mesh.add(m);
@@ -1727,16 +1918,27 @@ const Space = (() => {
 
   // ---------- 逼真大气层（太空视角）：星球边缘大气散射辉光 + 晨昏线暖光 ----------
   let realAtmoOn = true;
+  // 大气参数（rim=边缘散射强度，tw=晨昏线暖光强度）：薄冰星/厚火山星各有签名
+  const ATMO_CFG = {
+    volcanic: { rim: 1.7, tw: 1.5 }, frozen: { rim: 0.85, tw: 1.0 }, crystal: { rim: 0.9, tw: 1.1 },
+    desert: { rim: 1.25, tw: 1.3 }, lush: { rim: 1.1, tw: 1.1 }, ocean: { rim: 1.05, tw: 1.0 },
+    alien: { rim: 1.5, tw: 1.3 }, fungal: { rim: 1.35, tw: 1.2 }, ashen: { rim: 1.45, tw: 1.0 },
+    amber: { rim: 1.2, tw: 1.3 }, ferrous: { rim: 1.3, tw: 1.2 }, murk: { rim: 1.4, tw: 1.1 },
+    salt: { rim: 1.0, tw: 1.0 }, obsidian: { rim: 1.4, tw: 1.2 }, redmoss: { rim: 1.25, tw: 1.25 }, hive: { rim: 1.3, tw: 1.2 },
+  };
   function setRealAtmo(on){
     realAtmoOn = on;
     if (!initialized) return;
     for (const p of planets){
       if (on && !p.atmoShell){
         const b = BIOMES[p.def.biome];
+        const cfg = ATMO_CFG[p.def.biome] || { rim: 1.2, tw: 1.1 };
         const mat = new THREE.ShaderMaterial({
           uniforms: {
             uSunDir: { value: SUN_POS.clone().sub(p.mesh.position).normalize() },
             uCol: { value: new THREE.Color(b.sky[0], b.sky[1], b.sky[2]) },
+            uRim: { value: cfg.rim },
+            uTw: { value: cfg.tw },
           },
           vertexShader: [
             'varying vec3 vN; varying vec3 vW;',
@@ -1749,22 +1951,22 @@ const Space = (() => {
           ].join('\n'),
           fragmentShader: [
             'varying vec3 vN; varying vec3 vW;',
-            'uniform vec3 uSunDir; uniform vec3 uCol;',
+            'uniform vec3 uSunDir; uniform vec3 uCol; uniform float uRim; uniform float uTw;',
             'void main(){',
             '  vec3 V = normalize(cameraPosition - vW);',
             '  vec3 N = normalize(vN);',
-            '  float rim = pow(1.0 - max(dot(V, N), 0.0), 3.0);',            // 边缘菲涅尔散射
+            '  float rim = pow(1.0 - max(dot(V, N), 0.0), 3.0) * uRim;',       // 边缘菲涅尔散射（按生态）
             '  float day = clamp(dot(N, uSunDir) * 1.6 + 0.3, 0.0, 1.0);',   // 昼半球亮
-            '  float tw = pow(1.0 - abs(dot(N, uSunDir)), 3.0);',            // 晨昏线
+            '  float tw = pow(1.0 - abs(dot(N, uSunDir)), 3.0) * uTw;',      // 晨昏线（按生态）
             '  vec3 col = uCol * rim * 1.5 * day + vec3(1.0, 0.45, 0.22) * rim * tw * day * 1.2;',
             '  gl_FragColor = vec4(col, min(1.0, rim * 1.7) * (day * 0.85 + 0.04));',
             '}',
           ].join('\n'),
           transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
         });
-        // 1.22R：高于方块地形上限（山体≈1.15R、树冠≈1.19R）——体素皮肤边缘淡出像素
+        // 1.36R：高于方块地形上限（山体≈1.26R、树冠≈1.30R）——体素皮肤边缘淡出像素
         // 也写深度，壳层若低于地形会被这些像素打出碎片状的透明缺口
-        const shell = new THREE.Mesh(new THREE.SphereGeometry(p.def.radius * 1.22, 48, 24), mat);
+        const shell = new THREE.Mesh(new THREE.SphereGeometry(p.def.radius * 1.36, 48, 24), mat);
         shell.renderOrder = 2;   // 大气散射最外层：晚于云壳绘制
         p.mesh.add(shell);
         p.atmoShell = shell;
@@ -1847,7 +2049,7 @@ const Space = (() => {
       // 大气光晕（1.23R：高于方块地形/树冠上限≈1.19R，避免被区块边缘像素的深度打碎；
       // 不写深度——纯叠加层，写深度会反过来裁掉云壳/扫描罩等后绘透明层）
       const atmo = new THREE.Mesh(
-        new THREE.SphereGeometry(pd.radius * 1.23, 14, 10),
+        new THREE.SphereGeometry(pd.radius * 1.37, 14, 10),
         new THREE.MeshBasicMaterial({ color: new THREE.Color(BIOMES[pd.biome].sky[0], BIOMES[pd.biome].sky[1], BIOMES[pd.biome].sky[2]), transparent: true, opacity: 0.16, side: THREE.BackSide, depthWrite: false })
       );
       mesh.add(atmo);

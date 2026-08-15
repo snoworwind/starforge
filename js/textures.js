@@ -607,6 +607,164 @@ const Icons = (() => {
 })();
 
 /* ============================================================
+   空间站专用瓦片集（64×64，金属面板/甲板/舱门/警示条）
+   ============================================================ */
+const StationTex = (() => {
+  const TS = 64;
+  const tiles = {};   // name -> canvas
+  const rnd = mulberry32(20240107);
+
+  function metalBase(x, pal){
+    for (let y = 0; y < TS; y++){
+      for (let cx = 0; cx < TS; cx++){
+        const r = rnd();
+        x.fillStyle = r < 0.45 ? pal[0] : r < 0.75 ? pal[1] : r < 0.92 ? pal[2] : pal[3];
+        x.fillRect(cx, y, 1, 1);
+      }
+    }
+  }
+  function panelLines(x, step, col){
+    x.fillStyle = col;
+    for (let i = step; i < TS; i += step) x.fillRect(0, i, TS, 1), x.fillRect(i, 0, 1, TS);
+  }
+  function rivets(x, step, col){
+    x.fillStyle = col;
+    for (let ry = step / 2; ry < TS; ry += step){
+      for (let rx = step / 2; rx < TS; rx += step){ x.fillRect(rx - 1, ry - 1, 2, 2); x.fillRect(rx + 1, ry + 1, 1, 1); }
+    }
+  }
+  function edge(x, top, bot){
+    x.fillStyle = top; x.fillRect(0, 0, TS, 2); x.fillRect(0, 0, 2, TS);
+    x.fillStyle = bot; x.fillRect(0, TS - 2, TS, 2); x.fillRect(TS - 2, 0, 2, TS);
+  }
+  function hatch(x, cx, cy, r, col, dark){
+    x.fillStyle = col; x.beginPath(); x.arc(cx, cy, r, 0, 7); x.fill();
+    x.fillStyle = dark; x.beginPath(); x.arc(cx, cy, r * 0.6, 0, 7); x.fill();
+    x.fillStyle = col; x.fillRect(cx - r, cy - 1, r * 2, 2); x.fillRect(cx - 1, cy - r, 2, r * 2);
+  }
+  function stripeBand(x, y0, h){
+    x.save();
+    x.beginPath(); x.rect(0, y0, TS, h); x.clip();
+    for (let i = -TS; i < TS * 2; i += 12){
+      x.fillStyle = i % 24 === 0 ? '#e8b428' : '#2a2e34';
+      x.beginPath();
+      x.moveTo(i, y0 + h); x.lineTo(i + 8, y0); x.lineTo(i + 12, y0); x.lineTo(i + 4, y0 + h);
+      x.closePath(); x.fill();
+    }
+    x.restore();
+    x.fillStyle = '#8a939c'; x.fillRect(0, y0, TS, 1); x.fillRect(0, y0 + h - 1, TS, 1);
+  }
+  function make(name, painter){
+    const c = document.createElement('canvas');
+    c.width = TS; c.height = TS;
+    painter(c.getContext('2d'));
+    tiles[name] = c;
+    return c;
+  }
+
+  // 面板 A：标准壁板（缝隙+铆钉+角板）
+  make('panel_a', x => {
+    metalBase(x, ['#7c8894', '#8a97a0', '#6e7a86', '#96a4ae']);
+    panelLines(x, 16, '#4e5a63');
+    rivets(x, 16, '#c2ccd4');
+    edge(x, '#aab6bf', '#3c454d');
+    x.fillStyle = '#5f6b73'; x.fillRect(4, 4, 10, 10); x.fillRect(TS - 14, TS - 14, 10, 10);
+  });
+  // 面板 B：加强壁板（十字斜撑+中央通风口）
+  make('panel_b', x => {
+    metalBase(x, ['#6a7682', '#78848f', '#5e6a75', '#84909b']);
+    panelLines(x, 32, '#46525b');
+    x.strokeStyle = '#3a454d'; x.lineWidth = 3;
+    x.beginPath(); x.moveTo(2, 2); x.lineTo(TS - 2, TS - 2); x.moveTo(TS - 2, 2); x.lineTo(2, TS - 2); x.stroke();
+    x.strokeStyle = '#c2ccd4'; x.lineWidth = 1;
+    x.beginPath(); x.moveTo(2, 4); x.lineTo(TS - 4, TS - 2); x.moveTo(TS - 2, 4); x.lineTo(4, TS - 2); x.stroke();
+    hatch(x, TS / 2, TS / 2, 8, '#5a666f', '#2e363d');
+    rivets(x, 32, '#b6c0c8');
+    edge(x, '#aab6bf', '#3c454d');
+  });
+  // 面板 C：深色护板（下缘警示带+检修门）
+  make('panel_c', x => {
+    metalBase(x, ['#414c55', '#4a555e', '#39434b', '#525d66']);
+    panelLines(x, 16, '#2c353c');
+    stripeBand(x, TS - 14, 14);
+    hatch(x, 22, 24, 9, '#3a454d', '#222a30');
+    x.fillStyle = '#68747d'; x.fillRect(0, 0, TS, 1); x.fillRect(TS - 1, 0, 1, TS);
+    rivets(x, 32, '#7c8894');
+  });
+  // 甲板：防滑踏板纹 + 警示边
+  make('deck_plate', x => {
+    metalBase(x, ['#39434b', '#414c55', '#333d44', '#48535c']);
+    for (let y = 0; y < TS; y += 8){
+      x.fillStyle = y % 16 === 0 ? '#5a666f' : '#46525b';
+      x.fillRect(0, y, TS, 2);
+    }
+    x.fillStyle = '#2c353c';
+    for (let y = 4; y < TS; y += 8) x.fillRect(0, y, TS, 1);
+    stripeBand(x, 0, 6);
+    stripeBand(x, TS - 6, 6);
+  });
+  // 舱门：对开大门的接缝与拉手
+  make('cargo_door', x => {
+    metalBase(x, ['#55616b', '#5e6a75', '#4a555e', '#6a7682']);
+    panelLines(x, 16, '#3c454d');
+    x.fillStyle = '#2c353c'; x.fillRect(TS / 2 - 2, 0, 4, TS);
+    x.fillStyle = '#222a30';
+    x.fillRect(10, TS / 2 - 3, 8, 6); x.fillRect(TS - 18, TS / 2 - 3, 8, 6);
+    x.fillStyle = '#8a939c'; x.fillRect(10, TS / 2 - 3, 8, 2); x.fillRect(TS - 18, TS / 2 - 3, 8, 2);
+    stripeBand(x, 0, 8);
+    stripeBand(x, TS - 8, 8);
+    rivets(x, 32, '#9aa5ae');
+  });
+  // 舷窗带：深色玻璃 + 青色发光条 + 窗框
+  make('window_band', x => {
+    metalBase(x, ['#4a555e', '#525d66', '#414c55', '#5a666f']);
+    x.fillStyle = '#0b1418'; x.fillRect(6, 8, TS - 12, TS - 16);
+    x.fillStyle = '#35e0e8'; x.fillRect(8, 22, TS - 16, 10);
+    x.fillStyle = '#7ff5fa'; x.fillRect(8, 22, TS - 16, 3);
+    x.fillStyle = '#0f4a52'; x.fillRect(8, 40, TS - 16, 6);
+    x.fillStyle = '#8a939c';
+    for (let i = 8; i < TS; i += 12) x.fillRect(i, 6, 2, TS - 12), x.fillRect(i, TS - 8, 2, 2);
+    edge(x, '#8a939c', '#333d44');
+  });
+  // 通风栅：百叶
+  make('vent_grille', x => {
+    metalBase(x, ['#46525b', '#4e5a63', '#3e4952', '#56626b']);
+    x.fillStyle = '#222a30';
+    for (let y = 6; y < TS - 6; y += 8){ x.fillRect(6, y, TS - 12, 3); x.fillStyle = y % 16 === 6 ? '#222a30' : '#2e363d'; x.fillRect(6, y + 3, TS - 12, 1); x.fillStyle = '#222a30'; }
+    edge(x, '#68747d', '#2c353c');
+  });
+  // 标志条：橙红底 + 人字纹（翼面/塔身色带）
+  make('logo_stripe', x => {
+    x.fillStyle = '#a04e14'; x.fillRect(0, 0, TS, TS);
+    for (let y = 0; y < TS; y += 12){
+      x.fillStyle = '#c9641a'; x.fillRect(0, y, TS, 4);
+      x.fillStyle = '#7a3a0e'; x.fillRect(0, y + 6, TS, 4);
+    }
+    x.fillStyle = '#ffb347';
+    for (let i = 0; i < 3; i++){
+      const cy = 14 + i * 20;
+      x.beginPath(); x.moveTo(12, cy); x.lineTo(26, cy + 6); x.lineTo(12, cy + 12); x.closePath(); x.fill();
+      x.beginPath(); x.moveTo(TS - 12, cy); x.lineTo(TS - 26, cy + 6); x.lineTo(TS - 12, cy + 12); x.closePath(); x.fill();
+    }
+  });
+
+  const texCache = {};
+  function tex(name, repX, repY){
+    const key = name + '_' + repX + '_' + repY;
+    if (texCache[key]) return texCache[key];
+    const t = new THREE.CanvasTexture(tiles[name]);
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearMipmapLinearFilter;   // 远距平滑，消除闪烁
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repX || 1, repY || 1);
+    texCache[key] = t;
+    return t;
+  }
+  return { tex, TS };
+})();
+window.StationTex = StationTex;
+
+/* ============================================================
    公共资源释放工具：销毁场景时调用，释放 GPU 资源
    skipGeo：GLB 克隆体共享模板 geometry，不能 dispose（会毁掉模板）
    skipTex：贴图来自共享缓存（tileTexture / sunTextures / 星系图缓存）时跳过

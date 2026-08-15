@@ -35,7 +35,8 @@ function makeNoise(seed){
 
 // ============================================================
 const World = (() => {
-  const CHUNK = 16, WORLD_H = 64, SEA = 20;
+  const CHUNK = 16, WORLD_H = 96, SEA = 32;
+  const SEA_Y = SEA - 4;   // 中性高度：球面贴附基准（太空 LOD / 浮雕位移 / 曲率着色器共用）
   const CHUNK_CELLS = CHUNK * CHUNK * WORLD_H;
   let GEN_R = 17, MESH_R = 16, UNLOAD_R = 19;    // 区块半径（切比雪夫，可被设置调整）：实际渲染 MESH_R 区块
   let shadowsOn = false;                          // 高画质：区块网格参与阳光阴影
@@ -58,13 +59,14 @@ const World = (() => {
 
   let chunks = new Map();       // 整数键 -> {cx,cz,data,mesh,waterMesh,dirty,modified}
   let savedMods = null;         // 存档中被修改过的区块 {key: rle}
+  let savedChunks = null;       // 完整区块快照 Map "cx,cz" -> Uint16Array（v4 区块落盘）
   let group = null;
   let noise = null, biome = null, seed = 0;
   let streamDirty = true, lastScCx = 1e9, lastScCz = 1e9;   // 流式扫描空闲门控：有脏区块或玩家跨区块时重扫
   function markDirty(c){ c.dirty = true; streamDirty = true; }
 
   const solidMat = new THREE.MeshLambertMaterial({ map: Tex.texture, vertexColors: true, transparent: true, alphaTest: 0.4, side: THREE.DoubleSide });
-  const waterMat = new THREE.MeshLambertMaterial({ map: Tex.texture, transparent: true, opacity: 0.72, side: THREE.DoubleSide });
+  const waterMat = new THREE.MeshLambertMaterial({ map: Tex.texture, vertexColors: true, transparent: true, opacity: 0.72, side: THREE.DoubleSide });
 
   // ---------- 星球曲率（顶点着色器弯曲：高空/太空视角地形贴合球面，落地渐平）----------
   // 体素坐标下星球曲率半径恒为 1/0.004 = 250 格
@@ -88,13 +90,14 @@ const World = (() => {
       shader.uniforms.uCurveFade = curveU.fade;
       shader.uniforms.uCurveGrow = curveU.grow;
       shader.uniforms.uCurveEdge = curveU.edgeR;
+      shader.uniforms.uGrowY = { value: SEA_Y };   // 伸缩锚点 = 中性高度（海平面下 4 格）
       shader.uniforms.uScanR = scanPU.r;
       shader.uniforms.uScanCX = scanPU.cx;
       shader.uniforms.uScanCZ = scanPU.cz;
       shader.uniforms.uScanA = scanPU.a;
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nuniform float uCurveAmt;\nuniform float uCurveCX;\nuniform float uCurveCZ;\nuniform float uCurveGrow;\nvarying float vEdgeR2;\nvarying vec2 vScanXZ;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\n{\n  transformed.y = 16.0 + (transformed.y - 16.0) * uCurveGrow;\n  float _cdx = transformed.x - uCurveCX;\n  float _cdz = transformed.z - uCurveCZ;\n  vEdgeR2 = _cdx * _cdx + _cdz * _cdz;\n  vScanXZ = transformed.xz;\n  transformed.y -= uCurveAmt * (_cdx * _cdx + _cdz * _cdz) * 0.002;\n}');
+        .replace('#include <common>', '#include <common>\nuniform float uCurveAmt;\nuniform float uCurveCX;\nuniform float uCurveCZ;\nuniform float uCurveGrow;\nuniform float uGrowY;\nvarying float vEdgeR2;\nvarying vec2 vScanXZ;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\n{\n  transformed.y = uGrowY + (transformed.y - uGrowY) * uCurveGrow;\n  float _cdx = transformed.x - uCurveCX;\n  float _cdz = transformed.z - uCurveCZ;\n  vEdgeR2 = _cdx * _cdx + _cdz * _cdz;\n  vScanXZ = transformed.xz;\n  transformed.y -= uCurveAmt * (_cdx * _cdx + _cdz * _cdz) * 0.002;\n}');
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nuniform float uCurveFade;\nuniform float uCurveEdge;\nuniform float uScanR;\nuniform float uScanCX;\nuniform float uScanCZ;\nuniform float uScanA;\nvarying float vEdgeR2;\nvarying vec2 vScanXZ;')
         .replace('#include <fog_fragment>', '#include <fog_fragment>\n  gl_FragColor.a *= uCurveFade * smoothstep(0.0, 3600.0, uCurveEdge * uCurveEdge - vEdgeR2);\n{\n  float _sd = length(vScanXZ - vec2(uScanCX, uScanCZ)) - uScanR;\n  float _bk = -_sd;\n  float _trail = smoothstep(0.0, 6.0, _bk) * (1.0 - smoothstep(10.0, 55.0, _bk));\n  vec2 _gv = abs(fract(vScanXZ * 0.125) - 0.5);\n  float _grid = smoothstep(0.40, 0.5, max(_gv.x, _gv.y));\n  gl_FragColor.rgb += vec3(0.13, 0.86, 0.9) * (exp(-_sd * _sd * 0.018) + _grid * _trail * 0.5) * uScanA;\n}\n  if (gl_FragColor.a < 0.04) discard;');
@@ -148,8 +151,36 @@ const World = (() => {
     const y0 = x00 + (x10 - x00) * fy, y1 = x01 + (x11 - x01) * fy;
     return y0 + (y1 - y0) * fz;
   }
-  // 洞穴判定：双噪声面交叉 = 隧道（类 MC 面条洞）+ 低频奶酪洞
+  // 洞穴判定（按生态分型）：熔岩管 / 冰洞 / 晶洞 / 沼穴 / 标准面线交叉
   function isCave(wx, y, wz){
+    const t = (biome.terrain && biome.terrain.caves) || 'standard';
+    if (t === 'lava_tubes'){
+      const a = vnoise3(wx * 0.07, y * 0.11, wz * 0.07, 0xCAFE11);
+      const b = vnoise3(wx * 0.07, y * 0.11, wz * 0.07, 0xCAFE12);
+      if (Math.abs(a - 0.5) < 0.07 && Math.abs(b - 0.5) < 0.07) return true;    // 粗管
+      const c = vnoise3(wx * 0.03, y * 0.06, wz * 0.03, 0xCAFE13);
+      return c > 0.88;                                                          // 气穴
+    }
+    if (t === 'ice'){
+      const a = vnoise3(wx * 0.04, y * 0.06, wz * 0.04, 0xCAFE21);
+      const b = vnoise3(wx * 0.04, y * 0.06, wz * 0.04, 0xCAFE22);
+      return Math.abs(a - 0.5) < 0.055 && Math.abs(b - 0.5) < 0.055;
+    }
+    if (t === 'geodes'){
+      // 稀疏晶洞：格元内球形空腔（内壁晶簇由 genChunk 补 crystal 块）
+      const cell = 26, gx = Math.floor(wx / cell), gz = Math.floor(wz / cell);
+      const rnd = hash2(gx, gz, 0x6E0D);
+      if (rnd() > 0.55) return false;
+      const cx = gx * cell + 13, cz = gz * cell + 13;
+      const cy = 18 + rnd() * 26;
+      const rad = 3 + rnd() * 4;
+      const dx = wx - cx, dy = y - cy, dz = wz - cz;
+      return dx * dx + dy * dy + dz * dz < rad * rad;
+    }
+    if (t === 'swamp_caves'){
+      const a = vnoise3(wx * 0.05, y * 0.09, wz * 0.05, 0xCAFE31);
+      return a > 0.8;
+    }
     const a = vnoise3(wx * 0.045, y * 0.075, wz * 0.045, 0xCAFE01);
     const b = vnoise3(wx * 0.045, y * 0.075, wz * 0.045, 0xCAFE02);
     if (Math.abs(a - 0.5) < 0.05 && Math.abs(b - 0.5) < 0.05) return true;    // 隧道
@@ -174,6 +205,7 @@ const World = (() => {
     if (!c) c = genChunk(cx, cz);
     c.data[lidx(x - cx * CHUNK, y, z - cz * CHUNK)] = id;
     c.modified = true;
+    c.needSave = true;   // 方块改动 → 区块快照需重写
     if (!silent){
       markDirty(c);
       const lx = x - cx * CHUNK, lz = z - cz * CHUNK;
@@ -186,17 +218,187 @@ const World = (() => {
   }
   function inBounds(x, y, z){ return y >= 0 && y < WORLD_H; }
 
-  // ---------- 地形生成 ----------
+  // ---------- 地形生成（生物群系配方 + 行星性格三轴）----------
+  // 行星性格：同生态不同星球之间的差异（种子派生，确定性，与存档无关）
+  let charAxes = { rugged: 1, temp: 0.5, wet: 0.5 };
+  function computeCharAxes(){
+    const rnd = mulberry32((seed ^ 0xA45C1) >>> 0);
+    charAxes = {
+      rugged: 0.72 + rnd() * 0.56,    // 崎岖度：振幅/频率倍率 0.72~1.28
+      temp: rnd(),                     // 亚生态冷暖轴
+      wet: rnd(),                      // 亚生态干湿轴
+    };
+  }
+
+  // ---- 地形算子 ----
+  function warpXZ(n, wx, wz, amount){
+    // 域扭曲：低频噪声偏移采样坐标 → 峡谷/蜿蜒海岸线
+    return [
+      wx + n.fbm2(wx * 0.0021 + 7.3, wz * 0.0021 - 2.1, 3) * amount,
+      wz + n.fbm2(wx * 0.0021 - 3.7, wz * 0.0021 + 9.1, 3) * amount,
+    ];
+  }
+  function craterField(wx, wz, opts){
+    // 环形山场：格元内哈希中心，环壁隆起 + 坑底下陷（确定性）
+    const cell = opts.cell, cx = Math.floor(wx / cell), cz = Math.floor(wz / cell);
+    const rnd = hash2(cx, cz, 0xCEA7);
+    if (rnd() > (opts.chance || 0.5)) return 0;
+    const dx = (wx - (cx + 0.15 + rnd() * 0.7) * cell) / cell;
+    const dz = (wz - (cz + 0.15 + rnd() * 0.7) * cell) / cell;
+    const r0 = (opts.r0 || 0.18) * (0.6 + rnd() * 0.8);
+    const r1 = (opts.r1 || 0.42) * (0.6 + rnd() * 0.8);
+    const d = Math.hypot(dx, dz);
+    if (d > r1) return 0;
+    if (d < r0) return -(opts.floor || 12) * (1 - (d / r0) * 0.25);   // 坑底（中心更深）
+    const t = (d - r0) / Math.max(1e-4, r1 - r0);
+    return (opts.rim || 9) * Math.sin(t * Math.PI);                    // 环壁
+  }
+  function spireField(n, wx, wz, freq, th, gain, cap){
+    const b = n.fbm2(wx * freq, wz * freq, 4);
+    const m = Math.max(0, b - th);
+    return Math.min(cap, m * m * gain);
+  }
+  function hexDome(wx, wz, cell){
+    // 六角穹丘：轴向坐标取整 → 距格心六角距离（hive）
+    const q = (0.577350269 * wx - wz / 3) / cell;
+    const r = (0.666666667 * wz) / cell;
+    const hq = Math.round(q), hr = Math.round(r);
+    const d = Math.max(Math.abs(q - hq), Math.abs(r - hr), Math.abs((q - hq) + (r - hr)));
+    const b = Math.max(0, 1 - d * 1.35);
+    return b * b * 18;
+  }
+  function floatIslandAt(n, wx, wz){
+    // 浮岛场（alien）：低频掩码选出悬空区，岛体为独立高度层（genChunk 生成悬空块）
+    const mask = n.fbm2(wx * 0.0045, wz * 0.0045, 4) * 0.5 + 0.5;
+    if (mask < 0.62 || mask > 0.78) return null;
+    const body = n.fbm2(wx * 0.011 + 31, wz * 0.011 - 17, 4) * 0.5 + 0.5;
+    const thick = Math.max(0, body - 0.35) * 14 + 3;
+    return { base: (54 + mask * 20) | 0, thick: thick | 0 };
+  }
+
   function heightAt(wx, wz){
-    let h = SEA - 4 + (noise.fbm2(wx * 0.012, wz * 0.012, 5) * 0.5 + 0.5) * 30;
-    h += noise.fbm2(wx * 0.05, wz * 0.05, 3) * 3.5;
-    // 大尺度大陆起伏
-    h += noise.fbm2(wx * 0.003, wz * 0.003, 2) * 10;
+    const T = (biome.terrain && biome.terrain.type) || 'continental';
+    // 大尺度大陆起伏幅度（按类型分配：群岛/火山等自带结构的生态不被淹没）
+    const CONTINENT_AMP = { continental: 12, dunes: 8, mesa: 8, volcanic: 4, glacial: 8, flats: 4, shatter: 6, hive: 6, alien: 6, archipelago: 0, swamp: 3 };
+    const ch = charAxes;
+    let h;
+    switch (T){
+      case 'dunes': {
+        // 沙海（荒漠/金珀）：主丘 + 横向沙波纹 + 域扭曲
+        const q = warpXZ(noise, wx, wz, 210);
+        const base = noise.fbm2(q[0] * 0.0052, q[1] * 0.0052, 5) * 0.5 + 0.5;
+        const ripple = Math.sin(wx * 0.016 + noise.fbm2(wx * 0.004, wz * 0.004, 3) * 2.6);
+        h = SEA - 2 + base * 24 * ch.rugged + ripple * ripple * 7 * ch.rugged;
+        h += craterField(wx, wz, { cell: 90, chance: 0.12, r0: 0.16, r1: 0.38, rim: 10, floor: 10 });
+        break;
+      }
+      case 'mesa': {
+        // 阶梯台地（红藓）：量化 fbm → 层状高原
+        const q = warpXZ(noise, wx, wz, 150);
+        const steps = 3 + ((charAxes.temp * 2) | 0);
+        let v = noise.fbm2(q[0] * 0.0042, q[1] * 0.0042, 5) * 0.5 + 0.5;
+        v = Math.round(v * steps) / steps;
+        h = SEA - 8 + v * 44 * ch.rugged;
+        h += noise.fbm2(wx * 0.05, wz * 0.05, 3) * 2;
+        break;
+      }
+      case 'volcanic': {
+        // 熔火：山脊山脉 + 火山锥 + 陨坑 + 灰烬盆地（盆地低地由熔岩湖覆盖）
+        const q = warpXZ(noise, wx, wz, 130);
+        const b = noise.fbm2(q[0] * 0.0065, q[1] * 0.0065, 5);
+        const ridge = Math.max(0, 1 - Math.abs(noise.fbm2(q[0] * 0.0105 + 40, q[1] * 0.0105, 4)) * 1.7 - 0.18);
+        const basin = noise.fbm2(wx * 0.006 + 55, wz * 0.006 - 21, 2) * 0.5 + 0.5;   // 中频灰烬盆地
+        h = SEA - 10 + ridge * 52 * ch.rugged + b * 10 + (basin - 0.5) * 20;
+        h += spireField(noise, wx, wz, 0.008, 0.58, 160, 24) * ch.rugged;   // 火山锥
+        h += craterField(wx, wz, { cell: 110, chance: 0.3, r0: 0.14, r1: 0.34, rim: 13, floor: 16 });
+        break;
+      }
+      case 'archipelago': {
+        // 群岛（海洋）：掩码按实测 fbm 分布归一化（p70≈0.495，max≈0.64）→ 海面占比 85%~93%
+        const q = warpXZ(noise, wx, wz, 240);
+        const v = noise.fbm2(q[0] * 0.0065, q[1] * 0.0065, 3) * 0.5 + 0.5;
+        const m = Math.max(0, (v - 0.47) / 0.17);
+        h = SEA - 12 + Math.pow(m, 1.5) * 60 * ch.rugged;
+        h += noise.fbm2(wx * 0.03, wz * 0.03, 3) * 2.5;
+        break;
+      }
+      case 'glacial': {
+        // 冰封：低幅平滑冰原 + 冰脊
+        const b = noise.fbm2(wx * 0.0042, wz * 0.0042, 4) * 0.5 + 0.5;
+        const ridge = 1 - Math.abs(noise.fbm2(wx * 0.008 + 9, wz * 0.008, 4));
+        h = SEA - 2 + b * 14 * ch.rugged + Math.pow(ridge, 3) * 26 * ch.rugged;
+        break;
+      }
+      case 'flats': {
+        // 近坦（灰烬/盐滩）：超低幅 + 陨坑/盐盘
+        const b = noise.fbm2(wx * 0.004, wz * 0.004, 4) * 0.5 + 0.5;
+        h = SEA - 1 + (b - 0.5) * 10 * ch.rugged;
+        h += craterField(wx, wz, { cell: 120, chance: 0.22, r0: 0.12, r1: 0.3, rim: 7, floor: 9 });
+        break;
+      }
+      case 'swamp': {
+        // 湿地（沼泽）：超低幅 + 沼纹浅波 + 沼心小岛（掩码按实测分布归一化）
+        const q = warpXZ(noise, wx, wz, 180);
+        const b = noise.fbm2(q[0] * 0.0038, q[1] * 0.0038, 4) * 0.5 + 0.5;
+        const v = noise.fbm2(wx * 0.004 + 9, wz * 0.004, 2) * 0.5 + 0.5;
+        const m = Math.max(0, (v - 0.48) / 0.19);
+        h = SEA - 1 + (b - 0.5) * 10 * ch.rugged + Math.sin(wx * 0.013 + wz * 0.021) * 1.6 + Math.pow(m, 1.5) * 20 * ch.rugged;
+        break;
+      }
+      case 'shatter': {
+        // 破碎玻璃山（黑曜/铁原）：强山脊 + 峭壁量化
+        const q = warpXZ(noise, wx, wz, 90);
+        const ridge = 1 - Math.abs(noise.fbm2(q[0] * 0.009 + 17, q[1] * 0.009, 4));
+        let v = Math.pow(ridge, 1.4) * 40 * ch.rugged;
+        v = Math.round(v / 7) * 7;   // 峭壁量化
+        h = SEA - 6 + v + noise.fbm2(wx * 0.05, wz * 0.05, 3) * 2;
+        break;
+      }
+      case 'hive': {
+        // 蜂窝穹丘：六角格网点阵隆包 + 低幅底噪
+        const b = noise.fbm2(wx * 0.004, wz * 0.004, 4) * 0.5 + 0.5;
+        h = SEA - 2 + (b - 0.5) * 12 * ch.rugged + hexDome(wx, wz, 34) * (0.8 + charAxes.wet * 0.5);
+        break;
+      }
+      case 'alien': {
+        // 异星：陡峭尖塔 + 深谷（浮岛由 floatIslandAt 在 genChunk 层追加）
+        const q = warpXZ(noise, wx, wz, 160);
+        const b = noise.fbm2(q[0] * 0.0055, q[1] * 0.0055, 5);
+        const spire = Math.pow(Math.max(0, noise.fbm2(q[0] * 0.012, q[1] * 0.012, 4) - 0.45), 1.6);
+        h = SEA - 6 + (b * 0.5 + 0.5) * 18 * ch.rugged + spire * 44 * ch.rugged;
+        break;
+      }
+      default: {
+        // continental：大陆缓丘 + 域扭曲（翠绿/菌林等默认生态）
+        const q = warpXZ(noise, wx, wz, 190);
+        const b = noise.fbm2(q[0] * 0.005, q[1] * 0.005, 5);
+        h = SEA - 5 + (b * 0.5 + 0.5) * 30 * ch.rugged;
+        h += noise.fbm2(wx * 0.05, wz * 0.05, 3) * 3.5;
+        break;
+      }
+    }
+    // 大尺度大陆起伏（幅度按生态类型分配）
+    h += noise.fbm2(wx * 0.0028, wz * 0.0028, 2) * (CONTINENT_AMP[T] || 8) * ch.rugged;
     return Math.max(3, Math.min(WORLD_H - 8, h | 0));
   }
+
+  // 亚生态：低频掩码把星球分成若干色带/植被带（只影响地表色与植被，不改高度）
+  function subBiomeAt(wx, wz){
+    const sub = biome.sub;
+    if (!sub || sub.length < 2) return 0;
+    const m = noise.fbm2(wx * 0.0016 + charAxes.temp * 91, wz * 0.0016 - charAxes.wet * 57, 3) * 0.5 + 0.5;
+    return Math.max(0, Math.min(sub.length - 1, (m * sub.length) | 0));
+  }
+  function subDefAt(wx, wz){
+    const sub = biome.sub;
+    return sub && sub.length ? sub[subBiomeAt(wx, wz)] : null;
+  }
+
   function treeAt(wx, wz){
     const r = hash2(wx, wz, 0xABCD);
-    if (r() >= biome.trees) return null;
+    const sd = subDefAt(wx, wz);
+    const mul = sd && sd.t !== undefined ? sd.t : 1;
+    if (r() >= biome.trees * mul) return null;
     const h = heightAt(wx, wz);
     if (h <= SEA + (biome.seaLift || 0)) return null;
     return { h, th: 4 + (r() * 3) | 0, rng: r };
@@ -340,6 +542,58 @@ const World = (() => {
     }
   }
 
+  // 生态专属地表装饰（列级确定性）：让每个生态的地表剪影各有签名
+  function decorColumn(c, lx, lz, wx, wz, h, cr){
+    const key = biome.key;
+    const put = (y, id) => { if (y > 0 && y < WORLD_H) c.data[lidx(lx, y, lz)] = id; };
+    if (key === 'desert' || key === 'amber'){
+      // 岩柱（金珀星地表为琥珀露头）
+      if (cr() < 0.006){
+        const n = 1 + ((cr() * 3) | 0);
+        for (let i = 1; i <= n; i++) put(h + i, key === 'amber' && i === 1 ? BLOCKS.amber.id : BLOCKS.stone.id);
+      }
+    } else if (key === 'frozen'){
+      // 冰锥（晶块尖 + 冰座）
+      if (cr() < 0.007){
+        const n = 1 + ((cr() * 3) | 0);
+        for (let i = 1; i <= n; i++) put(h + i, i === n ? BLOCKS.ice.id : BLOCKS.crystal.id);
+      }
+    } else if (key === 'volcanic' || key === 'obsidian' || key === 'ferrous'){
+      // 玄武岩/曜岩尖塔
+      if (cr() < 0.008){
+        const n = 1 + ((cr() * 3) | 0);
+        for (let i = 1; i <= n; i++) put(h + i, BLOCKS.basalt.id);
+      }
+    } else if (key === 'ashen'){
+      // 炭化死树残桩
+      if (cr() < 0.01){
+        put(h + 1, BLOCKS.log.id);
+        if (cr() < 0.4) put(h + 2, BLOCKS.log.id);
+      }
+    } else if (key === 'salt'){
+      // 盐晶柱
+      if (cr() < 0.006){
+        const n = 1 + ((cr() * 2) | 0);
+        for (let i = 1; i <= n; i++) put(h + i, BLOCKS.crystal.id);
+      }
+    } else if (key === 'murk'){
+      // 荧光蕈密集点缀
+      if (cr() < 0.05) put(h + 1, BLOCKS.glow_shroom.id);
+    } else if (key === 'redmoss'){
+      // 苔原岩脊
+      if (cr() < 0.005){
+        const n = 1 + ((cr() * 2) | 0);
+        for (let i = 1; i <= n; i++) put(h + i, BLOCKS.stone.id);
+      }
+    } else if (key === 'crystal'){
+      // 高晶塔
+      if (cr() < 0.008){
+        const n = 2 + ((cr() * 4) | 0);
+        for (let i = 1; i <= n; i++) put(h + i, BLOCKS.crystal.id);
+      }
+    }
+  }
+
   function genChunk(cx, cz){
     const k = ckey(cx, cz);
     let c = chunks.get(k);
@@ -348,6 +602,18 @@ const World = (() => {
     chunks.set(k, c);
     streamDirty = true;   // 新区块（外部触发时）需要下一帧扫描建网格
 
+    // v4 完整区块快照：优先于一切（已加载过的地形永远以落盘数据为准，生成器升级不再破坏旧世界）
+    if (savedChunks && savedChunks.has(strkey(cx, cz))){
+      const rec = savedChunks.get(strkey(cx, cz));
+      if (rleDecode(c.data, rec.data)){
+        c.fromSave = true;
+        c.modified = !!rec.mod;   // 玩家改过的区块保留 modified 标记（联机上传/增量同步依据）
+        c.needSave = false;
+        markNeighborsDirty(cx, cz);
+        return c;
+      }
+      console.warn('[world] 区块快照损坏，重新生成', cx, cz);
+    }
     // 存档区块直接还原（存档键为字符串格式）
     if (savedMods && savedMods[strkey(cx, cz)]){
       const rle = savedMods[strkey(cx, cz)];
@@ -357,6 +623,7 @@ const World = (() => {
         i += rle[p];
       }
       c.modified = true;
+      c.needSave = false;   // 服务器权威（联机客人路径），本机不落盘
       markNeighborsDirty(cx, cz);
       return c;
     }
@@ -368,28 +635,33 @@ const World = (() => {
     const noBeach = ['sand','basalt','ash','salt','obsidian','rust','hive','amber'].includes(biome.grass);
     const floraList = biome.flora || ['sodium_plant', 'oxygen_plant', 'fern'];
 
-    // 地层 + 水 + 花草 + 露头矿
+    // 地层 + 水（或熔岩）+ 花草 + 露头矿 + 生态专属装饰
     for (let lz = 0; lz < CHUNK; lz++){
       for (let lx = 0; lx < CHUNK; lx++){
         const wx = x0 + lx, wz = z0 + lz;
         const h = heightAt(wx, wz);
+        const sd = subDefAt(wx, wz);
+        const surfId = sd && sd.g ? BLOCKS[sd.g].id : grassId;
         const canCave = h > SEAB + 1;      // 近水岸不挖洞，避免悬空水
+        const cr = hash2(wx, wz, 0x51CA);  // 列级确定性随机（洞穴/装饰共用）
         for (let y = 0; y <= h; y++){
           let id;
           if (y === 0) id = BLOCKS.barrier.id;
-          else if (y === h) id = (h < SEAB + 1 && !noBeach) ? BLOCKS.sand.id : grassId;
+          else if (y === h) id = (h < SEAB + 1 && !noBeach) ? BLOCKS.sand.id : surfId;
           else if (y > h - 3) id = dirtId;
           else if (y < 10) id = deepId;
           else id = stoneId;
-          // 洞穴雕刻（保留地表 2 层与基岩）
-          if (canCave && y >= 3 && y <= h - 3 && isCave(wx, y, wz)) id = 0;
+          // 洞穴雕刻（保留地表 2 层与基岩；晶洞内壁缀晶簇）
+          if (canCave && y >= 3 && y <= h - 3 && isCave(wx, y, wz)){
+            id = (biome.key === 'crystal' && cr() < 0.12) ? BLOCKS.crystal.id : 0;
+          }
           c.data[lidx(lx, y, lz)] = id;
         }
-        if (h < SEAB && !biome.dry && biome.grass !== 'basalt'){
+        // 水域：常规水或熔岩湖（volcanic 以熔岩观感水体覆盖低地）
+        if (h < SEAB && (!biome.dry || biome.lava)){
           for (let y = h + 1; y <= SEAB; y++) c.data[lidx(lx, y, lz)] = BLOCKS.water.id;
         }
         // 列级装饰（确定性）
-        const cr = hash2(wx, wz, 0x51CA);
         const rv = cr();
         if (h > SEAB){
           if (rv < 0.0015){                                 // 地表矿露头
@@ -401,10 +673,34 @@ const World = (() => {
             const ch = 1 + ((cr() * 3) | 0);
             for (let y = 1; y <= ch && h + y < WORLD_H; y++)
               c.data[lidx(lx, h + y, lz)] = BLOCKS.crystal.id;
-          } else if (rv < 0.0015 + biome.flowers && !treeAt(wx, wz) && c.data[lidx(lx, h, lz)] === grassId){
+          } else if (rv < 0.0015 + biome.flowers * (sd && sd.f !== undefined ? sd.f : 1) && !treeAt(wx, wz) && c.data[lidx(lx, h, lz)] === surfId){
             const pick = floraList[(cr() * floraList.length) | 0];
             c.data[lidx(lx, h + 1, lz)] = BLOCKS[pick].id;
           }
+          decorColumn(c, lx, lz, wx, wz, h, cr);
+        } else if (biome.key === 'ocean'){
+          // 浅海珊瑚礁（水底点缀）
+          if (cr() < 0.045 && h + 1 < WORLD_H){
+            const pick = cr() < 0.5 ? 'glow_shroom' : (cr() < 0.5 ? 'sodium_plant' : 'fern');
+            c.data[lidx(lx, h + 1, lz)] = BLOCKS[pick].id;
+          }
+        }
+      }
+    }
+    // 浮岛（alien）：独立高度层的悬空岩块（与地面保持空隙）
+    if (biome.key === 'alien'){
+      for (let lz = 0; lz < CHUNK; lz++){
+        for (let lx = 0; lx < CHUNK; lx++){
+          const wx = x0 + lx, wz = z0 + lz;
+          const fl = floatIslandAt(noise, wx, wz);
+          if (!fl) continue;
+          const gh = heightAt(wx, wz);
+          if (gh + 6 > fl.base) continue;   // 低洼区才悬空，避免嵌入山体
+          for (let y = fl.base; y < fl.base + fl.thick && y < WORLD_H; y++){
+            c.data[lidx(lx, y, lz)] = y === fl.base ? BLOCKS.alien.id : (y < fl.base + 3 ? dirtId : stoneId);
+          }
+          if (fl.base + fl.thick < WORLD_H && hash2(wx, wz, 0xF10A)() < 0.4)
+            c.data[lidx(lx, fl.base + fl.thick, lz)] = BLOCKS.alien.id;   // 岛顶菌毯
         }
       }
     }
@@ -480,6 +776,7 @@ const World = (() => {
       }
     }
     stampStructures(c, x0, z0);   // 村庄/遗迹（在植被之后压印，保证内部净空）
+    c.needSave = true;            // 程序化生成的区块：写入完整快照（Minecraft 式落盘）
     markNeighborsDirty(cx, cz);
     return c;
   }
@@ -508,12 +805,20 @@ const World = (() => {
     return t.side || t.all || t.top;
   }
 
+  // 水体染色（按生态：海洋深蓝/沼绿/盐水浅蓝/熔岩橙红）
+  function waterTintRGB(){
+    const t = biome.waterTint;
+    if (!t) return [1, 1, 1];
+    return [((t >> 16) & 255) / 255, ((t >> 8) & 255) / 255, (t & 255) / 255];
+  }
+
   function buildChunkMesh(c){
     const fresh = !c.mesh && !c.waterMesh;   // 全新出现的区块（含卸载后回归）→ 淡入
     if (c.mesh){ group.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh = null; }
     if (c.waterMesh){ group.remove(c.waterMesh); c.waterMesh.geometry.dispose(); c.waterMesh = null; }
     const pos = [], nor = [], uv = [], col = [], ind = [];
-    const wpos = [], wnor = [], wuv = [], wind = [];
+    const wpos = [], wnor = [], wuv = [], wcol = [], wind = [];
+    const wt = waterTintRGB();
     const x0 = c.cx * CHUNK, z0 = c.cz * CHUNK;
     c.lamps = null;   // 发光方块位置（点光源池取用）
 
@@ -561,6 +866,7 @@ const World = (() => {
               P.push(x + cnr[0], yy, z + cnr[2]);
               N.push(face.dir[0], face.dir[1], face.dir[2]);
               if (!isWater){ const s = face.shade * (def.glow ? 2.2 : 1); col.push(s, s, s); }   // 光源方块自体全亮
+              else { const sh = 0.72 + face.shade * 0.28; wcol.push(wt[0] * sh, wt[1] * sh, wt[2] * sh); }
             }
             U.push(t.u0, t.v1, t.u0, t.v0, t.u1, t.v1, t.u1, t.v0);
             I.push(b, b + 1, b + 2, b + 2, b + 1, b + 3);
@@ -589,6 +895,7 @@ const World = (() => {
       g.setAttribute('position', new THREE.Float32BufferAttribute(wpos, 3));
       g.setAttribute('normal', new THREE.Float32BufferAttribute(wnor, 3));
       g.setAttribute('uv', new THREE.Float32BufferAttribute(wuv, 2));
+      g.setAttribute('color', new THREE.Float32BufferAttribute(wcol, 3));   // 按生态水体染色
       g.setIndex(wind);
       g.computeBoundingSphere();
       g.boundingSphere.radius += 60;
@@ -753,6 +1060,11 @@ const World = (() => {
     for (let y = WORLD_H - 1; y >= 0; y--){
       const d = getDef(x, y, z);
       if (d.solid || d.liquid){
+        if (d.liquid && biome.waterTint){
+          const wt = waterTintRGB();
+          const sh = 0.72 + (y - SEA) * 0.012;
+          return 'rgb(' + Math.min(255, (wt[0] * 255 * sh) | 0) + ',' + Math.min(255, (wt[1] * 255 * sh) | 0) + ',' + Math.min(255, (wt[2] * 255 * sh) | 0) + ')';
+        }
         const col = tileAvgColor(tileFor(d, 2));
         const sh = 0.72 + (y - 14) * 0.012;
         return 'rgb(' + Math.min(255, (col[0] * sh) | 0) + ',' + Math.min(255, (col[1] * sh) | 0) + ',' + Math.min(255, (col[2] * sh) | 0) + ')';
@@ -762,23 +1074,37 @@ const World = (() => {
   }
   // 纯噪声地表高度（不生成区块）：整球浮雕位移用；水面返回海平面
   function mapHeightAt(x, z){
-    if (!noise || !biome) return 16;
-    const h = heightAt(Math.floor(x), Math.floor(z));
+    if (!noise || !biome) return SEA_Y;
+    const wx = Math.floor(x), wz = Math.floor(z);
+    const h = heightAt(wx, wz);
     const SEAB = SEA + (biome.seaLift || 0);
-    if (h < SEAB && !biome.dry && biome.grass !== 'basalt') return SEAB;
+    if (h < SEAB && (!biome.dry || biome.lava)) return SEAB;
+    // 浮岛在太空视角呈高柱（体素皮肤接管后还原悬空）
+    if (biome.key === 'alien'){
+      const fl = floatIslandAt(noise, wx, wz);
+      if (fl && h + 6 <= fl.base) return fl.base + fl.thick;
+    }
     return h;
   }
   // 纯噪声地表颜色（不生成区块）：把整颗星球的体素地形“模拟渲染”到球面贴图
   const NO_BEACH = ['sand', 'basalt', 'ash', 'salt', 'obsidian', 'rust', 'hive', 'amber'];
   function mapColorRGB(x, z){
     if (!noise || !biome) return [90, 90, 90];
-    const h = heightAt(Math.floor(x), Math.floor(z));
+    const wx = Math.floor(x), wz = Math.floor(z);
+    const h = heightAt(wx, wz);
     const SEAB = SEA + (biome.seaLift || 0);
+    const sd = subDefAt(wx, wz);
     let def, y;
-    if (h < SEAB && !biome.dry && biome.grass !== 'basalt'){
+    if (h < SEAB && (!biome.dry || biome.lava)){
+      if (biome.waterTint){
+        const wt = waterTintRGB();
+        const depth = Math.max(0, SEAB - h);
+        const sh = 0.78 - depth * 0.008;   // 深水更深色
+        return [Math.min(255, wt[0] * 255 * sh), Math.min(255, wt[1] * 255 * sh), Math.min(255, wt[2] * 255 * sh)];
+      }
       def = BLOCKS.water; y = SEAB;
     } else {
-      def = (h < SEAB + 1 && !NO_BEACH.includes(biome.grass)) ? BLOCKS.sand : BLOCKS[biome.grass];
+      def = (h < SEAB + 1 && !NO_BEACH.includes(biome.grass)) ? BLOCKS.sand : BLOCKS[sd && sd.g ? sd.g : biome.grass];
       y = h;
     }
     const col = tileAvgColor(tileFor(def, 2));
@@ -912,6 +1238,53 @@ const World = (() => {
     out.push(run, cur);
     return out;
   }
+  function rleEncode16(data){
+    // 紧凑二进制 RLE：[run, blockId] 对（run ≤ 65535，与 rleEncode 同一格式）
+    return Uint16Array.from(rleEncode(data));
+  }
+  function rleDecode(data, pairs){
+    // 成功返回 true；总长不匹配（格式损坏 / 世界高度变更）返回 false
+    if (!pairs || pairs.length < 2) return false;
+    let total = 0;
+    for (let p = 0; p < pairs.length; p += 2) total += pairs[p];
+    if (total !== data.length) return false;
+    let i = 0;
+    for (let p = 0; p < pairs.length; p += 2){
+      data.fill(pairs[p + 1], i, i + pairs[p]);
+      i += pairs[p];
+    }
+    return true;
+  }
+  // ---------- 完整区块落盘队列（Minecraft 式：加载过的区块完整保存）----------
+  function pendingSaveCount(){
+    let n = 0;
+    for (const c of chunks.values()) if (c.needSave) n++;
+    return n;
+  }
+  function takePendingSave(max){
+    const out = [];
+    if (max <= 0) return out;
+    // 修改过的区块优先（正确性关键），其余按遍历顺序（Map 为插入序 ≈ 生成序）
+    for (const c of chunks.values()){
+      if (out.length >= max) break;
+      if (c.needSave && c.modified){ out.push({ cx: c.cx, cz: c.cz, mod: true, rle: rleEncode16(c.data) }); c.needSave = false; }
+    }
+    for (const c of chunks.values()){
+      if (out.length >= max) break;
+      if (c.needSave){ out.push({ cx: c.cx, cz: c.cz, mod: false, rle: rleEncode16(c.data) }); c.needSave = false; }
+    }
+    return out;
+  }
+  function requeueSave(list){
+    for (const e of list){
+      const c = chunks.get(ckey(e.cx, e.cz));
+      if (c) c.needSave = true;
+    }
+  }
+  function chunkIsSaved(cx, cz){
+    const c = chunks.get(ckey(cx, cz));
+    return !!(c && c.fromSave);
+  }
   function serialize(){
     const mods = {};
     for (const c of chunks.values()){
@@ -929,12 +1302,15 @@ const World = (() => {
     if (!c || !c.modified) return null;
     return rleEncode(c.data);
   }
-  function init(biomeKey, worldSeed, mods){
+  function init(biomeKey, worldSeed, mods, savedChunksMap){
     dispose();
     seed = worldSeed;
     biome = BIOMES[biomeKey];
+    biome.key = biomeKey;
     noise = makeNoise(worldSeed);
+    computeCharAxes();
     savedMods = mods || null;
+    savedChunks = savedChunksMap || null;
     chunks = new Map();
     group = new THREE.Group();
     streamDirty = true; lastScCx = 1e9; lastScCz = 1e9;   // 新世界：唤醒流式扫描
@@ -963,10 +1339,11 @@ const World = (() => {
     }
     chunks = new Map();
     savedMods = null;
+    savedChunks = null;
   }
 
   return {
-    CHUNK, WORLD_H, SEA,
+    CHUNK, WORLD_H, SEA, SEA_Y,
     get biome(){ return biome; },
     get group(){ return group; },
     get seed(){ return seed; },
@@ -974,6 +1351,7 @@ const World = (() => {
     get farMesh(){ return ensureFarMesh(); },
     init, pregen, stream, update, get, set, getDef, raycast, topAt, findSpawn,
     serialize, serializeChunk, chunkModified, dispose, inBounds, setCurve, setScanPulse, surfaceColorAt, mapColorAt, mapColorRGB, mapHeightAt,
+    pendingSaveCount, takePendingSave, requeueSave, chunkIsSaved,
     setViewDist, setFarDist, setShadows,
     get structures(){ return structures; },
   };

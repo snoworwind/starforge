@@ -12,7 +12,7 @@ __SF_TEST__.suite('world', function (t, api) {
   });
 
   t.test('setBlock / blockKeyAt roundtrip', function () {
-    var x = 60, z = 60, y = api.topAt(x, z) + 1;
+    var x = 60, z = 60, y = Math.min(api.topAt(x, z) + 1, 95);
     api.setBlock(x, y, z, 'stone');
     A.eq(api.blockKeyAt(x, y, z), 'stone', 'stone placed');
     api.setBlock(x, y, z, 'air');
@@ -20,8 +20,8 @@ __SF_TEST__.suite('world', function (t, api) {
   });
 
   t.test('topAt within world height', function () {
-    A.between(api.topAt(0, 0), 0, 63, 'height 0..63');
-    A.between(api.topAt(-120, 340), 0, 63, 'height far 0..63');
+    A.between(api.topAt(0, 0), 0, 95, 'height 0..95');
+    A.between(api.topAt(-120, 340), 0, 95, 'height far 0..95');
   });
 
   t.test('findSpawn on non-liquid ground', function () {

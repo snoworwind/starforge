@@ -187,32 +187,64 @@ for (const k in TECH) TECH[k].id = k;
 
 // ================= 星球生态 =================
 const BIOMES = {
-  lush:   { name: '翠绿星球', grass: 'grass', dirt: 'dirt', deep: 'stone', sky: [0.48, 0.72, 0.95], fog: [0.7, 0.85, 1.0], haz: null, hazName: '宜居', trees: 0.012, flowers: 0.02, oreMul: 1.0, tint: 0x7cc44f },
-  desert: { name: '灼热荒漠', grass: 'sand', dirt: 'sand', deep: 'stone', sky: [0.95, 0.75, 0.5], fog: [0.98, 0.85, 0.65], haz: 'heat', hazName: '☀ 极端高温', hazRate: 1.6, trees: 0.001, flowers: 0.008, oreMul: 1.3, tint: 0xe0d29a },
-  frozen: { name: '冰封世界', grass: 'snow', dirt: 'dirt', deep: 'ice', sky: [0.7, 0.8, 0.95], fog: [0.85, 0.9, 1.0], haz: 'cold', hazName: '❄ 酷寒', hazRate: 1.4, trees: 0.004, flowers: 0.006, oreMul: 1.2, tint: 0xf2f6fa },
-  volcanic:{ name: '熔火之地', grass: 'basalt', dirt: 'basalt', deep: 'basalt', sky: [0.5, 0.28, 0.2], fog: [0.6, 0.4, 0.3], haz: 'heat', hazName: '🌋 炽热大气', hazRate: 2.2, trees: 0.0, flowers: 0.004, oreMul: 2.0, tint: 0x3a3a42, dry: true },
-  alien:  { name: '异星菌境', grass: 'alien', dirt: 'dirt', deep: 'stone', sky: [0.45, 0.3, 0.6], fog: [0.6, 0.45, 0.75], haz: 'toxic', hazName: '☣ 剧毒孢子', hazRate: 1.8, trees: 0.008, flowers: 0.03, oreMul: 1.5, tint: 0x9a5fd0 },
+  lush:   { name: '翠绿星球', grass: 'grass', dirt: 'dirt', deep: 'stone', sky: [0.48, 0.72, 0.95], fog: [0.7, 0.85, 1.0], haz: null, hazName: '宜居', trees: 0.012, flowers: 0.02, oreMul: 1.0, tint: 0x7cc44f,
+    terrain: { type: 'continental' }, waterTint: 0x3e6bd6,
+    sub: [{ t: 1, f: 1 }, { t: 0.25, f: 2.2 }, { g: 'murk', t: 0.6, f: 1.2 }] },          // 森林 / 草原 / 湿地
+  desert: { name: '灼热荒漠', grass: 'sand', dirt: 'sand', deep: 'stone', sky: [0.95, 0.75, 0.5], fog: [0.98, 0.85, 0.65], haz: 'heat', hazName: '☀ 极端高温', hazRate: 1.6, trees: 0.001, flowers: 0.008, oreMul: 1.3, tint: 0xe0d29a,
+    terrain: { type: 'dunes' }, waterTint: 0x6db8c8,
+    sub: [{ t: 1, f: 1 }, { g: 'stone', t: 0.05, f: 1.6 }] },                            // 沙海 / 岩漠
+  frozen: { name: '冰封世界', grass: 'snow', dirt: 'dirt', deep: 'ice', sky: [0.7, 0.8, 0.95], fog: [0.85, 0.9, 1.0], haz: 'cold', hazName: '❄ 酷寒', hazRate: 1.4, trees: 0.004, flowers: 0.006, oreMul: 1.2, tint: 0xf2f6fa,
+    terrain: { type: 'glacial', caves: 'ice' }, waterTint: 0x9fd4e8,
+    sub: [{ t: 1, f: 1 }, { g: 'ice', t: 0.1, f: 0.5 }] },                               // 冰原 / 冰架
+  volcanic:{ name: '熔火之地', grass: 'basalt', dirt: 'basalt', deep: 'basalt', sky: [0.5, 0.28, 0.2], fog: [0.6, 0.4, 0.3], haz: 'heat', hazName: '🌋 炽热大气', hazRate: 2.2, trees: 0.0, flowers: 0.004, oreMul: 2.0, tint: 0x3a3a42, dry: true,
+    terrain: { type: 'volcanic', caves: 'lava_tubes' }, waterTint: 0xff6a1a, lava: true,  // 熔岩湖（液态伤害水体）
+    sub: [{ t: 0, f: 1 }, { g: 'basalt', t: 0, f: 0.3 }] },
+  alien:  { name: '异星菌境', grass: 'alien', dirt: 'dirt', deep: 'stone', sky: [0.45, 0.3, 0.6], fog: [0.6, 0.45, 0.75], haz: 'toxic', hazName: '☣ 剧毒孢子', hazRate: 1.8, trees: 0.008, flowers: 0.03, oreMul: 1.5, tint: 0x9a5fd0,
+    terrain: { type: 'alien' }, waterTint: 0x7a4ad8,
+    sub: [{ t: 1, f: 1 }, { g: 'alien', t: 0.15, f: 2.5 }] },                            // 菌林 / 孢子荒原（浮岛）
   // ---- 新星球类型 ----
-  ocean:  { name: '蔚蓝海球', grass: 'grass', dirt: 'sand', deep: 'stone', sky: [0.35, 0.62, 0.88], fog: [0.6, 0.8, 0.95], haz: null, hazName: '宜居', trees: 0.007, flowers: 0.014, oreMul: 0.9, tint: 0x3e8ed6, seaLift: 7 },
-  crystal:{ name: '晶簇冻土', grass: 'snow', dirt: 'dirt', deep: 'ice', sky: [0.55, 0.75, 0.85], fog: [0.75, 0.9, 0.95], haz: 'cold', hazName: '❄ 晶界酷寒', hazRate: 1.7, trees: 0, flowers: 0.004, oreMul: 1.4, tint: 0x7fe8e0, crystals: 0.02 },
-  fungal: { name: '巨菌之森', grass: 'alien', dirt: 'dirt', deep: 'stone', sky: [0.5, 0.38, 0.55], fog: [0.68, 0.55, 0.72], haz: 'toxic', hazName: '☣ 菌孢瘴气', hazRate: 1.3, trees: 0.010, flowers: 0.02, oreMul: 1.2, tint: 0xc06fd8, mushroom: true },
-  ashen:  { name: '灰烬荒原', grass: 'ash', dirt: 'ash', deep: 'basalt', sky: [0.45, 0.42, 0.4], fog: [0.6, 0.58, 0.55], haz: 'rad', hazName: '☢ 辐射尘暴', hazRate: 2.0, trees: 0, flowers: 0.003, oreMul: 1.8, tint: 0x8a8a8a },
+  ocean:  { name: '蔚蓝海球', grass: 'grass', dirt: 'sand', deep: 'stone', sky: [0.35, 0.62, 0.88], fog: [0.6, 0.8, 0.95], haz: null, hazName: '宜居', trees: 0.007, flowers: 0.014, oreMul: 0.9, tint: 0x3e8ed6, seaLift: 7,
+    terrain: { type: 'archipelago' }, waterTint: 0x2b62c8,
+    sub: [{ t: 1, f: 1 }, { g: 'sand', t: 0.8, f: 1.5 }] },                              // 群岛 / 沙洲
+  crystal:{ name: '晶簇冻土', grass: 'snow', dirt: 'dirt', deep: 'ice', sky: [0.55, 0.75, 0.85], fog: [0.75, 0.9, 0.95], haz: 'cold', hazName: '❄ 晶界酷寒', hazRate: 1.7, trees: 0, flowers: 0.004, oreMul: 1.4, tint: 0x7fe8e0, crystals: 0.02,
+    terrain: { type: 'glacial', caves: 'geodes' }, waterTint: 0x8fd8e8,
+    sub: [{ t: 0, f: 1 }, { g: 'ice', t: 0, f: 0.5 }] },
+  fungal: { name: '巨菌之森', grass: 'alien', dirt: 'dirt', deep: 'stone', sky: [0.5, 0.38, 0.55], fog: [0.68, 0.55, 0.72], haz: 'toxic', hazName: '☣ 菌孢瘴气', hazRate: 1.3, trees: 0.010, flowers: 0.02, oreMul: 1.2, tint: 0xc06fd8, mushroom: true,
+    terrain: { type: 'continental' }, waterTint: 0x6a4a8a,
+    sub: [{ t: 1, f: 1 }, { g: 'murk', t: 0.5, f: 1.8 }] },
+  ashen:  { name: '灰烬荒原', grass: 'ash', dirt: 'ash', deep: 'basalt', sky: [0.45, 0.42, 0.4], fog: [0.6, 0.58, 0.55], haz: 'rad', hazName: '☢ 辐射尘暴', hazRate: 2.0, trees: 0, flowers: 0.003, oreMul: 1.8, tint: 0x8a8a8a,
+    terrain: { type: 'flats' }, waterTint: 0x9a7a5a,
+    sub: [{ t: 0, f: 1 }, { g: 'basalt', t: 0, f: 0.2 }] },
   // ---- 更多星球类型 ----
   amber:  { name: '金珀沙海', grass: 'amber', dirt: 'sand', deep: 'stone', sky: [0.92, 0.72, 0.42], fog: [0.98, 0.85, 0.6], haz: 'heat', hazName: '☀ 灼金热浪', hazRate: 1.2, trees: 0.001, flowers: 0.006, oreMul: 1.1, tint: 0xe0a63a,
+    terrain: { type: 'dunes' }, waterTint: 0xd8b048,
+    sub: [{ t: 1, f: 1 }, { g: 'amber', t: 0.3, f: 1.2 }],
     desc: '远古树脂凝成的琥珀荒漠，岩层中封存着黄金与史前碳。' },
   ferrous:{ name: '磁暴铁原', grass: 'rust', dirt: 'rust', deep: 'basalt', sky: [0.55, 0.4, 0.32], fog: [0.7, 0.55, 0.45], haz: 'storm', hazName: '⚡ 磁暴侵蚀', hazRate: 1.5, trees: 0, flowers: 0.004, oreMul: 1.6, tint: 0xa86a4a,
+    terrain: { type: 'shatter' }, waterTint: 0x8a5a3a,
+    sub: [{ t: 0, f: 1 }, { g: 'rust', t: 0, f: 0.4 }],
     desc: '整颗星球是一块生锈的陨铁，磁暴撕扯着每一件金属装备。' },
   murk:   { name: '荧光沼泽', grass: 'murk', dirt: 'dirt', deep: 'stone', sky: [0.16, 0.3, 0.28], fog: [0.25, 0.42, 0.38], haz: 'toxic', hazName: '☣ 沼气瘴雾', hazRate: 1.1, trees: 0.004, flowers: 0.035, oreMul: 1.0, tint: 0x2e8a72, seaLift: 4, mushroom: true,
+    terrain: { type: 'swamp', caves: 'swamp_caves' }, waterTint: 0x2f7a5a,
+    sub: [{ t: 1, f: 1 }, { g: 'murk', t: 0.3, f: 2.2 }],
     flora: ['glow_shroom', 'glow_shroom', 'oxygen_plant'],
     desc: '永暮的湿地被荧光蕈照亮，是氧气与钠的天然温室。' },
   salt:   { name: '盐晶滩', grass: 'salt', dirt: 'salt', deep: 'stone', sky: [0.8, 0.85, 0.9], fog: [0.92, 0.95, 0.98], haz: null, hazName: '宜居', trees: 0, flowers: 0.008, oreMul: 1.0, tint: 0xe8ecf0,
+    terrain: { type: 'flats' }, waterTint: 0xcfe8f0,
+    sub: [{ t: 0, f: 1 }, { g: 'sand', t: 0, f: 0.5 }],
     flora: ['sodium_plant', 'sodium_plant', 'fern'],
     desc: '一望无际的白色盐原，脚下每一块地面都是钠矿。' },
   obsidian:{ name: '黑曜熔壁', grass: 'obsidian', dirt: 'obsidian', deep: 'basalt', sky: [0.28, 0.22, 0.35], fog: [0.4, 0.32, 0.48], haz: 'heat', hazName: '☀ 曜岩余温', hazRate: 1.9, trees: 0, flowers: 0.002, oreMul: 1.7, tint: 0x2a2a35, dry: true,
+    terrain: { type: 'shatter' }, waterTint: 0x4a3a6a,
+    sub: [{ t: 0, f: 1 }, { g: 'basalt', t: 0, f: 0.2 }],
     desc: '冷却的熔岩玻璃覆盖全球，坚硬、锋利、闪着幽紫的光。' },
   redmoss:{ name: '红藓高原', grass: 'redmoss', dirt: 'dirt', deep: 'stone', sky: [0.75, 0.5, 0.42], fog: [0.88, 0.68, 0.58], haz: 'cold', hazName: '❄ 稀薄冷风', hazRate: 1.1, trees: 0.003, flowers: 0.012, oreMul: 1.15, tint: 0xc25a48,
+    terrain: { type: 'mesa' }, waterTint: 0xb06050,
+    sub: [{ t: 1, f: 1 }, { g: 'redmoss', t: 0.4, f: 1.6 }],
     desc: '猩红苔藓吞没了古老山脉，像一颗永远处于黄昏的星球。' },
   hive:   { name: '蜂窝穹丘', grass: 'hive', dirt: 'hive', deep: 'stone', sky: [0.85, 0.6, 0.3], fog: [0.95, 0.75, 0.45], haz: 'toxic', hazName: '☣ 信息素迷雾', hazRate: 1.5, trees: 0, flowers: 0.01, oreMul: 1.3, tint: 0xd8862a,
+    terrain: { type: 'hive' }, waterTint: 0xd89830,
+    sub: [{ t: 0, f: 1 }, { g: 'hive', t: 0, f: 0.5 }],
     desc: '不知是谁筑起了覆盖星球的六角巢穴——而它们还在里面。' },
 };
 

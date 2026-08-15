@@ -248,6 +248,45 @@ __SF_TEST__.suite('net', function (t, api) {
     a.close(); b.close();
   });
 
+  t.test('pos 中继清洗：超长坐标数组/超大外观/异常动作位不被放大转发', async function () {
+    var a = wsClient(); await a.open;
+    // 旁观者被动收集所有 pos 消息
+    var seen = [];
+    var orig = a.ws.onmessage;
+    a.ws.onmessage = function (e) {
+      if (orig) orig.call(a.ws, e);
+      try { var m = JSON.parse(e.data); if (m.t === 'pos') seen.push(m); } catch (err) {}
+    };
+    a.send({ t: 'hello', v: 3, name: '旁观甲', role: 'guest' });
+    await a.next(function (m) { return m.t === 'init'; });
+    var b = wsClient(); await b.open;
+    b.send({ t: 'hello', v: 3, name: '中继乙', role: 'guest' });
+    var bInit = await b.next(function (m) { return m.t === 'init'; });
+    var bId = bInit.you.id;
+    // 1) 超长坐标数组：整体拒绝（不得中继，也不得覆盖服务器记录的最后位置）
+    var big = [1, 2, 3];
+    var i;
+    for (i = 0; i < 2000; i++) big.push(i);
+    b.send({ t: 'pos', planet: 0, st: 'planet', p: big, yaw: 0 });
+    // 2) 合法坐标 + 超大外观：位置正常中继，app 被剥离
+    var bigApp = { suit: '#111111', junk: '' };
+    for (i = 0; i < 5000; i++) bigApp.junk += 'x';
+    b.send({ t: 'pos', planet: 0, st: 'planet', p: [21, 22, 23], yaw: 0.5, app: bigApp });
+    // 3) 异常动作位（对象）：act 被剥离
+    b.send({ t: 'pos', planet: 0, st: 'planet', p: [31, 32, 33], yaw: 0.5, act: { evil: 1 } });
+    await sleep(600);
+    var normal = seen.filter(function (m) { return m.id === bId; });
+    A.eq(normal.some(function (m) { return m.p.length > 3; }), false, '超长坐标数组未被中继');
+    A.eq(normal.some(function (m) { return m.p[0] === 1; }), false, '超长坐标消息整体被丢弃');
+    var okApp = normal.filter(function (m) { return m.p[0] === 21; })[0];
+    A.ok(okApp, '合法坐标正常中继');
+    A.eq(okApp.app, undefined, '超大外观被剥离');
+    var okAct = normal.filter(function (m) { return m.p[0] === 31; })[0];
+    A.ok(okAct, '合法坐标正常中继（act 测试）');
+    A.eq(okAct.act, undefined, '异常动作位被剥离');
+    a.close(); b.close();
+  });
+
   t.test('服务器权威昼夜时间广播', async function () {
     var a = wsClient(); await a.open;
     a.send({ t: 'hello', v: 3, name: '时间甲', role: 'guest' });

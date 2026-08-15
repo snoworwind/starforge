@@ -59,6 +59,18 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     slider.oninput({ target: slider });
   });
 
+  t.test('入口版本自检：基准跟随 __V_MAIN，不误报「文件版本不齐」', function () {
+    var badge = document.getElementById('verBadge');
+    A.ok(badge, 'version badge element exists');
+    var main = window.__V_MAIN || '';
+    A.ok(main, '__V_MAIN defined');
+    var ok = !/文件版本不齐/.test(badge.textContent);
+    A.ok(ok, 'badge reports ok, got: ' + badge.textContent);
+    A.ok(badge.textContent.indexOf(main) >= 0, 'badge mentions current module version');
+    A.eq(window.__V_STATION, main, 'station version in sync');
+    A.eq(window.__V_SPACE, main, 'space version in sync');
+  });
+
   t.test('机器面板按状态签名节流重建（不打断交互）', function () {
     var y = api.topAt(60, 60) + 1;
     api.placeMachine('chest', 60, y, 60, 0);

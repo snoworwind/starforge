@@ -1234,9 +1234,10 @@ const World = (() => {
   }
   function findSpawn(){
     const SEAB = SEA + (biome.seaLift || 0);
+    const rnd = mulberry32((seed ^ 0xB00B5) >>> 0);   // 种子派生：同一世界种子出生点确定（联机/复现一致）
     for (let r = 0; r < 140; r++){
       const range = 20 + r;                       // 海洋星球逐步扩大搜索
-      const x = ((Math.random() * range * 2 - range) | 0), z = ((Math.random() * range * 2 - range) | 0);
+      const x = ((rnd() * range * 2 - range) | 0), z = ((rnd() * range * 2 - range) | 0);
       const y = topAt(x, z);
       if (y > SEAB && getDef(x, y, z).id !== BLOCKS.water.id) return new THREE.Vector3(x + 0.5, y + 2, z + 0.5);
     }

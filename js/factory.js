@@ -146,6 +146,20 @@ const Factory = (() => {
       m.animParts = { lamp };
       return g;
     },
+    medbay(m){
+      const g = new THREE.Group();
+      // 治疗舱：底座 + 半透明舱罩 + 绿色十字 + 状态灯
+      const base = box(0.94, 0.3, 0.62, M.metalDark); base.position.y = 0.15; g.add(base);
+      const bed = box(0.86, 0.14, 0.54, M.metal); bed.position.y = 0.37; g.add(bed);
+      const domeMat = new THREE.MeshLambertMaterial({ color: 0x8fd8e8, transparent: true, opacity: 0.35 });
+      const dome = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.5, 8, 1, true), domeMat);
+      dome.rotation.x = Math.PI / 2; dome.position.y = 0.66; g.add(dome);
+      const crossV = box(0.1, 0.3, 0.06, M.glowGreen); crossV.position.set(0, 0.78, 0.22); g.add(crossV);
+      const crossH = box(0.24, 0.1, 0.06, M.glowGreen); crossH.position.set(0, 0.78, 0.22); g.add(crossH);
+      const lamp = box(0.12, 0.12, 0.12, M.glowOff); lamp.position.set(0.35, 0.42, 0); g.add(lamp);
+      m.animParts = { lamp, crossV, crossH };
+      return g;
+    },
     lumberbot(m){
       const g = new THREE.Group();
       // 充电桩：底座 + 悬浮环 + 能量柱
@@ -366,10 +380,11 @@ const Factory = (() => {
       case 'lumberbot':return { cargo: 0 };
       case 'collector':return { slots: new Array(12).fill(null) };
       case 'launchpad':return {};
+      case 'medbay':   return { healAcc: 0 };
       default: return {};
     }
   }
-  const POWER_USE = { miner: 8, assembler: 12, refinery: 20 };
+  const POWER_USE = { miner: 8, assembler: 12, refinery: 20, medbay: 6 };
   const POWER_GEN = { solar: 10, reactor: 100, burner: 25 };
 
   // ---------- 放置 / 拆除 ----------
@@ -922,6 +937,8 @@ const Factory = (() => {
         const d = m.data;
         const r = d && d.recipe ? RECIPE_BY_ID[d.recipe] : null;
         if (r && Object.keys(r.in).every(k => (d.in[k] || 0) >= r.in[k])) use += POWER_USE[m.type];
+      } else if (m.type === 'medbay'){
+        if (medbayWants(m)) use += POWER_USE.medbay;
       }
     }
     const sat = use > 0 ? Math.min(1, gen / use) : 1;
@@ -935,6 +952,32 @@ const Factory = (() => {
         case 'assembler': crafterTick(m, dt, sat, 'assembler'); break;
         case 'refinery': crafterTick(m, dt, sat, 'refinery'); break;
         case 'collector': collectorTick(m); break;
+        case 'medbay': medbayTick(m, dt, sat); break;
+      }
+    }
+  }
+
+  // ---------- 医疗站：站近自动治疗（钠+氧气 → 生命）----------
+  function medbayWants(m){
+    const p = window.Player;
+    if (!p || p.dead || p.stats.hp >= p.stats.hpMax) return false;
+    const dx = p.pos.x - (m.x + 0.5), dz = p.pos.z - (m.z + 0.5);
+    if (dx * dx + dz * dz > 16) return false;   // 4 格半径
+    return p.countItem('sodium') >= 1 && p.countItem('oxygen') >= 1;
+  }
+  function medbayTick(m, dt, sat){
+    const d = m.data;
+    m.active = false;
+    if (!medbayWants(m)) return;
+    if (sat <= 0.05) return;   // 断电不开工
+    m.active = true;
+    d.healAcc += dt * sat;
+    const p = window.Player;
+    while (d.healAcc >= 1){
+      d.healAcc -= 1;
+      if (p.removeItem('sodium', 1) && p.removeItem('oxygen', 1)){
+        p.stats.hp = Math.min(p.stats.hpMax, p.stats.hp + 3);
+        p.spawnParticles(p.pos.x, p.pos.y + 1.2, p.pos.z, 0x7dff8a, 4);
       }
     }
   }
@@ -1049,6 +1092,15 @@ const Factory = (() => {
         case 'collector':
           A.lamp.material = m.data.slots.some(s => s) ? M.glowGreen : M.glowOff;
           break;
+        case 'medbay': {
+          // 治疗中：绿灯脉冲 + 十字呼吸
+          const on = m.active;
+          A.lamp.material = on ? M.glowGreen : M.glowOff;
+          const pulse = on ? 0.7 + Math.sin(animT * 5) * 0.3 : 0.5;
+          A.crossV.scale.setScalar(1 + (pulse - 0.5) * 0.4);
+          A.crossH.scale.setScalar(1 + (pulse - 0.5) * 0.4);
+          break;
+        }
         case 'belt': {
           if (A.beltMat) A.beltMat.map.offset.y = (A.beltMat.map.offset.y - dt * BELT_SPEED) % 1;          if (A.beltMat2) A.beltMat2.map.offset.y = (A.beltMat2.map.offset.y - dt * BELT_SPEED) % 1;
           const sh = m.shape || { turn: 0, slope: 0, inDir: (m.dir + 2) % 4 };

@@ -61,6 +61,7 @@ const BLOCKS = {
   beacon:   { id: 53, name: '标记方块', hard: 0.8, machine: 'beacon', tiles: { all: 'metal_dark', top: 'lamp_on' }, drops: [{ item: 'beacon_b', n: 1 }] },
   lumberbot:{ id: 54, name: '伐木机器人', hard: 1.0, machine: 'lumberbot', tiles: { all: 'vent', top: 'metal_dark' }, drops: [{ item: 'lumberbot_b', n: 1 }] },
   collector:{ id: 55, name: '收集点', hard: 0.9, machine: 'collector', tiles: { all: 'chest_side', top: 'storage_top' }, drops: [{ item: 'collector_b', n: 1 }] },
+  medbay:   { id: 56, name: '医疗站', hard: 1.4, machine: 'medbay', tiles: { all: 'metal_dark', top: 'medbay_top' }, drops: [{ item: 'medbay_b', n: 1 }] },
 };
 const BLOCK_BY_ID = {};
 for (const k in BLOCKS){ BLOCKS[k].key = k; BLOCK_BY_ID[BLOCKS[k].id] = BLOCKS[k]; if (BLOCKS[k].solid === undefined) BLOCKS[k].solid = true; }
@@ -114,6 +115,7 @@ const ITEMS = {
   beacon_b:   { name: '标记方块', cat: 'mach', iconBlock: 'beacon', block: 'beacon', stack: 20, desc: '放置后在屏幕上显示定位标记，按 E 设置名称与全星系显示。永不迷路。', price: 120 },
   lumberbot_b:{ name: '伐木机器人', cat: 'mach', iconBlock: 'lumberbot', block: 'lumberbot', stack: 10, desc: '放置充电桩后悬浮机器人自动巡林伐木，采集碳装满后自动送往附近的收集点。', price: 320 },
   collector_b:{ name: '收集点', cat: 'mach', iconBlock: 'collector', block: 'collector', stack: 20, desc: '伐木机器人的卸货站（12格），库存自动输出到面前的传送带/机器，可直通装配机。', price: 110 },
+  medbay_b:  { name: '医疗站', cat: 'mach', iconBlock: 'medbay', block: 'medbay', stack: 50, desc: '站在旁边自动治疗：每消耗 1 钠 + 1 氧气回复 3 点生命。需电力。', price: 900 },
 };
 for (const k in ITEMS){ ITEMS[k].id = k; if (!ITEMS[k].stack) ITEMS[k].stack = 250; }
 
@@ -150,6 +152,7 @@ const RECIPES = [
   { id: 'refinery_b', out: { refinery_b: 1 }, in: { iron: 10, copper: 6, circuit: 2, stone: 8 }, where: 'both', time: 6.0, tech: 'refining' },
   { id: 'reactor_b',  out: { reactor_b: 1 },  in: { titanium: 12, circuit: 8, plate: 4, uranium: 4 }, where: 'both', time: 12.0, tech: 'nuclear' },
   { id: 'launchpad_b',out: { launchpad_b: 1 },in: { titanium: 8, plate: 6, circuit: 4 },      where: 'both', time: 8.0, tech: 'spaceport' },
+  { id: 'medbay_b',   out: { medbay_b: 1 },   in: { plate: 2, wire: 3, circuit: 1, glass_b: 2 }, where: 'both', time: 4.0, tech: 'power' },
   // --- 精炼厂 / 便携 ---
   { id: 'fuel',    out: { fuel: 1 },     in: { carbon: 25, oxygen: 10 },   where: 'both', time: 8.0 },
   { id: 'fuel2',   out: { fuel: 2 },     in: { coal: 15, oxygen: 12 },     where: 'refinery', time: 9.0, tech: 'refining' },

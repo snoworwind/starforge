@@ -32,25 +32,34 @@ await import('./serve.mjs');
 const NET_HTTP = 17887, NET_WS = 17886;
 const NET_SAVE = join(ROOT, '.test-net-save');
 await rm(NET_SAVE, { recursive: true, force: true });
-const netServer = spawn(process.execPath, [
-  join(ROOT, 'server.mjs'),
-  '--save-dir', NET_SAVE,
-  '--reset',
-  '--port-http', String(NET_HTTP),
-  '--port-ws', String(NET_WS),
-], { stdio: 'ignore' });
-netServer.on('error', () => {});
-process.on('exit', () => { try { netServer.kill(); } catch(e){} });
-for (let i = 0; i < 40; i++){
-  // 等待联机服务器就绪（ws 端口可连为止）
-  const up = await new Promise(res => {
-    const req = http.get({ host: '127.0.0.1', port: NET_HTTP, path: '/__status', timeout: 500 }, r => { res(true); r.resume(); });
-    req.on('error', () => res(false));
-    req.on('timeout', () => { req.destroy(); res(false); });
-  });
-  if (up) break;
-  await new Promise(r => setTimeout(r, 250));
+function spawnNet(reset){
+  const args = [
+    join(ROOT, 'server.mjs'),
+    '--save-dir', NET_SAVE,
+    '--port-http', String(NET_HTTP),
+    '--port-ws', String(NET_WS),
+  ];
+  if (reset) args.push('--reset');
+  const srv = spawn(process.execPath, args, { stdio: 'ignore' });
+  srv.on('error', () => {});
+  return srv;
 }
+let netServer = spawnNet(true);
+process.on('exit', () => { try { netServer.kill(); } catch(e){} });
+async function waitNetReady(){
+  for (let i = 0; i < 60; i++){
+    // 等待联机服务器就绪（ws 端口可连为止）
+    const up = await new Promise(res => {
+      const req = http.get({ host: '127.0.0.1', port: NET_HTTP, path: '/__status', timeout: 500 }, r => { res(true); r.resume(); });
+      req.on('error', () => res(false));
+      req.on('timeout', () => { req.destroy(); res(false); });
+    });
+    if (up) return true;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  throw new Error('联机服务器启动超时');
+}
+await waitNetReady();
 // 安全自检（Node 侧原始请求；浏览器会规范化 URL，无法在页面内测路径穿越）
 try {
   const code = await new Promise((res, rej) => {
@@ -126,6 +135,57 @@ try {
   console.log('[net-server] 分片上限自检 OK（正常分片重组 + 64MB 洪水掐断）');
 } catch (e){
   console.error(`[net-server] 分片自检失败：${e.message}`);
+  process.exit(1);
+}
+// 重置竞态自检：reset-world 与在途存档写入并发时，旧世界不得在磁盘复活
+// （上传大世界把 stringify/写入窗口拉宽，重置落在窗口内；随后重启服务器验证磁盘状态）
+try {
+  const wsOpen = () => new Promise((res, rej) => {
+    const s = net.connect(NET_WS, '127.0.0.1');
+    const key = crypto.randomBytes(16).toString('base64');
+    let hs = false, acc = Buffer.alloc(0);
+    const to = setTimeout(() => { s.destroy(); rej(new Error('WS 握手超时')); }, 5000);
+    s.on('connect', () => s.write('GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\nSec-WebSocket-Version: 13\r\n\r\n'));
+    s.on('data', d => {
+      if (hs) return;
+      acc = Buffer.concat([acc, d]);
+      if (acc.includes(Buffer.from('\r\n\r\n'))){ hs = true; clearTimeout(to); res(s); }
+    });
+    s.on('error', e => { clearTimeout(to); rej(e); });
+  });
+  const wsSend = (s, obj) => {
+    const payload = Buffer.from(JSON.stringify(obj));
+    const len = payload.length;
+    let hdr;
+    if (len < 126){ hdr = Buffer.alloc(2); hdr[0] = 0x81; hdr[1] = len; }
+    else if (len < 65536){ hdr = Buffer.alloc(4); hdr[0] = 0x81; hdr[1] = 126; hdr.writeUInt16BE(len, 2); }
+    else { hdr = Buffer.alloc(10); hdr[0] = 0x81; hdr[1] = 127; hdr.writeBigUInt64BE(BigInt(len), 2); }
+    s.write(Buffer.concat([hdr, payload]));
+  };
+  const s = await wsOpen();
+  s.on('error', () => {});
+  wsSend(s, { t: 'hello', v: 3, name: '重置自检', role: 'host' });
+  await new Promise(r => setTimeout(r, 300));
+  // 60 个整块 RLE（交替 [1,0,1,1]）≈ 6MB 世界上传包：让 JSON.stringify + 写盘耗时足够容纳重置窗口
+  const rle = [];
+  for (let i = 0; i < 12288; i++) rle.push(1, 0, 1, 1);
+  const mods = {};
+  for (let c = 0; c < 60; c++) mods[c + ',' + c] = rle;
+  wsSend(s, { t: 'world-upload', world: { name: 'BIG', planets: { '0': { mods, machines: [], seed: 1, biome: 'green' } }, market: {}, flags: {} } });
+  await new Promise(r => setTimeout(r, 40));   // 重置落在 stringify/写入窗口内
+  wsSend(s, { t: 'reset-world' });
+  await new Promise(r => setTimeout(r, 2500)); // 等在途写入 + 排队的删除完成
+  s.destroy();
+  // 重启（不带 --reset）：若旧世界复活，hasWorld 会为 true
+  netServer.kill();
+  await new Promise(r => setTimeout(r, 300));
+  netServer = spawnNet(false);
+  await waitNetReady();
+  const st = await fetch(`http://127.0.0.1:${NET_HTTP}/__status`).then(r => r.json());
+  if (st.hasWorld) throw new Error('重置竞态：旧世界在磁盘复活（重启后 hasWorld=true）');
+  console.log('[net-server] 重置竞态自检 OK（在途存档完成后删除世界文件，重启不复活）');
+} catch (e){
+  console.error(`[net-server] 重置竞态自检失败：${e.message}`);
   process.exit(1);
 }
 

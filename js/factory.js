@@ -100,7 +100,7 @@ const Factory = (() => {
       }
       rotor.position.set(0, 2.55, -0.32);
       g.add(rotor);
-      m.animParts = { rotor };
+      m.animParts = { rotor, poleMat, bladeMat };   // 每实例材质随拆除释放
       return g;
     },
     burner(m){
@@ -415,6 +415,14 @@ const Factory = (() => {
     const m = machines.get(k);
     if (!m) return null;
     disposeBeltMats(m);   // 皮带专属材质/贴图随机器一并释放
+    // 每实例材质（风车 poleMat/bladeMat、装配机 domeMat、信标 beamMat）统一释放，防长期摆放/拆除累积 GPU 资源
+    //（贴图来自共享缓存 tileTexCache，不随材质释放）
+    if (m.animParts){
+      for (const mk of ['poleMat', 'bladeMat', 'dome', 'beamMat']){
+        const mat = m.animParts[mk];
+        if (mat && mat.dispose) mat.dispose();
+      }
+    }
     if (m.mesh) group.remove(m.mesh);
     if (m.bot && m.bot.mesh) group.remove(m.bot.mesh);   // 伐木机器人实体随桩拆除
     machines.delete(k);

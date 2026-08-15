@@ -128,7 +128,6 @@ const RECIPES = [
   { id: 'titanium',out: { titanium: 1 },in: { titanium_ore: 1 }, where: 'furnace', time: 3.6 },
   { id: 'gold',    out: { gold: 1 },    in: { gold_ore: 1 },  where: 'furnace', time: 3.0 },
   { id: 'glass_b', out: { glass_b: 1 }, in: { sand: 2 },      where: 'furnace', time: 2.0 },
-  { id: 'stone_smelt', out: { stone: 1 }, in: { dirt: 4 },    where: 'furnace', time: 2.0, hidden: true },
   // --- 便携/装配 通用 ---
   { id: 'gear',    out: { gear: 1 },    in: { iron: 2 },              where: 'both', time: 1.6 },
   { id: 'wire',    out: { wire: 2 },    in: { copper: 1 },            where: 'both', time: 1.2 },
@@ -167,7 +166,7 @@ const RECIPES = [
 const RECIPE_BY_ID = {}; RECIPES.forEach(r => RECIPE_BY_ID[r.id] = r);
 
 // 熔炉燃料价值（秒）
-const FUEL_VALUE = { carbon: 4, coal: 16, planks_b: 3 };
+const FUEL_VALUE = { carbon: 4, coal: 16, planks_b: 5 };
 
 // ================= 科技树 =================
 // cost: {item:n}  time: 研究秒数  pos: 树中坐标

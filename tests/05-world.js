@@ -39,9 +39,12 @@ __SF_TEST__.suite('world', function (t, api) {
   t.test('deterministic world across reboot (same seed)', function () {
     var s1 = api.worldSeed();
     var h1 = api.topAt(100, 100);
+    var sp1 = window.World.findSpawn();
     return api.reboot('normal', { seed: 12345 }).then(function () {
       A.eq(api.worldSeed(), s1, 'same world seed');
       A.eq(api.topAt(100, 100), h1, 'same terrain height');
+      var sp2 = window.World.findSpawn();
+      A.ok(Math.abs(sp1.x - sp2.x) < 0.01 && Math.abs(sp1.z - sp2.z) < 0.01, 'findSpawn deterministic (seed-derived)');
     });
   });
 

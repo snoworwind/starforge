@@ -218,20 +218,18 @@ __SF_TEST__.suite('factory', function (t, api) {
   t.test('furnace: 原料不足不点火不空烧', function () {
     var y = groundY() + 1;
     api.placeMachine('furnace', X, y, Z, 0);
-    api.machineInsert(X, y, Z, 'dirt');   // 1 泥土 < 需要 4（stone_smelt），不足一份
+    api.machineInsert(X, y, Z, 'sand');   // 1 沙 < 需要 2（烧玻璃），不足一份
     api.machineInsert(X, y, Z, 'coal');
     api.tickFactory(4.0, 1);
     var m = api.machineAt(X, y, Z);
     A.eq(m.data.burn, 0, 'insufficient input: burner never lit');
     A.eq(m.data.fuel.n, 1, 'fuel not wasted');
     A.eq(m.data.out, null, 'no output');
-    // 补足到 4：正常点火冶炼
-    api.machineInsert(X, y, Z, 'dirt');
-    api.machineInsert(X, y, Z, 'dirt');
-    api.machineInsert(X, y, Z, 'dirt');
+    // 补足到 2：正常点火冶炼
+    api.machineInsert(X, y, Z, 'sand');
     api.tickFactory(4.0, 1);
     m = api.machineAt(X, y, Z);
-    A.ok(m.data.out && m.data.out.item === 'stone', '4 dirt smelts after refill, out=' + JSON.stringify(m.data.out));
+    A.ok(m.data.out && m.data.out.item === 'glass_b', '2 sand smelts after refill, out=' + JSON.stringify(m.data.out));
     api.removeMachine(X, y, Z);
   });
 

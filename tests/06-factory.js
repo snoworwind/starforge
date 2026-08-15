@@ -234,4 +234,28 @@ __SF_TEST__.suite('factory', function (t, api) {
     A.ok(m.data.out && m.data.out.item === 'stone', '4 dirt smelts after refill, out=' + JSON.stringify(m.data.out));
     api.removeMachine(X, y, Z);
   });
+
+  t.test('熔炉/采矿机可向侧面传送带输出（非装配机型不受输入面限制）', function () {
+    var y = groundY() + 1;
+    // 熔炉：正面 +x，侧面 -z 放传送带（dir 2 朝 -z 流走）
+    api.placeMachine('furnace', X, y, Z, 0);
+    api.placeMachine('belt', X, y, Z - 1, 2);
+    api.machineInsert(X, y, Z, 'iron_ore');
+    api.machineInsert(X, y, Z, 'coal');
+    api.tickFactory(5.0, 1);
+    var belt = api.machineAt(X, y, Z - 1);
+    A.ok(belt.data.items.length > 0, 'furnace outputs to side belt, items=' + JSON.stringify(belt.data.items));
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z - 1);
+    // 采矿机：矿脉在脚下，侧面放皮带（dir 1 = +z，流向远处）
+    api.setBlock(X, y - 1, Z, 'iron_ore');
+    api.placeMachine('miner', X, y, Z, 0);
+    api.placeMachine('belt', X, y, Z + 1, 1);
+    api.tickFactory(6.0, 1);
+    var belt2 = api.machineAt(X, y, Z + 1);
+    A.ok(belt2.data.items.length > 0, 'miner outputs to side belt, items=' + JSON.stringify(belt2.data.items));
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 1);
+    api.setBlock(X, y - 1, Z, 'air');
+  });
 });

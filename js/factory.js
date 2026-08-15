@@ -482,8 +482,8 @@ const Factory = (() => {
     return (m.x + dx + bdx === m.x && m.z + dz + bdz === m.z);
   }
   // 从机器任意邻格输出物品到 belt/chest/machine——装配/精炼防回流，其余机型不受限
-  // 有方向的机器（所有正面朝外的机器都应遵守输入/输出分离）
-  function hasDirection(m){ return m.type && m.dir !== undefined; }
+  // 只有装配机/精炼厂做「正面输出 + 侧面输入」分离（其余机器任何一面都可输出/输入）
+  function hasDirection(m){ return m.type === 'assembler' || m.type === 'refinery'; }
   function tryOutput(m, item){
     const crafter = hasDirection(m);
     // 正面皮带输出（装配/精炼仅在不是输入面时才放行；其余机型无条件输出）

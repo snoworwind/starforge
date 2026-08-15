@@ -1458,22 +1458,350 @@ const UI = (() => {
     info.querySelector('.gal-detail').appendChild(btn);
   }
 
-  // ---------- 存档管理 ----------
-  // mode: 'load'（主菜单读档）| 'save'（游戏内存档）
-  async function openSavePanel(mode){
+  // ---------- 人物创建（捏人）：肤色/发型/发色/制服/饰条/裤装/靴子/头盔/目镜 ----------
+  const CC_SKINS = ['#e8c49a', '#d8b48a', '#c89878', '#8d5a3c', '#6b4630', '#f0d8b8', '#b98e6a', '#e8d0b0'];
+  const CC_HAIRSTYLES = [['none','无'], ['short','短发'], ['long','长发'], ['pony','马尾'], ['mohawk','莫霍克'], ['bun','发髻']];
+  const CC_HAIRS = ['#4a3018', '#2e2620', '#5a4632', '#7a5a8a', '#a86a3a', '#d8c8a8', '#c23a3a', '#1e2e4a'];
+  const CC_SUITS = ['#4a5a6e', '#3fa8c9', '#5a3e3e', '#6e6a2a', '#3e5a6e', '#4a4258', '#5a6a3a', '#7a3a2a'];
+  const CC_TRIMS = ['#35e0e8', '#ffb347', '#ff6a5e', '#b58aff', '#7dff8a', '#ffd94d', '#f0f0f0', '#35b0ff'];
+  const CC_PANTS = ['#33404c', '#4a3c2e', '#2e3a44', '#3a3248', '#3e3a2e', '#443430'];
+  const CC_BOOTS = ['#1e262e', '#2e2620', '#26221a', '#241e2e', '#2a221e', '#33261a'];
+  const CC_VISORS = ['#ffb347', '#35e0e8', '#ff6a5e', '#b58aff', '#7dff8a', '#f0f0f0'];
+  let cc = null;                      // 捏人/世界创建流程状态
+  let pairSel = { char: null, world: null };
+  let wcState = { creative: false, mult: 4 };
+  let savePanelMode = 'load';
+
+  function randomAppearance(){
+    return {
+      skin: CC_SKINS[(Math.random() * CC_SKINS.length) | 0],
+      hairStyle: CC_HAIRSTYLES[1 + ((Math.random() * (CC_HAIRSTYLES.length - 1)) | 0)][0],
+      hair: CC_HAIRS[(Math.random() * CC_HAIRS.length) | 0],
+      suit: CC_SUITS[(Math.random() * CC_SUITS.length) | 0],
+      trim: CC_TRIMS[(Math.random() * CC_TRIMS.length) | 0],
+      pants: CC_PANTS[(Math.random() * CC_PANTS.length) | 0],
+      boots: CC_BOOTS[(Math.random() * CC_BOOTS.length) | 0],
+      helmet: Math.random() < 0.7,
+      visor: CC_VISORS[(Math.random() * CC_VISORS.length) | 0],
+    };
+  }
+  function makeSwatch(target, list, key, textList){
+    const el = $(target);
+    el.innerHTML = '';
+    list.forEach(v => {
+      const b = document.createElement('div');
+      if (!textList){ b.className = 'cc-chip'; b.style.background = v; b.title = v; }
+      else { b.className = 'cc-chip txt'; b.textContent = v[1]; b.dataset.v = v[0]; }
+      b.onclick = () => {
+        Sound.play('uiClick');
+        cc.app[key] = textList ? v[0] : v;
+        updateSwatchHighlight(target, cc.app[key]);
+        rebuildCharPreview();
+      };
+      el.appendChild(b);
+    });
+  }
+  function makeToggleSwatch(target, onLabel, offLabel, key){
+    const el = $(target);
+    el.innerHTML = '';
+    for (const v of [true, false]){
+      const b = document.createElement('div');
+      b.className = 'cc-chip txt';
+      b.textContent = v ? onLabel : offLabel;
+      b.dataset.v = String(v);
+      b.onclick = () => { Sound.play('uiClick'); cc.app[key] = v; updateSwatchHighlight(target, v); rebuildCharPreview(); };
+      el.appendChild(b);
+    }
+  }
+  function updateSwatchHighlight(target, val){
+    for (const b of $(target).children){
+      const on = b.dataset.v !== undefined ? String(b.dataset.v) === String(val) : (b.style.background === val);
+      b.classList.toggle('on', on);
+    }
+  }
+  function refreshCharSwatches(){
+    for (const b of $('ccSkin').children) b.classList.toggle('on', b.style.background === cc.app.skin);
+    for (const b of $('ccHair').children) b.classList.toggle('on', b.style.background === cc.app.hair);
+    for (const b of $('ccSuit').children) b.classList.toggle('on', b.style.background === cc.app.suit);
+    for (const b of $('ccTrim').children) b.classList.toggle('on', b.style.background === cc.app.trim);
+    for (const b of $('ccPants').children) b.classList.toggle('on', b.style.background === cc.app.pants);
+    for (const b of $('ccBoots').children) b.classList.toggle('on', b.style.background === cc.app.boots);
+    for (const b of $('ccVisor').children) b.classList.toggle('on', b.style.background === cc.app.visor);
+    for (const b of $('ccHairStyle').children) b.classList.toggle('on', String(b.dataset.v) === String(cc.app.hairStyle));
+    for (const b of $('ccHelmet').children) b.classList.toggle('on', String(b.dataset.v) === String(cc.app.helmet));
+  }
+
+  // ---- 实时 3D 预览：人形走台（旋转镜头 + 行走动画）----
+  function startCharPreview(){
+    stopCharPreview();
+    if (typeof THREE === 'undefined' || !window.Humanoid) return;
+    const canvas = $('charPrevCanvas');
+    const w = canvas.width, h = canvas.height;
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    renderer.setSize(w, h, false);
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera(30, w / h, 0.1, 60);
+    cam.position.set(0, 1.7, 5.4);
+    cam.lookAt(0, 0.9, 0);
+    scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x33291f, 0.9));
+    const key = new THREE.DirectionalLight(0xfff2d0, 0.95);
+    key.position.set(3.2, 5.5, 4);
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0x35e0e8, 0.4);
+    rim.position.set(-4, 2, -3);
+    scene.add(rim);
+    const platform = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.02, 1.18, 0.18, 28),
+      new THREE.MeshLambertMaterial({ color: 0x22303c }));
+    platform.position.y = -0.09;
+    platform.rotation.y = Math.PI / 8;
+    scene.add(platform);
+    cc.prev = { renderer, scene, cam, platform, fig: null, t: Math.random() * 6 };
+    rebuildCharPreview();
+    const tick = () => {
+      if (!cc || !cc.prev || $('charCreate').classList.contains('hidden')) return;
+      const p = cc.prev;
+      p.t += 0.016;
+      if (p.fig) Humanoid.animate(p.fig, 0.016, true, 1.5);
+      const a = p.t * 0.45;
+      cam.position.set(Math.sin(a) * 4.8, 1.6 + Math.sin(p.t * 0.7) * 0.12, Math.cos(a) * 4.8);
+      cam.lookAt(0, 0.9, 0);
+      p.renderer.render(scene, cam);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+  function rebuildCharPreview(){
+    if (!cc || !cc.prev || !window.Humanoid) return;
+    const p = cc.prev;
+    if (p.fig){ p.scene.remove(p.fig); disposeObject3D(p.fig, { skipTex: true }); }
+    const fig = Humanoid.build(Object.assign({}, cc.app, { trimOn: true, badge: true, jetpack: true }));
+    fig.position.y = 0;
+    p.scene.add(fig);
+    p.fig = fig;
+  }
+  function stopCharPreview(){
+    if (cc && cc.prev){
+      try { cc.prev.renderer.dispose(); } catch(e){}
+      cc.prev = null;
+    }
+  }
+
+  function openCharCreate(mode, mult, opts){
+    opts = opts || {};
+    $('boot').classList.remove('hidden');
+    $('bootInner').classList.add('shrink');   // 隐藏 logo/提示区，给捏人界面让位
+    ['bootMenu','modeSelect','diffSelect','worldCreate'].forEach(id => $(id).classList.add('hidden'));
+    $('savePanel').classList.add('hidden');
+    $('charCreate').classList.remove('hidden');
+    cc = {
+      creative: !!mode,
+      mult: mult || 4,
+      fromSavePanel: !!opts.fromSavePanel,
+      app: opts.app || randomAppearance(),
+    };
+    $('charNameInput').value = opts.name || '';
+    makeSwatch('ccSkin', CC_SKINS, 'skin');
+    makeSwatch('ccHairStyle', CC_HAIRSTYLES, 'hairStyle', true);
+    makeSwatch('ccHair', CC_HAIRS, 'hair');
+    makeSwatch('ccSuit', CC_SUITS, 'suit');
+    makeSwatch('ccTrim', CC_TRIMS, 'trim');
+    makeSwatch('ccPants', CC_PANTS, 'pants');
+    makeSwatch('ccBoots', CC_BOOTS, 'boots');
+    makeToggleSwatch('ccHelmet', '头盔开', '头盔关', 'helmet');
+    makeSwatch('ccVisor', CC_VISORS, 'visor');
+    refreshCharSwatches();
+    startCharPreview();
+  }
+  $('btnCharRandom').onclick = () => { Sound.play('uiClick'); cc.app = randomAppearance(); refreshCharSwatches(); rebuildCharPreview(); };
+  $('btnCharConfirm').onclick = async () => {
+    Sound.play('uiClick');
+    const name = $('charNameInput').value.trim() || '旅行者';
+    stopCharPreview();
+    if (cc.fromSavePanel){
+      // 存档面板内新建人物：独立落库 → 回到选择面板并预选
+      const key = await Game.createCharacter(name, cc.app);
+      $('charCreate').classList.add('hidden');
+      $('bootInner').classList.remove('shrink');
+      if (Game.state === 'menu') $('boot').classList.add('hidden');
+      await openSavePanel('load', key);
+      return;
+    }
+    $('charCreate').classList.add('hidden');
+    $('worldCreate').classList.remove('hidden');
+    cc.char = { name, appearance: cc.app };
+    cc.worldFromSave = false;
+    openWorldCreateInner();
+  };
+  $('btnCharBack').onclick = () => {
+    Sound.play('uiClose');
+    stopCharPreview();
+    $('charCreate').classList.add('hidden');
+    if (cc && cc.fromSavePanel){
+      $('bootInner').classList.remove('shrink');
+      if (Game.state === 'menu') $('boot').classList.add('hidden');
+      openSavePanel('load');
+    } else if (cc && cc.creative){
+      $('bootInner').classList.remove('shrink');
+      $('modeSelect').classList.remove('hidden');
+    } else {
+      $('bootInner').classList.remove('shrink');
+      $('diffSelect').classList.remove('hidden');
+    }
+  };
+
+  // ---- 世界创建（名称/种子/难度）----
+  function openWorldCreateInner(){
+    $('charCreate').classList.add('hidden');
+    $('worldCreate').classList.remove('hidden');
+    $('worldNameInput').value = '';
+    $('worldSeedInput').value = '';
+    setWcMode('normal');
+  }
+  function openWorldCreate(charOpts, fromSave){
+    $('boot').classList.remove('hidden');
+    $('bootInner').classList.add('shrink');
+    ['bootMenu','modeSelect','diffSelect','charCreate'].forEach(id => $(id).classList.add('hidden'));
+    $('savePanel').classList.add('hidden');
+    cc = { char: charOpts, worldFromSave: !!fromSave, creative: false, mult: 4 };
+    openWorldCreateInner();
+  }
+  function setWcMode(mode){
+    wcState = { creative: mode === 'creative', mult: mode === 'easy' ? 7 : mode === 'hard' ? 1 : 4 };
+    for (const [id, m] of [['btnWcEasy','easy'], ['btnWcNormal','normal'], ['btnWcHard','hard'], ['btnWcCreative','creative']]){
+      $(id).classList.toggle('on', m === mode);
+    }
+  }
+  $('btnWcEasy').onclick = () => { Sound.play('uiClick'); setWcMode('easy'); };
+  $('btnWcNormal').onclick = () => { Sound.play('uiClick'); setWcMode('normal'); };
+  $('btnWcHard').onclick = () => { Sound.play('uiClick'); setWcMode('hard'); };
+  $('btnWcCreative').onclick = () => { Sound.play('uiClick'); setWcMode('creative'); };
+  $('btnWorldConfirm').onclick = () => {
+    Sound.play('uiClick');
+    const name = $('worldNameInput').value.trim() || '未命名世界';
+    const raw = $('worldSeedInput').value.trim();
+    let seed;
+    if (raw !== ''){ seed = parseInt(raw, 10); if (!isFinite(seed)) seed = undefined; }
+    $('worldCreate').classList.add('hidden');
+    if (!cc) return;
+    const charOpts = cc.char || { name: '旅行者', appearance: randomAppearance() };
+    const creative = cc.worldFromSave ? wcState.creative : cc.creative;
+    const mult = cc.worldFromSave ? wcState.mult : cc.mult;
+    cc = null;
+    Game.newGame(creative, mult, { char: charOpts, world: { name, seed } });
+  };
+  $('btnWorldBack').onclick = () => {
+    Sound.play('uiClose');
+    $('worldCreate').classList.add('hidden');
+    if (cc && cc.worldFromSave){
+      $('bootInner').classList.remove('shrink');
+      if (Game.state === 'menu') $('boot').classList.add('hidden');
+      openSavePanel('load');
+    } else {
+      $('charCreate').classList.remove('hidden');
+      startCharPreview();
+    }
+  };
+
+  // ---------- 存档管理（泰拉瑞亚式：人物 / 世界 分离存档） ----------
+  // mode: 'load'（选择人物×世界）| 'save'（游戏内存档）
+  async function openSavePanel(mode, preselectChar){
     const el = $('savePanel');
     ['invPanel','machinePanel','techPanel','tradePanel','helpPanel','creativePanel','pausePanel','settingsPanel'].forEach(id => $(id).classList.add('hidden'));
     el.classList.remove('hidden');
-    $('saveTitle').textContent = mode === 'save' ? '◈ 存档 — 覆盖或新建' : '◈ 继续档案 — 选择存档';
-    $('btnNewSave').style.display = mode === 'save' ? '' : 'none';
+    savePanelMode = mode || 'load';
+    $('saveTitle').textContent = savePanelMode === 'save' ? '◈ 存档 — 人物与世界独立档案' : '◈ 继续 — 选择人物与世界';
+    $('savePairWrap').style.display = savePanelMode === 'load' ? '' : 'none';
+    $('saveListWrap').style.display = savePanelMode === 'load' ? 'none' : '';
     Sound.play('uiOpen');
-    await refreshSaveList(mode);
+    if (savePanelMode === 'load') await refreshPairLists(preselectChar);
+    else await refreshSaveList(savePanelMode);
   }
+  async function refreshPairLists(preselectChar){
+    let chars = [], worlds = [];
+    try { chars = await Game.listChars(); worlds = await Game.listWorlds(); } catch(e){ console.error('[ui] listChars/Worlds', e); }
+    if (preselectChar) pairSel.char = preselectChar;
+    if (!chars.some(c => c.key === pairSel.char)) pairSel.char = chars.length ? chars[0].key : null;
+    if (!worlds.some(w => w.key === pairSel.world)) pairSel.world = worlds.length ? worlds[0].key : null;
+    const charList = $('charList'), worldList = $('worldList');
+    charList.innerHTML = ''; worldList.innerHTML = '';
+    if (!chars.length) charList.innerHTML = '<div class="save-empty">— 暂无人物 —</div>';
+    if (!worlds.length) worldList.innerHTML = '<div class="save-empty">— 暂无世界 —</div>';
+    for (const c of chars){
+      const row = document.createElement('div');
+      row.className = 'save-row' + (c.key === pairSel.char ? ' selected' : '');
+      const date = new Date(c.time);
+      const pad = n => String(n).padStart(2, '0');
+      row.innerHTML = `<span class="sv-icon">👤</span>
+        <div class="sv-info">
+          <div class="sv-name">${c.name}</div>
+          <div class="sv-meta">₪${c.credits} · 游玩${c.playMin}分钟 · ${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}</div>
+        </div>`;
+      row.onclick = () => { Sound.play('uiClick'); pairSel.char = c.key; refreshPairLists(); };
+      const del = document.createElement('button');
+      del.className = 'sv-btn danger';
+      del.textContent = '✕';
+      del.title = '删除人物（配对档案一并删除）';
+      del.onclick = async e => {
+        e.stopPropagation();
+        if (!confirm(`删除人物「${c.name}」？其配对档案也会一并删除！`)) return;
+        await Game.deleteChar(c.key);
+        Sound.play('breakBlk');
+        await refreshPairLists();
+      };
+      row.appendChild(del);
+      charList.appendChild(row);
+    }
+    for (const w of worlds){
+      const row = document.createElement('div');
+      row.className = 'save-row' + (w.key === pairSel.world ? ' selected' : '');
+      const date = new Date(w.time);
+      const pad = n => String(n).padStart(2, '0');
+      row.innerHTML = `<span class="sv-icon">${w.creative ? '✦' : '🌍'}</span>
+        <div class="sv-info">
+          <div class="sv-name">${w.name}</div>
+          <div class="sv-meta">${w.creative ? '<span class="cr">创造</span>' : '生存'} · ${w.planetName} · ${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}</div>
+        </div>`;
+      row.onclick = () => { Sound.play('uiClick'); pairSel.world = w.key; refreshPairLists(); };
+      const del = document.createElement('button');
+      del.className = 'sv-btn danger';
+      del.textContent = '✕';
+      del.title = '删除世界（配对档案一并删除）';
+      del.onclick = async e => {
+        e.stopPropagation();
+        if (!confirm(`删除世界「${w.name}」？其配对档案也会一并删除！`)) return;
+        await Game.deleteWorld(w.key);
+        Sound.play('breakBlk');
+        await refreshPairLists();
+      };
+      row.appendChild(del);
+      worldList.appendChild(row);
+    }
+    $('btnPairGo').disabled = !(pairSel.char && pairSel.world);
+    $('btnNewWorld').disabled = !pairSel.char;
+  }
+  $('btnPairGo').onclick = () => {
+    if (!(pairSel.char && pairSel.world)) return;
+    Sound.play('uiClick');
+    $('savePanel').classList.add('hidden');
+    Game.loadPair(pairSel.char, pairSel.world);
+  };
+  $('btnNewChar').onclick = () => { Sound.play('uiClick'); openCharCreate(null, null, { fromSavePanel: true }); };
+  $('btnNewWorld').onclick = () => {
+    if (!pairSel.char) return;
+    Sound.play('uiClick');
+    openWorldCreate({ key: pairSel.char }, true);
+  };
   async function refreshSaveList(mode){
     const list = $('saveList');
     list.innerHTML = '';
     let saves = [];
     try { saves = await Game.listSaves(); } catch(e){ console.error('[ui] listSaves', e); }
+    try {
+      $('saveCurInfo').innerHTML = `当前 — 人物 <b>${Game.charName}</b> · 世界 <b>${Game.worldName}</b><br><small>保存时人物与世界各自独立落盘，可分别与其他档案搭配</small>`;
+    } catch(e){ $('saveCurInfo').innerHTML = ''; }
     if (!saves.length){
       list.innerHTML = '<div class="save-empty">— 暂无档案 —</div>';
     }
@@ -1486,7 +1814,7 @@ const UI = (() => {
         <span class="sv-icon">${s.creative ? '✦' : '⛏'}</span>
         <div class="sv-info">
           <div class="sv-name">${s.name}</div>
-          <div class="sv-meta">${s.creative ? '<span class="cr">创造</span>' : '生存'} · ${s.planetName} · ₪${s.credits} · 游玩${s.playMin}分钟<br>${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}</div>
+          <div class="sv-meta">${s.charName || '—'} · ${s.worldName || '—'}<br>${s.creative ? '<span class="cr">创造</span>' : '生存'} · ${s.planetName} · ₪${s.credits} · 游玩${s.playMin}分钟</div>
         </div>`;
       const exp = document.createElement('button');
       exp.className = 'sv-btn';
@@ -1496,29 +1824,24 @@ const UI = (() => {
       row.appendChild(exp);
       const act = document.createElement('button');
       act.className = 'sv-btn';
-      act.textContent = mode === 'save' ? '覆盖' : '读取';
+      act.textContent = '覆盖';
       act.onclick = () => {
         Sound.play('uiClick');
-        if (mode === 'save'){
-          if (!confirm(`覆盖存档「${s.name}」？`)) return;
-          Game.saveTo(s.key).then(ok => {
-            if (!ok) return;
-            bigMessage('已存档', s.name, 1500);
-            $('savePanel').classList.add('hidden');
-            if (!anyPanelOpen()) Game.lockPointer();
-          });
-        } else {
+        if (!confirm(`覆盖存档「${s.name}」？`)) return;
+        Game.saveTo(s.key).then(ok => {
+          if (!ok) return;
+          bigMessage('已存档', s.name, 1500);
           $('savePanel').classList.add('hidden');
-          Game.loadFrom(s.key);
-        }
+          if (!anyPanelOpen()) Game.lockPointer();
+        });
       };
       row.appendChild(act);
       const del = document.createElement('button');
       del.className = 'sv-btn danger';
       del.textContent = '✕';
-      del.title = '删除存档';
+      del.title = '删除档案（人物与世界保留）';
       del.onclick = async () => {
-        if (!confirm(`删除存档「${s.name}」？不可恢复！`)) return;
+        if (!confirm(`删除档案「${s.name}」？人物与世界本身保留。`)) return;
         await Game.deleteSave(s.key);
         Sound.play('breakBlk');
         await refreshSaveList(mode);
@@ -1538,10 +1861,15 @@ const UI = (() => {
     await refreshSaveList('save');
   };
   $('btnImportSave').onclick = () => { Sound.play('uiClick'); $('saveFileInput').click(); };
+  $('btnImportSave2').onclick = () => { Sound.play('uiClick'); $('saveFileInput').click(); };
   $('saveFileInput').onchange = async e => {
     const f = e.target.files[0];
     if (!f) return;
-    if (await Game.importSave(f)) await refreshSaveList('save');
+    const ok = await Game.importSave(f);
+    if (ok){
+      if (savePanelMode === 'load') await refreshPairLists();
+      else await refreshSaveList('save');
+    }
     e.target.value = '';
   };
 
@@ -1594,7 +1922,7 @@ const UI = (() => {
   return {
     anyPanelOpen, closeAll, toggle, buildHotbar, refreshHotbar, refreshInv, refreshAll, showItemName,
     openMachinePanel, openTrade, refreshTrade, refreshTech, updateResearch, tickMachinePanel,
-    toggleCreative, openSavePanel, openGalaxyMap,
+    toggleCreative, openSavePanel, openGalaxyMap, openCharCreate, openWorldCreate,
     pickupToast, bigMessage, refreshQuests, refreshHUD, setInteractHint,
     get openMachine(){ return openMachine; },
     get researching(){ return researching; },

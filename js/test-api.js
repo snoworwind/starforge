@@ -115,6 +115,21 @@
     const el = document.getElementById(btn);
     if (!el || !el.onclick) throw new Error('menu button missing: ' + btn);
     el.onclick();
+    // 新流程：难度 → 捏人 → 世界创建（测试自动走完真实 UI 链路）
+    const nameInput = document.getElementById('charNameInput');
+    if (nameInput){
+      nameInput.value = '测试旅行者';
+      const cf = document.getElementById('btnCharConfirm');
+      if (!cf || !cf.onclick) throw new Error('char confirm button missing');
+      cf.onclick();
+    }
+    const wName = document.getElementById('worldNameInput');
+    if (wName){
+      wName.value = '测试世界';
+      const wc = document.getElementById('btnWorldConfirm');
+      if (!wc || !wc.onclick) throw new Error('world confirm button missing');
+      wc.onclick();
+    }
   }
   async function waitUntil(fn, timeout, step) {
     timeout = timeout || 60000; step = step || 25;
@@ -316,6 +331,12 @@
   function saveTo(key, name) { return window.Game.saveTo(key, name); }
   function load(key) { return window.Game.loadFrom(key); }
   function listSaves() { return window.Game.listSaves(); }
+  function listChars() { return window.Game.listChars(); }
+  function listWorlds() { return window.Game.listWorlds(); }
+  function createCharacter(name, appearance) { return window.Game.createCharacter(name, appearance); }
+  function deleteChar(key) { return window.Game.deleteChar(key); }
+  function deleteWorld(key) { return window.Game.deleteWorld(key); }
+  function loadPair(charKey, worldKey) { return window.Game.loadPair(charKey, worldKey); }
   function deleteSave(key) { return window.Game.deleteSave(key); }
 
   // ---------- 太空 / 星系（数据层确定性 + 冒烟） ----------
@@ -431,7 +452,7 @@
     quest, questId() { return window.Game.currentQuestId(); }, questIdx: questIdxValue, quests() { return window.Game.currentQuests(); },
     setFlag, pokeQuests, placeEvent, flag(name) { return window.Game.flags[name]; },
     // 存档
-    save, saveTo, load, listSaves, deleteSave,
+    save, saveTo, load, listSaves, deleteSave, listChars, listWorlds, createCharacter, deleteChar, deleteWorld, loadPair,
     // 太空 / 星系
     enterSpace, spaceState, generateGalaxy,
     galaxySeed() { return window.Space.getCurrentGalaxySeed(); },

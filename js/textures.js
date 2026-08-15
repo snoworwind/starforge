@@ -613,10 +613,10 @@ const Icons = (() => {
    ============================================================ */
 function disposeObject3D(obj, opts){
   if (!obj) return;
-  const skipGeo = !!(opts && opts.skipGeo), skipTex = !!(opts && opts.skipTex);
+  const skipGeo = !!(opts && opts.skipGeo), skipTex = !!(opts && opts.skipTex), skipMat = !!(opts && opts.skipMat);
   obj.traverse(o => {
     const mat = o.material;
-    if (mat){
+    if (mat && !skipMat){
       const mats = Array.isArray(mat) ? mat : [mat];
       for (const m of mats){
         if (m && !skipTex && m.map) m.map.dispose();

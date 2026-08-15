@@ -101,11 +101,12 @@ const SaveStore = (() => {
     return putSlot(INDEX_KEY, arr);
   }
   // 槽位 + 索引在单个读写事务中写入：要么都成功要么都回滚（撕裂写不出一半的存档）
-  async function atomicWrite(key, data, idx){
+  async function atomicWrite(key, data, idx, idxKey){
     await open();
+    const ik = idxKey || INDEX_KEY;
     if (mem){
       mem.set(key, JSON.parse(JSON.stringify(data)));
-      mem.set(INDEX_KEY, JSON.parse(JSON.stringify(idx)));
+      mem.set(ik, JSON.parse(JSON.stringify(idx)));
       return true;
     }
     try {
@@ -117,7 +118,7 @@ const SaveStore = (() => {
           txn = db.transaction(STORE, 'readwrite');
           const st = txn.objectStore(STORE);
           st.put(data, key);
-          st.put(idx, INDEX_KEY);
+          st.put(idx, ik);
         } catch(e){ resolve(false); return; }
         txn.oncomplete = () => resolve(true);
         txn.onerror = () => resolve(false);

@@ -205,19 +205,33 @@ const Net = (() => {
   }
 
   // ---------- 远程玩家化身 ----------
-  function buildAvatar(id){
+  // 统一人形管线（Humanoid）：外观随玩家自定义同步，四肢随移动摆动
+  function buildAvatar(id, app){
     const g = new THREE.Group();
-    const suit = new THREE.MeshLambertMaterial({ color: 0x3fa8c9 });
-    const dark = new THREE.MeshLambertMaterial({ color: 0x1d3a52 });
-    const visor = new THREE.MeshLambertMaterial({ color: 0xffb347, emissive: 0x664411 });
-    const B = (w, h, d, m, x, y, z) => { const mm = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); mm.position.set(x, y, z); g.add(mm); return mm; };
-    B(0.5, 0.62, 0.3, suit, 0, 0.62, 0);        // 躯干
-    B(0.42, 0.4, 0.4, suit, 0, 1.18, 0);        // 头盔
-    B(0.3, 0.14, 0.02, visor, 0, 1.2, -0.21);   // 面罩
-    B(0.16, 0.5, 0.2, dark, -0.14, 0.15, 0);    // 腿
-    B(0.16, 0.5, 0.2, dark, 0.14, 0.15, 0);
-    B(0.3, 0.4, 0.16, dark, 0, 0.72, 0.24);     // 喷气背包
-    const body = g.children.slice();
+    let fig;
+    if (window.Humanoid){
+      fig = Humanoid.build(Object.assign({}, app || {}, {
+        trimOn: true, badge: true, jetpack: true,
+        helmet: true, visor: (app && app.visor) || '#ffb347',
+      }));
+      g.add(fig);
+    } else {
+      // 回退：旧式体素人（Humanoid 未加载时）
+      const figG = new THREE.Group();
+      g.add(figG);
+      const suit = new THREE.MeshLambertMaterial({ color: 0x3fa8c9 });
+      const dark = new THREE.MeshLambertMaterial({ color: 0x1d3a52 });
+      const visor = new THREE.MeshLambertMaterial({ color: 0xffb347, emissive: 0x664411 });
+      const B = (w, h, d, m, x, y, z) => { const mm = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); mm.position.set(x, y, z); figG.add(mm); return mm; };
+      B(0.5, 0.62, 0.3, suit, 0, 0.62, 0);
+      B(0.42, 0.4, 0.4, suit, 0, 1.18, 0);
+      B(0.3, 0.14, 0.02, visor, 0, 1.2, -0.21);
+      B(0.16, 0.5, 0.2, dark, -0.14, 0.15, 0);
+      B(0.16, 0.5, 0.2, dark, 0.14, 0.15, 0);
+      B(0.3, 0.4, 0.16, dark, 0, 0.72, 0.24);
+      fig = figG;
+    }
+    const body = [fig];
     // 名牌
     const c = document.createElement('canvas'); c.width = 128; c.height = 32;
     const x = c.getContext('2d');
@@ -236,13 +250,29 @@ const Net = (() => {
     g.add(ship);
     return { group: g, ship, body, tag };
   }
-  function ensureRemote(id){
+  function rebuildAvatarFigure(r, app){
+    if (!window.Humanoid) return;
+    // 外观变化 → 重建化身（名牌/飞船保留）
+    const fig = Humanoid.build(Object.assign({}, app || {}, {
+      trimOn: true, badge: true, jetpack: true,
+      helmet: true, visor: (app && app.visor) || '#ffb347',
+    }));
+    for (const o of r.body) r.group.remove(o);
+    disposeObject3D(r.body[0], { skipGeo: true, skipTex: true, skipMat: true });
+    r.group.add(fig);
+    r.body = [fig];
+    r.speed = 0;
+  }
+  function ensureRemote(id, app){
     let r = remotes.get(id);
     if (!r){
-      const a = buildAvatar(id);
-      r = { ...a, planet: -1, st: '', pos: new THREE.Vector3(), tgt: new THREE.Vector3(), yaw: 0, tyaw: 0, inScene: null, last: 0 };
+      const a = buildAvatar(id, app);
+      r = { ...a, planet: -1, st: '', pos: new THREE.Vector3(), tgt: new THREE.Vector3(), yaw: 0, tyaw: 0, inScene: null, last: 0, app: app || null, speed: 0 };
       remotes.set(id, r);
       onStatus();
+    } else if (JSON.stringify(r.app || null) !== JSON.stringify(app || null)){
+      r.app = app || null;
+      rebuildAvatarFigure(r, app);
     }
     return r;
   }
@@ -260,7 +290,12 @@ const Net = (() => {
   function onPos(m){
     if (m.id === myId) return;
     if (!Array.isArray(m.p) || m.p.length < 3 || !m.p.every(Number.isFinite) || !Number.isFinite(m.yaw)) return;
-    const r = ensureRemote(m.id);
+    // 外观入站校验：必须是紧凑的键值对象，防畸形报文
+    let app = null;
+    if (m.app && typeof m.app === 'object' && !Array.isArray(m.app)){
+      try { if (JSON.stringify(m.app).length < 800) app = m.app; } catch(e){ app = null; }
+    }
+    const r = ensureRemote(m.id, app);
     r.planet = m.planet;
     r.st = m.st;
     r.tgt.fromArray(m.p);
@@ -276,7 +311,7 @@ const Net = (() => {
     if (st === 'space'){ p = Space.shipState.pos.toArray(); yaw = Space.shipState.yaw; }
     else if (st === 'atmo' || st === 'atmoland' || st === 'seated' || st === 'launching'){ p = Game.shipPos.toArray(); yaw = Game.atmo.yaw; }
     else { p = Player.pos.toArray(); yaw = Player.yaw; }
-    return { t: 'pos', id: myId, planet: Game.currentPlanet, st, p, yaw };
+    return { t: 'pos', id: myId, planet: Game.currentPlanet, st, p, yaw, app: Player.appearance || null };
   }
   function tick(dt){
     if (!active() || !window.Game) return;
@@ -312,14 +347,21 @@ const Net = (() => {
       if (!scene) continue;
       r.ship.visible = showShip;
       r.body.forEach(o => { if (o !== r.tag) o.visible = !showShip; });
+      // 移动速度估计（用于化身行走动画）
+      const spd = Math.hypot(r.tgt.x - r.pos.x, r.tgt.z - r.pos.z);
+      r.speed += (spd - r.speed) * Math.min(1, dt * 5);
       r.pos.lerp(r.tgt, Math.min(1, dt * 8));
       let dy = r.tyaw - r.yaw;
       dy = ((dy + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
       r.yaw += dy * Math.min(1, dt * 8);
       r.group.position.copy(r.pos);
-      if (r.st === 'planet' || r.st === 'seated') r.group.position.y -= 1.4;   // Player.pos 是眼睛高度
+      if (r.st === 'planet' || r.st === 'seated') r.group.position.y -= 1.62;   // Player.pos 是眼睛高度
       r.group.rotation.y = r.yaw + Math.PI;
       r.group.visible = true;
+      // 化身行走动画（四肢随移动摆动）
+      if (!showShip && window.Humanoid && r.body[0]){
+        Humanoid.animate(r.body[0], dt, r.speed > 0.12, Math.min(7, r.speed));
+      }
     }
     for (const id of expired){ removeRemote(id); onStatus(); }
   }

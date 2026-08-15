@@ -1,12 +1,17 @@
 /* ============================================================
    STARFORGE - creatures.js
-   简单体素生物：生成 / 漫游 / 跟随地形 / 跳跃
+   体素生物 + 精模生物：生成 / 漫游 / 跟随地形 / 跳跃
+   · 精模（GLB）播放骨骼动画（Walk/Idle/Death），四肢随行走摆动
+   · 体素回退模型腿关节在髋部旋转摆动
+   · AI：锚定领地（野生生物守巢、村民守村）、矮跳不爬树、
+     前方障碍转向（不再穿树穿墙）、不朝玩家聚集
    ============================================================ */
 'use strict';
 
 const Creatures = (() => {
   let group = null, list = [];
   let vGroup = null, villagers = [];        // 村民（独立分组：不参与刷新清理，不可被攻击）
+  const dying = [];                         // 播放死亡动画中的精模生物
   const spawnedVillages = new Set();
   let lastSpawnPos = null, spawnDist = 80;
 
@@ -16,6 +21,8 @@ const Creatures = (() => {
     strider: { name: 'strider', yaw: Math.PI },
     blob:    { name: 'blob', yaw: 0 },
   };
+
+  // ---------- 模型构建 ----------
   function buildCreature(typeDef, colors, typeKey){
     // 优先使用外部模型（按生态色染色），失败回退程序化体素生物
     const mm = GLB_MAP[typeKey];
@@ -35,11 +42,15 @@ const Creatures = (() => {
     // 躯干
     const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), bodyM);
     g.add(body);
-    // 腿
+    // 腿（髋关节在腿顶：绕髋部前后摆动）
     for (const [lx, lz] of [[-w * 0.35, -d * 0.4], [w * 0.35, -d * 0.4], [-w * 0.35, d * 0.4], [w * 0.35, d * 0.4]]){
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(w * 0.14, h * 0.45, w * 0.14), legM);
-      leg.position.set(lx, -h / 2, lz);
-      g.add(leg);
+      const hip = new THREE.Group();
+      hip.position.set(lx, -h / 2 + h * 0.225, lz);
+      const legGeo = new THREE.BoxGeometry(w * 0.14, h * 0.45, w * 0.14);
+      legGeo.translate(0, -h * 0.225, 0);
+      const leg = new THREE.Mesh(legGeo, legM);
+      hip.add(leg);
+      g.add(hip);
     }
     // 头/眼
     if (typeDef.headW > 0){
@@ -63,99 +74,37 @@ const Creatures = (() => {
     vGroup = new THREE.Group();
     scene.add(vGroup);
     villagers = [];
+    dying.length = 0;
     spawnedVillages.clear();
     lastSpawnPos = null;
   }
 
-  // ---------- 村民（SVG 建模·人形比例）：宜居星球村庄居民，可对话 ----------
-  const VILLAGER_SVG = [
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 104">',
-    // 头发
-    '<path fill="#4a3018" d="M15,4 Q24,-2 33,4 L34,9 L14,9 Z"/>',
-    // 脸 + 颈
-    '<path fill="#e8c49a" d="M15,6 Q24,2 33,6 L33,15 Q24,19 15,15 Z"/>',
-    '<path fill="#e8c49a" d="M21,15 L27,15 L27,20 L21,20 Z"/>',
-    // 后脑头发（只贴在脑后，避免前后两张脸）
-    '<path fill="#3e2814" d="M15,6 Q24,2 33,6 L33,15 Q24,19 15,15 Z"/>',
-    // 眼睛（只在前脸）
-    '<path fill="#2e2018" d="M19,9.5 L21.4,9.5 L21.4,12.4 L19,12.4 Z"/>',
-    '<path fill="#2e2018" d="M26.6,9.5 L29,9.5 L29,12.4 L26.6,12.4 Z"/>',
-    // 上衣（主色可换）
-    '<path fill="#8a6b4a" d="M13,19 L35,19 Q38,20 38,26 L36,52 L12,52 L10,26 Q10,20 13,19 Z"/>',
-    // 双臂（同主色）+ 双手
-    '<path fill="#8a6b4a" d="M7,21 L13,20 L12,46 L6,45 Z"/>',
-    '<path fill="#8a6b4a" d="M35,20 L41,21 L42,45 L36,46 Z"/>',
-    '<path fill="#e8c49a" d="M6,45 L12,46 L11.5,52 L5.8,51 Z"/>',
-    '<path fill="#e8c49a" d="M36,46 L42,45 L42.2,51 L36.5,52 Z"/>',
-    // 腰带
-    '<path fill="#c9963f" d="M12,52 L36,52 L36,56 L12,56 Z"/>',
-    // 双腿（裤）
-    '<path fill="#4a3c2e" d="M13,56 L22.4,56 L21.4,92 L14,92 Z"/>',
-    '<path fill="#4a3c2e" d="M25.6,56 L35,56 L34,92 L26.6,92 Z"/>',
-    // 靴
-    '<path fill="#2e2620" d="M13.4,92 L21.6,92 L22,100 L12.4,100 Z"/>',
-    '<path fill="#2e2620" d="M26.4,92 L34.6,92 L35.6,100 L26,100 Z"/>',
-    '</svg>',
-  ].join('');
-  let _vilTpl = null;
-  function buildVillagerTemplate(){
-    const g = new THREE.Group();
-    let ok = false;
-    if (typeof THREE.SVGLoader === 'function'){
-      try {
-        const data = new THREE.SVGLoader().parse(VILLAGER_SVG);
-        const mats = {};
-        const depths = {
-          '#4a3018': 13.5, '#e8c49a': 13, '#2e2018': 2.5, '#3e2814': 2.5,
-          '#8a6b4a': 12, '#c9963f': 13, '#4a3c2e': 11, '#2e2620': 12,
-        };
-        // Z 向摆放：默认居中；眼睛只贴前脸(-Z)，后脑发只贴脑后(+Z)——不再前后两张脸
-        const zOff = { '#2e2018': -7.3, '#3e2814': 5.0 };
-        const s = 0.0172;   // 全高约 1.75 格：真人身形
-        const wrap = new THREE.Group();
-        for (const path of data.paths){
-          const fill = path.userData.style.fill;
-          const shapes = THREE.SVGLoader.createShapes(path);
-          if (!shapes.length) continue;
-          const depth = depths[fill] || 12;
-          const geo = new THREE.ExtrudeGeometry(shapes, { depth, bevelEnabled: false, curveSegments: 8 });
-          geo.translate(-24, 0, zOff[fill] !== undefined ? zOff[fill] : -depth / 2);
-          if (!mats[fill]) mats[fill] = fill === '#2e2018'
-            ? new THREE.MeshBasicMaterial({ color: 0x2e2018 })
-            : new THREE.MeshLambertMaterial({ color: new THREE.Color(fill) });
-          wrap.add(new THREE.Mesh(geo, mats[fill]));
-        }
-        wrap.scale.set(s, -s, s);
-        wrap.position.y = 100 * s;
-        g.add(wrap);
-        ok = wrap.children.length > 0;
-      } catch(e){ console.warn('[villager svg]', e); }
-    }
-    if (!ok){
-      const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.3), new THREE.MeshLambertMaterial({ color: 0x8a6b4a }));
-      body.position.y = 0.9; g.add(body);
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), new THREE.MeshLambertMaterial({ color: 0xe8c49a }));
-      head.position.y = 1.68; g.add(head);
-    }
-    return g;
-  }
+  // ---------- 村民：统一人形管线（Humanoid），四肢关节可动 ----------
   const VILLAGER_NAMES = ['老农全叔', '铁匠芒果', '采药人芸', '守望者白', '小豆豆', '织工兰', '猎户岩', '酿蜜人蓬', '陶匠小满', '游方商乌拉'];
   const ROBE_TINTS = [0x8a6b4a, 0x6a7a8a, 0x7a8a5a, 0x9a6a5a, 0x6a5a8a];
+  const _vilCache = {};   // 上衣色 → 已建模板
   function buildVillager(idx){
-    if (!_vilTpl) _vilTpl = buildVillagerTemplate();
-    const g = _vilTpl.clone();
-    // 上衣+双臂整体换色（同色部件共享一份克隆材质，模板不受影响）
-    let tintMat = null;
-    g.traverse(o => {
-      if (o.isMesh && o.material && o.material.color && o.material.color.getHex() === 0x8a6b4a){
-        if (!tintMat){
-          tintMat = o.material.clone();
-          tintMat.color.setHex(ROBE_TINTS[idx % ROBE_TINTS.length]);
-        }
-        o.material = tintMat;
-      }
-    });
-    return g;
+    const tint = ROBE_TINTS[idx % ROBE_TINTS.length];
+    const key = tint.toString(16);
+    if (!_vilCache[key]){
+      _vilCache[key] = Humanoid.build({
+        skin: '#e8c49a', hair: '#4a3018', hairStyle: 'short',
+        suit: '#' + tint.toString(16).padStart(6, '0'),
+        pants: '#4a3c2e', boots: '#2e2620', glove: '#e8c49a', belt: '#c9963f',
+      });
+    }
+    return _vilCache[key].clone(true);   // 克隆时几何共享（模板永不被 dispose；关节由 spawnVillages 按孩子顺序重建）
+  }
+  // 克隆树的关节组按模板构建顺序还原（head/torso/armL/armR/legL/legR 依次挂在根上）
+  const JOINT_ORDER = ['head', 'torso', 'armL', 'armR', 'legL', 'legR'];
+  function rigFromClone(g){
+    const rig = {};
+    JOINT_ORDER.forEach((k, i) => { if (g.children[i]) rig[k] = g.children[i]; });
+    return rig;
+  }
+  function buildVillagerTemplate(){
+    // 兼容旧调用：返回一个默认模板
+    return buildVillager(0);
   }
   function spawnVillages(plyPos){
     if (!vGroup || !World.structures) return;
@@ -170,18 +119,25 @@ const Creatures = (() => {
       const n = 3 + ((rnd() * 3) | 0);
       for (let i = 0; i < n; i++){
         const g = buildVillager((rnd() * 10) | 0);
-        const vx = st.x + (rnd() - 0.5) * 16, vz = st.z + (rnd() - 0.5) * 16;
-        const foot = footOffset(g, { h: 1.4 });
-        g.position.set(vx, World.topAt(Math.floor(vx), Math.floor(vz)) + 1 + foot, vz);
+        // 出生点：村心附近 5 格内，且不落在树木上
+        let vx = st.x, vz = st.z, gy = World.topAt(Math.floor(vx), Math.floor(vz));
+        for (let t = 0; t < 6; t++){
+          vx = st.x + (rnd() - 0.5) * 10; vz = st.z + (rnd() - 0.5) * 10;
+          gy = World.topAt(Math.floor(vx), Math.floor(vz));
+          const dd = World.getDef(Math.floor(vx), gy, Math.floor(vz));
+          if (!dd || (!dd.liquid && dd.key !== 'log' && dd.key !== 'leaves')) break;
+        }
+        const grig = rigFromClone(g);
+        g.position.set(vx, gy + 1 + 0.02, vz);
         g.userData = {
-          villager: true, isGlb: true,
+          villager: true, isGlb: true, rig: grig,
           name: VILLAGER_NAMES[(rnd() * VILLAGER_NAMES.length) | 0],
           home: { x: st.x, z: st.z },
-          speed: 0.7 + rnd() * 0.5,
+          speed: 0.6 + rnd() * 0.4,
           dir: rnd() * Math.PI * 2,
           state: 'idle', timer: 1 + rnd() * 4,
           jumpVel: 0, onGround: true,
-          typeDef: { speed: 0.8, jump: false }, animT: rnd() * 10, foot,
+          typeDef: { speed: 0.8, jump: false, h: 1.7 }, animT: rnd() * 10, foot: 0.02,
         };
         vGroup.add(g);
         villagers.push(g);
@@ -197,6 +153,9 @@ const Creatures = (() => {
     return best ? { g: best, dist: bestD } : null;
   }
 
+  // 地形判断：地面列顶是否是树木/液体（生物不生成在树上/水里）
+  function solidDefAt(x, y, z){ return World.getDef(Math.floor(x), Math.floor(y), Math.floor(z)); }
+
   // plyPos: Vector3, biome: 星球生态对象
   function update(dt, plyPos, biome){
     if (!group) return;
@@ -211,26 +170,37 @@ const Creatures = (() => {
     lastSpawnPos = plyPos.clone();
     // 清理旧生物（GLB 克隆几何共享模板跳过；体素回退全量）
     for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+    for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+    dying.length = 0;
     group.clear();
     list = [];
 
     const typeDef = CREATURE_TYPES[info.type] || CREATURE_TYPES.strider;
     for (let i = 0; i < Math.min(info.count, 22); i++){
+      // 出生点选择：12~92 格随机环，避开水体与树木顶端
+      let wx = 0, wz = 0, gy = 0, ok = false;
+      for (let t = 0; t < 8 && !ok; t++){
+        const ang = Math.random() * Math.PI * 2;
+        const dist = 12 + Math.random() * spawnDist;
+        wx = p.x + Math.cos(ang) * dist; wz = p.z + Math.sin(ang) * dist;
+        gy = World.topAt(Math.floor(wx), Math.floor(wz));
+        const dd = solidDefAt(wx, gy, wz);
+        ok = !!dd && !dd.liquid && dd.key !== 'log' && dd.key !== 'leaves';
+      }
       const g = buildCreature(typeDef, { body: info.body, legs: info.legs, eye: info.eye }, info.type);
       // 贴地偏移：模型原点(躯干中心)到最低点（腿底）的距离，站在方块顶面(gy+1)上
       const foot = footOffset(g, typeDef);
-      const ang = Math.random() * Math.PI * 2;
-      const dist = 12 + Math.random() * spawnDist;
-      const wx = p.x + Math.cos(ang) * dist, wz = p.z + Math.sin(ang) * dist;
-      const gy = World.topAt(Math.floor(wx), Math.floor(wz));
       g.position.set(wx, gy + 1 + foot, wz);
+      const glbClips = g.userData.clips || null;
       g.userData = {
         speed: typeDef.speed * (0.5 + Math.random()),
         dir: Math.random() * Math.PI * 2,
         state: 'idle', timer: 1 + Math.random() * 3,
-        jumpVel: 0, onGround: true,
+        jumpVel: 0, onGround: true, jumpCd: 0,
         typeDef, animT: Math.random() * 10, foot,
         hp: 4, isGlb: !!g.userData.isGlb,
+        clips: glbClips,
+        home: { x: wx, z: wz },             // 领地锚点：野生生物守巢，不再向玩家聚集
         radius: Math.max(0.55, Math.max(typeDef.w, typeDef.h, typeDef.d) * 1.3),
       };
       group.add(g);
@@ -245,20 +215,71 @@ const Creatures = (() => {
     return typeDef.h * 0.75;
   }
 
-  // 每帧更新：AI 漫游 + 贴地 + 腿动画（野生生物 + 村民共用；村民漫游锚定村庄）
+  // ---------- 每帧更新 ----------
   function tick(dt, plyPos){
     for (const g of list) tickOne(g, dt, plyPos);
     for (const g of villagers) tickOne(g, dt, plyPos);
+    // 死亡动画播完 → 移除
+    for (let i = dying.length - 1; i >= 0; i--){
+      const g = dying[i];
+      const u = g.userData;
+      u.dying.t -= dt;
+      if (u.mixer) u.mixer.update(dt);
+      if (u.dying.t <= 0){
+        disposeObject3D(g, { skipGeo: !!u.isGlb, skipTex: true });
+        group.remove(g);
+        dying.splice(i, 1);
+      }
+    }
   }
+
+  // 前方通行检测：超过 1 格的高台（树干/高墙/崖壁）或身体高度有实心方块（穿树穿墙）→ 阻挡
+  // 1 格以内的台阶允许直接走上（生物不会被地形卡死堆积）；树干列 topAt 是树冠（4~6 格高）→ 天然被挡
+  function blockedAhead(u, nx, nz, curGy){
+    const fx = Math.floor(nx), fz = Math.floor(nz);
+    const newGy = World.topAt(fx, fz);
+    const maxStep = 1.05;
+    if (newGy > curGy + maxStep) return true;
+    const bodyH = Math.max(1, (u.typeDef && u.typeDef.h) || 1.4);
+    for (let y = newGy + 1; y <= newGy + Math.ceil(bodyH); y++){
+      const d = World.getDef(fx, y, fz);
+      if (d && d.id !== 0 && !d.cross && !d.liquid && !d.lowbox) return true;
+    }
+    return false;
+  }
+  // 方向障碍转向：随机折返，避免持续顶墙
+  function dodge(u){
+    u.dir += (Math.random() < 0.5 ? 1 : -1) * (Math.PI * 0.55 + Math.random() * 0.9);
+  }
+
   function tickOne(g, dt, plyPos){
     {
       const u = g.userData;
       u.animT += dt;
       u.timer -= dt;
+      // 村民越界（离村心 > 10 格）→ 立即回家，不等待计时
+      if (u.villager && u.state === 'idle'){
+        const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
+        if (hx * hx + hz * hz > 10 * 10){
+          u.state = 'walk';
+          u.dir = Math.atan2(hz, hx);
+          u.timer = 2 + Math.random() * 3;
+        }
+      }
       if (u.timer <= 0){
         if (u.state === 'idle'){
           u.state = 'walk';
-          u.dir += (Math.random() - 0.5) * 1.5;
+          if (u.villager){
+            // 村民选向：向村心偏置（出圈一半概率朝家走），不再漫无目的乱跑
+            const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
+            if (hx * hx + hz * hz > 6 * 6 && Math.random() < 0.65){
+              u.dir = Math.atan2(hz, hx) + (Math.random() - 0.5) * 1.2;
+            } else {
+              u.dir = Math.random() * Math.PI * 2;
+            }
+          } else {
+            u.dir += (Math.random() - 0.5) * 1.5;
+          }
           u.timer = 2 + Math.random() * 5;
         } else {
           u.state = 'idle';
@@ -268,38 +289,54 @@ const Creatures = (() => {
       }
       // 移动
       if (u.state === 'walk'){
-        const wx = g.position.x + Math.cos(u.dir) * u.speed * dt;
-        const wz = g.position.z + Math.sin(u.dir) * u.speed * dt;
+        let nx = g.position.x + Math.cos(u.dir) * u.speed * dt;
+        let nz = g.position.z + Math.sin(u.dir) * u.speed * dt;
+        const curGy = World.topAt(Math.floor(g.position.x), Math.floor(g.position.z));
         if (u.villager){
-          // 村民：漫游锚定村庄（离村心 14 格外折返）
+          // 村民：漫游锚定村庄（离村心 10 格外折返）
           const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
-          if (hx * hx + hz * hz > 14 * 14) u.dir = Math.atan2(hz, hx);
+          if (hx * hx + hz * hz > 10 * 10) u.dir = Math.atan2(hz, hx);
         } else {
-          // 野生生物：远处转向玩家
-          const dx = plyPos.x - g.position.x, dz = plyPos.z - g.position.z;
-          if (Math.sqrt(dx * dx + dz * dz) > 40){
-            u.dir = Math.atan2(dz, dx);
+          // 野生生物：锚定出生领地（26 格外折返），不再远处转向玩家聚集
+          const hx = u.home.x - g.position.x, hz = u.home.z - g.position.z;
+          if (hx * hx + hz * hz > 26 * 26) u.dir = Math.atan2(hz, hx);
+        }
+        // 前方阻挡（树木/墙体/高台）→ 先尝试沿墙滑动，滑不动再转向（避免顶墙堆积）
+        if (blockedAhead(u, nx, nz, curGy)){
+          const sx = g.position.x + Math.cos(u.dir) * u.speed * dt;
+          if (!blockedAhead(u, sx, g.position.z, curGy)){
+            nx = sx; nz = g.position.z;
+          } else {
+            const sz = g.position.z + Math.sin(u.dir) * u.speed * dt;
+            if (!blockedAhead(u, g.position.x, sz, curGy)){
+              nx = g.position.x; nz = sz;
+            } else {
+              dodge(u);
+              nx = g.position.x; nz = g.position.z;
+            }
           }
         }
         // 贴地（仅落地时吸附；空中交给重力，避免跳跃/坠崖被逐帧拉回地面）
         if (u.onGround){
-          const gy = World.topAt(Math.floor(wx), Math.floor(wz));
+          const gy = World.topAt(Math.floor(nx), Math.floor(nz));
           const targetY = gy + 1 + u.foot;
           if (targetY < g.position.y - 0.5){
             u.onGround = false;   // 前方悬空 → 转入自由落体
-            g.position.set(wx, g.position.y, wz);
+            g.position.set(nx, g.position.y, nz);
           } else {
-            g.position.set(wx, THREE.MathUtils.lerp(g.position.y, targetY, dt * 6), wz);
+            g.position.set(nx, THREE.MathUtils.lerp(g.position.y, targetY, dt * 6), nz);
           }
         } else {
-          g.position.x = wx; g.position.z = wz;
+          g.position.x = nx; g.position.z = nz;
         }
         // 朝向：模型前方(-Z)对齐移动方向
         g.rotation.y = -u.dir - Math.PI / 2;
-        // 跳跃
-        if (u.typeDef.jump && u.onGround && Math.random() < 0.003){
-          u.jumpVel = 6;
+        // 跳跃：约 1 格高的小跳（能跃上一格台阶，远够不到 4 格以上的树冠），概率降低 + 冷却
+        if (u.jumpCd > 0) u.jumpCd -= dt;
+        if (u.typeDef.jump && u.onGround && u.jumpCd <= 0 && Math.random() < 0.0004){
+          u.jumpVel = 6.4;      // 跳高 ≈ 1.02 格（原 6 → 0.9；4.2 → 0.44 会连一格都上不去）
           u.onGround = false;
+          u.jumpCd = 1.2;
         }
       }
       // 重力：空中自由落体 + 落地吸附（跳跃不再被当帧抵消）
@@ -314,23 +351,52 @@ const Creatures = (() => {
           u.onGround = true;
         }
       }
-      if (g.userData.isGlb){
-        // 精模：行走时轻微摇摆 + 步伐起伏
-        const pivot = g.children[0];
-        if (pivot){
-          pivot.rotation.z = u.state === 'walk' ? Math.sin(u.animT * (4 + u.speed * 3)) * 0.07 : pivot.rotation.z * 0.9;
-          pivot.rotation.x = u.state === 'walk' ? Math.sin(u.animT * (8 + u.speed * 3)) * 0.03 : 0;
+      if (u.isGlb && u.clips && u.clips.length){
+        // ---- 精模：骨骼动画（Walk/Idle 交叉淡化，死亡单独处理）----
+        if (!u.mixer){
+          u.mixer = new THREE.AnimationMixer(g);
+          const pick = preds => {
+            for (const p of preds){
+              const c = u.clips.find(x => p(x.name.toLowerCase()));
+              if (c) return c;
+            }
+            return null;
+          };
+          u.clips.walk  = pick([n => n === 'walk' || n.endsWith('|walk'), n => n.includes('walk')]);
+          u.clips.idle  = pick([n => n === 'idle' || n.endsWith('|idle'), n => n === 'idle_2' || n.endsWith('|idle_2'), n => n.includes('idle') && !n.includes('hit') && !n.includes('jump')]);
+          u.clips.death = pick([n => n.includes('death')]);
+          if (u.clips.walk && u.clips.idle){
+            const aW = u.mixer.clipAction(u.clips.walk);
+            const aI = u.mixer.clipAction(u.clips.idle);
+            aW.setEffectiveWeight(0);
+            aI.setEffectiveWeight(1);
+            aW.play(); aI.play();
+            u.anim = { walk: aW, idle: aI };
+          }
         }
+        if (u.anim && !u.dying){
+          const wantWalk = u.state === 'walk' ? 1 : 0;
+          const prev = u.anim.walk.getEffectiveWeight();
+          const nw = prev + (wantWalk - prev) * Math.min(1, dt * 6);
+          u.anim.walk.setEffectiveWeight(nw);
+          u.anim.idle.setEffectiveWeight(1 - nw);
+          u.anim.walk.timeScale = 0.75 + Math.min(1.6, u.speed * 0.7);
+        }
+        if (u.mixer) u.mixer.update(dt);
+      } else if (u.villager && g.userData.rig){
+        // ---- 村民：人形关节动画（四肢随行走摆动）----
+        Humanoid.animate(g, dt, u.state === 'walk', u.speed);
       } else {
-        // 腿摆动（children: 0=躯干, 1..4=腿）
-        const legBob = u.state === 'walk' ? Math.sin(u.animT * (2 + u.speed * 3)) * 0.35 : 0;
+        // ---- 体素回退：腿绕髋关节摆动（children: 0=躯干, 1..4=腿关节）----
+        const legBob = u.state === 'walk' ? Math.sin(u.animT * (2 + u.speed * 3)) * 0.55 : 0;
         for (let i = 1; i <= 4 && i < g.children.length; i++){
           const leg = g.children[i];
-          if (leg && leg.geometry) leg.rotation.x = (i % 2 ? 1 : -1) * legBob;
+          if (leg && leg.isGroup) leg.rotation.x = (i % 2 ? 1 : -1) * legBob;
         }
-        // 待机呼吸
-        if (u.state === 'idle' && g.children[0]){
-          g.children[0].scale.y = 1 + Math.sin(u.animT * 2) * 0.03;
+        // 行走时躯干起伏 / 待机呼吸
+        if (g.children[0]){
+          g.children[0].position.y = u.state === 'walk' ? Math.abs(Math.sin(u.animT * (2 + u.speed * 3))) * 0.04 : 0;
+          g.children[0].scale.y = u.state === 'idle' ? 1 + Math.sin(u.animT * 2) * 0.03 : 1;
         }
       }
     }
@@ -339,11 +405,13 @@ const Creatures = (() => {
   function reset(){
     if (group){
       for (const g of list) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
+      for (const g of dying) disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
       group.clear();
     }
     list = [];
+    dying.length = 0;
     if (vGroup){
-      for (const g of villagers) disposeObject3D(g, { skipGeo: true, skipTex: true });   // 村民克隆共享模板几何
+      for (const g of villagers) disposeObject3D(g, { skipGeo: true, skipTex: true, skipMat: true });   // 村民克隆共享模板几何/材质
       vGroup.clear();
     }
     villagers = [];
@@ -381,8 +449,21 @@ const Creatures = (() => {
   function kill(g){
     const i = list.indexOf(g);
     if (i >= 0) list.splice(i, 1);
-    disposeObject3D(g, { skipGeo: !!g.userData.isGlb, skipTex: true });
-    group.remove(g);
+    const u = g.userData;
+    // 有死亡动画的精模：原地播放倒地动画后移除
+    if (u.mixer && u.clips && u.clips.death){
+      u.dying = { t: u.clips.death.duration + 0.1 };
+      if (u.anim){ u.anim.walk.stop(); u.anim.idle.stop(); }
+      const act = u.mixer.clipAction(u.clips.death);
+      act.reset();
+      act.setLoop(THREE.LoopOnce, 1);
+      act.clampWhenFinished = true;
+      act.play();
+      dying.push(g);
+    } else {
+      disposeObject3D(g, { skipGeo: !!u.isGlb, skipTex: true });
+      group.remove(g);
+    }
     if (window.Player){
       Player.spawnParticles(g.position.x, g.position.y + 0.3, g.position.z, 0xd4544a, 14);
       Player.spawnDrop(g.position.x, g.position.y + 0.6, g.position.z, 'carbon', 1 + (Math.random() * 2 | 0));
@@ -390,6 +471,9 @@ const Creatures = (() => {
     Sound.play('breakBlk', 0.55);
   }
 
-  return { init, update, tick, reset, rayHit, damage, nearestVillager };
+  return { init, update, tick, reset, rayHit, damage, kill, nearestVillager,
+    debugList(){ return list; },
+    debugVillagers(){ return villagers; },
+  };
 })();
 window.Creatures = Creatures;

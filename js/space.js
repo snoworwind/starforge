@@ -629,16 +629,18 @@ const Space = (() => {
   // 所有位置与尺寸吸附 1 单位栅格；sym:1 的零件强制生成 x 镜像副本（左右对称）
   const SGRID = 1;
   const q1 = v => Math.round(v / SGRID) * SGRID;
+  // 细节材质统一加 polygonOffset：贴面部件（屏/灯带/饰条）永远赢过墙体的深度比较，杜绝残余共面闪烁
+  const _PO = { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 };
   const STATION_MATS = () => ({
     hull:   new THREE.MeshLambertMaterial({ map: Tex.tileTexture('metal', 3, 3) }),
     dark:   new THREE.MeshLambertMaterial({ map: Tex.tileTexture('metal_dark', 3, 3) }),
     deck:   new THREE.MeshLambertMaterial({ color: 0x3a4148 }),
-    accent: new THREE.MeshLambertMaterial({ color: 0xc9641a }),
-    glowC:  new THREE.MeshBasicMaterial({ color: 0x35e0e8 }),
-    glowA:  new THREE.MeshBasicMaterial({ color: 0xffb347 }),
-    glowW:  new THREE.MeshBasicMaterial({ color: 0xdff4ff }),
+    accent: new THREE.MeshLambertMaterial(Object.assign({ color: 0xc9641a }, _PO)),
+    glowC:  new THREE.MeshBasicMaterial(Object.assign({ color: 0x35e0e8 }, _PO)),
+    glowA:  new THREE.MeshBasicMaterial(Object.assign({ color: 0xffb347 }, _PO)),
+    glowW:  new THREE.MeshBasicMaterial(Object.assign({ color: 0xdff4ff }, _PO)),
     solar:  new THREE.MeshLambertMaterial({ color: 0x2a4a7a }),
-    screen: new THREE.MeshBasicMaterial({ color: 0x0f4a52 }),
+    screen: new THREE.MeshBasicMaterial(Object.assign({ color: 0x0f4a52 }, _PO)),
     shield: new THREE.MeshBasicMaterial({ color: 0x35b0ff, transparent: true, opacity: 0.26, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
   });
   // SVG 剖面（路径字符串 "x,y x,y ..."，x=半径 y=高度）→ 车削
@@ -700,6 +702,15 @@ const Space = (() => {
     ].join('');
   }
   function buildStaffFigure(c){
+    // 统一人形管线（Humanoid）：与村民/玩家化身同风格，四肢带关节（闲置呼吸动画）
+    if (window.Humanoid){
+      const g = Humanoid.build({
+        skin: c.skin, hair: c.hair, hairStyle: 'short',
+        suit: c.suit, trim: c.trim, trimOn: true,
+        pants: c.pants, boots: c.boots, glove: c.glove, belt: c.belt,
+      });
+      return g;
+    }
     const g = new THREE.Group();
     try {
       const data = new THREE.SVGLoader().parse(staffSVG(c));
@@ -709,7 +720,6 @@ const Space = (() => {
         const fill = path.userData.style.fill;
         const shapes = THREE.SVGLoader.createShapes(path);
         if (!shapes.length) continue;
-        // 眼睛/后脑发盖为薄片：眼睛只在前脸(-Z)，发盖只在后脑(+Z)，其余居中
         const thin = fill === '#20262e' || fill === '#262a30';
         const depth = thin ? 2.5 : (fill === c.hair ? 13 : 12);
         const geo = new THREE.ExtrudeGeometry(shapes, { depth, bevelEnabled: false, curveSegments: 8 });
@@ -768,7 +778,7 @@ const Space = (() => {
     const goods = (typeof TRADE_GOODS !== 'undefined' ? TRADE_GOODS : ['tritium', 'iron', 'carbon', 'circuit', 'data', 'gold']).slice(0, 7);
     termRows = goods.map((id, i) => ({ id, p: 40 + ((i * 37) % 60), d: 1 }));
     const scr = new THREE.Mesh(new THREE.BoxGeometry(10, 5, 1), new THREE.MeshBasicMaterial({ map: termTex }));
-    scr.position.set(0, 9, -4);
+    scr.position.set(0, 9, -3.95);   // 前移 5cm：屏幕背面不再与大屏背板前脸共面（防闪烁）
     g.add(scr);
     drawTerminal(0);
   }
@@ -817,9 +827,9 @@ const Space = (() => {
       { g: 'box', p: [0, 32, 31], s: [80, 4, 102], m: 'dark' },              // 库顶
       { g: 'box', p: [36, 15, 31], s: [8, 34, 102], m: 'hull', sym: 1 },     // 侧墙
       { g: 'box', p: [0, 15, -17], s: [80, 34, 6], m: 'hull' },              // 后墙
-      { g: 'box', p: [0, 24, 79], s: [80, 12, 6], m: 'hull' },               // 前墙·上段
-      { g: 'box', p: [0, 1, 79], s: [80, 2, 6], m: 'hull' },                 // 前墙·下段
-      { g: 'box', p: [27, 10, 79], s: [26, 16, 6], m: 'hull', sym: 1 },      // 前墙·侧段
+      { g: 'box', p: [0, 23.9, 79], s: [80, 12.4, 6], m: 'hull' },           // 前墙·上段（底缘嵌入侧段，消除共面）
+      { g: 'box', p: [0, 1.1, 79], s: [80, 4.4, 6], m: 'hull' },             // 前墙·下段（顶缘嵌入侧段）
+      { g: 'box', p: [27, 9.9, 79], s: [26, 16.4, 6], m: 'hull', sym: 1 },   // 前墙·侧段（两端嵌入上下段）
       // 入口发光框（gate:1 = 独立材质：护盾激活时变红闪烁）
       { g: 'box', p: [0, 19, 82], s: [32, 2, 2], m: 'glowC', gate: 1 },
       { g: 'box', p: [0, 1, 82], s: [32, 2, 2], m: 'glowC', gate: 1 },
@@ -833,15 +843,15 @@ const Space = (() => {
       { g: 'box', p: [46, 20, -72], s: [2, 12, 2], m: 'glowC', sym: 1 },     // 塔身灯带
       { g: 'box', p: [52, 12, 20], s: [16, 12, 72], m: 'hull', sym: 1 },     // 侧翼主体
       { g: 'box', p: [58, 26, 0], s: [4, 24, 28], m: 'dark', sym: 1 },       // 侧翼立鳍
-      { g: 'box', p: [52, 12, -18], s: [8, 6, 4], m: 'glowA', sym: 1 },      // 翼尾引擎光
-      { g: 'box', p: [52, 19, 40], s: [12, 2, 30], m: 'accent', sym: 1 },    // 翼面色带
-      { g: 'box', p: [0, -12, 20], s: [24, 16, 60], m: 'dark' },             // 下龙骨
+      { g: 'box', p: [52, 12, -17.7], s: [8, 6, 3.8], m: 'glowA', sym: 1 },  // 翼尾引擎光（后缘嵌入翼尾）
+      { g: 'box', p: [52, 19.05, 40], s: [12, 2, 30], m: 'accent', sym: 1 }, // 翼面色带（上移 5cm 防共面）
+      { g: 'box', p: [0, -12.1, 20], s: [24, 15.8, 60], m: 'dark' },         // 下龙骨（顶面下移 20cm 防共面）
       // ===== 库内：吊顶灯带 / 侧窗 / 大屏 =====
       { g: 'box', p: [0, 29, 8], s: [56, 1, 2], m: 'glowW' },
       { g: 'box', p: [0, 29, 28], s: [56, 1, 2], m: 'glowW' },
       { g: 'box', p: [0, 29, 48], s: [56, 1, 2], m: 'glowW' },
       { g: 'box', p: [0, 29, 68], s: [56, 1, 2], m: 'glowW' },
-      { g: 'box', p: [33, 18, 50], s: [2, 8, 20], m: 'screen', sym: 1 },     // 舷窗
+      { g: 'box', p: [31.4, 18, 50], s: [2, 8, 20], m: 'screen', sym: 1 },   // 舷窗（探入室内，背面嵌入墙内，消除共面闪烁）
       { g: 'box', p: [0, 16, -13], s: [40, 12, 1], m: 'screen' },            // 大厅主屏
       // ===== 宏伟配件：巨型环形桁架 / 太阳能翼阵 / 燃料罐组 / 通讯塔 / 塔脊光带 =====
       { g: 'lathe', prof: 'ring', p: [0, -20, -72], m: 'hull', seg: 40 },    // 环绕主塔的巨环（车削截面）
@@ -853,8 +863,8 @@ const Space = (() => {
       { g: 'box', p: [52, -8, -72], s: [40, 2, 2], m: 'dark', sym: 1, r: [0, 0, 0.5] },  // 环-塔斜撑
       { g: 'box', p: [70, 12, -44], s: [32, 1, 20], m: 'solar', sym: 1 },    // 太阳能翼板
       { g: 'box', p: [70, 12, -44], s: [34, 2, 2], m: 'dark', sym: 1 },      // 翼板主梁
-      { g: 'box', p: [70, 13, -44], s: [30, 1, 1], m: 'glowC', sym: 1 },     // 集电光缝
-      { g: 'box', p: [56, 12, -30], s: [4, 2, 28], m: 'dark', sym: 1 },      // 翼板-侧翼连接臂
+      { g: 'box', p: [70, 13.06, -44], s: [30, 1.02, 1], m: 'glowC', sym: 1 },  // 集电光缝（垫高 6cm 防共面）
+      { g: 'box', p: [56, 12, -29.6], s: [4, 2, 28], m: 'dark', sym: 1 },    // 翼板-侧翼连接臂（前缘嵌入侧翼防共面）
       { g: 'lathe', prof: 'tank', p: [26, -14, 60], m: 'accent', sym: 1, seg: 12 },  // 燃料罐
       { g: 'box', p: [26, -14, 60], s: [14, 2, 2], m: 'dark', sym: 1 },      // 罐箍
       { g: 'box', p: [26, -7, 60], s: [2, 6, 2], m: 'dark', sym: 1 },        // 罐-库底吊柱
@@ -866,29 +876,29 @@ const Space = (() => {
       { g: 'box', p: [0, 1, -4], s: [64, 4, 20], m: 'deck' },                // 平台（顶面 y=3）
       // 中央阶梯：三级踏步（每级升 1 深 2，与行走地板高度函数一致）——原单块斜坡太陡太高
       { g: 'box', p: [0, 0, 9], s: [20, 2, 2], m: 'deck' },                  // 第一级 顶面 y=1
-      { g: 'box', p: [0, 1, 7], s: [20, 2, 2], m: 'deck' },                  // 第二级 顶面 y=2
-      { g: 'box', p: [0, 2, 5], s: [20, 2, 2], m: 'deck' },                  // 第三级 顶面 y=3
-      { g: 'box', p: [11, 1, 8], s: [2, 4, 6], m: 'accent', sym: 1 },        // 阶梯侧挡板
+      { g: 'box', p: [0, 1, 7.01], s: [20, 2, 2.02], m: 'deck' },            // 第二级 顶面 y=2（嵌入上下级）
+      { g: 'box', p: [0, 1.995, 4.99], s: [20, 1.99, 2.06], m: 'deck' },     // 第三级 顶面 y≈3（与平台错位 5mm）
+      { g: 'box', p: [11.01, 1, 8], s: [2, 4, 6], m: 'accent', sym: 1 },     // 阶梯侧挡板（外移 1cm 防共面）
       { g: 'box', p: [20, 4, 5], s: [24, 1, 1], m: 'accent', sym: 1 },       // 栏杆
-      { g: 'box', p: [10, 3, 5], s: [1, 3, 1], m: 'dark', sym: 1 },          // 栏杆柱
-      { g: 'box', p: [31, 3, 5], s: [1, 3, 1], m: 'dark', sym: 1 },
+      { g: 'box', p: [10, 3, 5], s: [0.9, 2.9, 0.9], m: 'dark', sym: 1 },    // 栏杆柱（收窄 10cm 防共面）
+      { g: 'box', p: [31, 3, 5], s: [0.9, 2.9, 0.9], m: 'dark', sym: 1 },
       // ===== 交易终端（炫酷主机：曲面大屏滚动行情 + 侧翼屏 + 发光键盘台）=====
-      { g: 'box', p: [0, 4, -3], s: [6, 2, 3], m: 'dark' },                  // 主机基座
+      { g: 'box', p: [0, 4.02, -3], s: [6, 2, 3], m: 'dark' },               // 主机基座（抬高 2cm 防平台共面）
       { g: 'box', p: [0, 5, -2], s: [10, 2, 2], m: 'deck' },                 // 操作台
       { g: 'box', p: [0, 6, -2], s: [8, 1, 1], m: 'glowC' },                 // 发光键盘条
       { g: 'box', p: [0, 9, -5], s: [12, 6, 1], m: 'dark' },                 // 大屏背板/边框
-      { g: 'box', p: [7, 8, -4], s: [3, 4, 1], m: 'screen', sym: 1 },        // 侧翼副屏
-      { g: 'box', p: [5, 12, -4], s: [1, 2, 1], m: 'accent', sym: 1 },       // 天线柱
-      { g: 'box', p: [5, 13, -4], s: [1, 1, 1], m: 'glowA', sym: 1, nav: 1 },// 天线灯
+      { g: 'box', p: [7, 8, -3.95], s: [3, 4, 1], m: 'screen', sym: 1 },     // 侧翼副屏（前移 5cm 防共面）
+      { g: 'box', p: [5, 12, -3.9], s: [1, 2, 1], m: 'accent', sym: 1 },     // 天线柱（前移 10cm）
+      { g: 'box', p: [5, 13, -3.85], s: [1, 1, 1], m: 'glowA', sym: 1, nav: 1 },// 天线灯（前移 15cm）
       { g: 'box', p: [0, 4, -1], s: [6, 1, 1], m: 'glowA' },                 // 底部氛围灯
       { g: 'box', p: [22, 5, -8], s: [8, 6, 2], m: 'screen', sym: 1 },       // 侧信息屏
     );
     // 停机坪（车削）+ 光环 + 编号灯
     for (const pp of DOCK_L.pads){
       P.push(
-        { g: 'lathe', prof: 'pad', p: [pp[0], 0, pp[2]], m: 'dark', seg: 18 },
+        { g: 'lathe', prof: 'pad', p: [pp[0], 0.02, pp[2]], m: 'dark', seg: 18 },   // 底座抬高 2cm 防库底共面
         { g: 'cyl', p: [pp[0], 1, pp[2]], s: [17, 1], m: 'glowC', seg: 18 },
-        { g: 'box', p: [pp[0], 1, pp[2] + 9], s: [2, 2, 1], m: 'glowA' },
+        { g: 'box', p: [pp[0], 1.02, pp[2] + 9], s: [2, 2, 1], m: 'glowA' },    // 编号灯抬高 2cm 防库底共面
       );
     }
     // 入口引导灯（成对，穿过护盾一路排到站外）
@@ -1225,12 +1235,14 @@ const Space = (() => {
     for (const f of stationStaff){
       f.position.y = f.userData.baseY + Math.sin(_stT * 1.6 + f.userData.ph) * 0.05;
       f.rotation.y = f.userData.rot + Math.sin(_stT * 0.5 + f.userData.ph) * 0.08;
+      if (window.Humanoid) Humanoid.animate(f, dt, false, 0);   // 闲置呼吸/微动
     }
     // 停机坪驾驶员：玩手机微动 + 屏幕光闪烁
     for (const v of visitors){
       const fig = v.userData.pilotFig;
       if (!fig) continue;
       fig.position.y = fig.userData.baseY + Math.sin(_stT * 1.3 + fig.userData.ph) * 0.03;
+      if (window.Humanoid) Humanoid.animate(fig, dt, false, 0);
       if (fig.userData.phone) fig.userData.phone.material.color.setHSL(0.55, 0.7, 0.6 + 0.25 * Math.sin(_stT * 7 + fig.userData.ph));
     }
     // 终端行情屏：4fps 刷新（滚动扫描线 + 价格随机游走）
@@ -2569,4 +2581,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v86';
+window.__V_SPACE = 'v87';

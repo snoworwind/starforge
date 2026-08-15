@@ -941,6 +941,15 @@ const UI = (() => {
       el.innerHTML = `<span class="qbox">${q.done ? '☑' : '☐'}</span><span>${q.desc}${q.progress ? ` <span class="qp">${q.progress}</span>` : ''}</span>`;
       list.appendChild(el);
     }
+    // 支线委托（村庄）：显示进行中的委托
+    const sq = Game.sideQuest && Game.sideQuest();
+    if (sq){
+      const have = Math.min(Player.countItem(sq.item), sq.need);
+      const el = document.createElement('div');
+      el.className = 'q-item side' + (have >= sq.need ? ' ready' : '');
+      el.innerHTML = `<span class="qbox">☐</span><span>✦ 委托（${sq.from}）：${ITEMS[sq.item].name} ×${sq.need} → ₪${sq.reward} <span class="qp">${have}/${sq.need}</span></span>`;
+      list.appendChild(el);
+    }
     const tip = $('questTip');
     if (tip){
       const gid = Game.currentQuestId && Game.currentQuestId();

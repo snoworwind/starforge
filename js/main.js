@@ -99,6 +99,7 @@ const Game = (() => {
   let techState = {};            // id -> true
   let lastTech = null;
   let flags = {};                // 任务事件旗标
+  let sideQuest = null;          // 村庄委托（支线）：{item, need, reward, from, x, z}（随世界旗标持久化）
   let market = {};               // 物价波动
   let questIdx = 0;
   let shipMesh = null, shipHere = true, shipPos = new THREE.Vector3();
@@ -634,7 +635,7 @@ const Game = (() => {
     }
     if (!reused){
       techState = { survival: true };
-      flags = {}; questIdx = 0; fuelLoaded = 0;
+      flags = {}; questIdx = 0; fuelLoaded = 0; sideQuest = null;
       Player.credits = 250;
       Player.inv.fill(null);
       Player.addItem('carbon', 10, true);
@@ -644,6 +645,7 @@ const Game = (() => {
       shipGarage = [];
     } else {
       flags = {};   // 新世界：事件类任务旗标重置
+      sideQuest = null;
     }
     for (const k in placedCount) delete placedCount[k];   // 新世界必须清零放置类任务进度
     visitedPlanets = {};
@@ -973,6 +975,17 @@ const Game = (() => {
     ['昨晚我看见一颗星星动得飞快。', '八成又是你们这些飞船在拉练吧？', '……什么？那是流星？咳，我就说嘛。'],
   ];
   let dlg = null;   // {lines:[{name,text}], idx, chars, anchor:Vector3}
+  // 村庄委托池（支线）：收集类任务，交付得星币
+  const SIDE_QUESTS = [
+    { item: 'carbon', need: 20, reward: 120 },
+    { item: 'sodium', need: 12, reward: 150 },
+    { item: 'stone', need: 30, reward: 100 },
+    { item: 'coal', need: 15, reward: 180 },
+    { item: 'iron', need: 8, reward: 220 },
+    { item: 'planks_b', need: 10, reward: 140 },
+    { item: 'glass_b', need: 8, reward: 160 },
+    { item: 'circuit', need: 3, reward: 400 },
+  ];
   function dialogActive(){ return !!dlg; }
   function startDialog(name, lines, anchorPos){
     dlg = {
@@ -1021,8 +1034,41 @@ const Game = (() => {
     if (dlg && dlg.anchor && Player.pos.distanceTo(dlg.anchor) > 7) closeDialog();
   }
   function talkToVillager(g){
-    const talk = VILLAGER_TALKS[(Math.random() * VILLAGER_TALKS.length) | 0];
-    startDialog(g.userData.name, talk, g.position);
+    // 支线委托：无委托时发新委托；有委托时结算（集齐 → 交付领赏；不足 → 提示还差多少）
+    if (!sideQuest){
+      const q = SIDE_QUESTS[(Math.random() * SIDE_QUESTS.length) | 0];
+      sideQuest = { item: q.item, need: q.need, reward: q.reward, from: g.userData.name, x: g.position.x, z: g.position.z };
+      flags.sideQuest = sideQuest;   // 随世界旗标持久化（单机/联机均可恢复）
+      startDialog(g.userData.name, [
+        `旅行者，来得正好！帮我收集 ${ITEMS[q.item].name} ×${q.need}。`,
+        `我出 ₪${q.reward}，村里眼下就缺这个了。`,
+        '集齐之后，再来找我聊聊就行。',
+      ], g.position);
+      UI.bigMessage('✦ 支线委托', `收集 ${ITEMS[q.item].name} ×${q.need} → ₪${q.reward}`, 5000);
+    } else {
+      const q = sideQuest;
+      const have = Player.countItem(q.item);
+      if (have >= q.need){
+        Player.removeItem(q.item, q.need);
+        Player.credits += q.reward;
+        sideQuest = null;
+        flags.sideQuest = null;
+        startDialog(g.userData.name, [
+          `${ITEMS[q.item].name} ×${q.need}——数目正好！`,
+          `来，收好，这是说好的 ₪${q.reward}。`,
+          '以后有什么需要，还来找你帮忙！',
+        ], g.position);
+        Sound.play('questDone');
+        UI.bigMessage('✓ 委托完成', `+₪${q.reward}`, 5000);
+        UI.refreshHUD();
+      } else {
+        const left = q.need - have;
+        startDialog(g.userData.name, [
+          `还差 ${ITEMS[q.item].name} ×${left} 呢。`,
+          `说好的：${q.need} 个换 ₪${q.reward}，集齐了就来找我。`,
+        ], g.position);
+      }
+    }
     // 面向玩家并驻足（模型前方为 -Z，与 Creatures.tickOne 行走朝向一致：取反向角）
     g.userData.state = 'idle';
     g.userData.timer = Math.max(g.userData.timer, 10);
@@ -2530,6 +2576,7 @@ const Game = (() => {
     Space.restoreGalaxy(w.galaxySeed !== undefined ? w.galaxySeed : HOME_GALAXY_SEED);
     currentPlanet = w.currentPlanet; dayTime = w.dayTime;
     flags = w.flags; market = w.market;
+    sideQuest = (w.flags && w.flags.sideQuest) || null;   // 村庄委托随世界旗标恢复
     for (const k in placedCount) delete placedCount[k];
     Object.assign(placedCount, w.placedCount || {});
     visitedPlanets = w.planets || {};
@@ -3422,12 +3469,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v98-blocks';
+    bd.textContent = 'build v99-sidequest';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v98';
+  window.__V_MAIN = 'v99';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4592,6 +4639,15 @@ const Game = (() => {
     saveBeaconState,
     get atmo(){ return atmo; },
     get scanMarkerCount(){ return scanMarkers.length; },
+    // 支线委托（村庄）：当前委托快照
+    sideQuest(){ return sideQuest ? { ...sideQuest } : null; },
+    // 测试钩子：用假村民走一遍对话（无委托→发新委托；有委托→结算）
+    debugSideQuestTalk(){
+      const fake = { userData: { name: '测试村民', state: 'idle', timer: 0 }, position: Player.pos.clone(), rotation: { y: 0 } };
+      talkToVillager(fake);
+      return sideQuest ? { ...sideQuest } : null;
+    },
+    debugCloseDialog(){ dlg = null; const b = $('dialogBox'); if (b) b.classList.add('hidden'); },
   };
   window.Game = api;
   return api;

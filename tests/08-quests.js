@@ -114,4 +114,30 @@ __SF_TEST__.suite('quests', function (t, api) {
       A.eq(api.questIdx(), 0, 'still 0 after poke in creative');
     });
   });
+
+  t.test('村庄委托：接受 → 交付领赏 → 未足提示', function () {
+    return api.boot('normal', { fresh: true }).then(function () {
+      // 第一次对话：无委托 → 发放新委托并持久化到旗标
+      var sq = window.Game.debugSideQuestTalk();
+      A.ok(sq && sq.item && sq.need > 0 && sq.reward > 0, 'side quest offered: ' + JSON.stringify(sq));
+      A.ok(window.Game.flags.sideQuest, 'quest persisted in flags');
+      // 集齐物品 → 交付：物品扣除 + 星币入账 + 委托清空
+      var before = api.credits();
+      api.give(sq.item, sq.need);
+      var sq2 = window.Game.debugSideQuestTalk();
+      A.eq(sq2, null, 'quest cleared after delivery');
+      A.eq(api.credits(), before + sq.reward, 'reward credited');
+      A.eq(api.count(sq.item), 0, 'items taken');
+      A.eq(window.Game.flags.sideQuest || null, null, 'flag cleared');
+      // 再次对话：新委托；物品不足 → 保持进行中、不扣款
+      var sq3 = window.Game.debugSideQuestTalk();
+      A.ok(sq3, 'new quest offered');
+      api.give(sq3.item, Math.max(0, sq3.need - 1));
+      var cr = api.credits();
+      var sq4 = window.Game.debugSideQuestTalk();
+      A.ok(sq4 && sq4.item === sq3.item, 'insufficient: quest stays active');
+      A.eq(api.credits(), cr, 'no reward for insufficient delivery');
+      window.Game.debugCloseDialog();
+    });
+  });
 });

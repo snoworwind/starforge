@@ -665,7 +665,8 @@ const UI = (() => {
       };
       inp.onkeydown = e => {
         e.stopPropagation();
-        if (e.key === 'Enter' || e.key === 'Escape') inp.blur();
+        if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) inp.blur();
+        else if (e.key === 'Escape') inp.blur();
       };
       row.appendChild(lbl); row.appendChild(inp);
       wrap.appendChild(row);
@@ -1490,7 +1491,7 @@ const UI = (() => {
     el.innerHTML = '';
     list.forEach(v => {
       const b = document.createElement('div');
-      if (!textList){ b.className = 'cc-chip'; b.style.background = v; b.title = v; }
+      if (!textList){ b.className = 'cc-chip'; b.style.background = v; b.title = v; b.dataset.hex = v; }
       else { b.className = 'cc-chip txt'; b.textContent = v[1]; b.dataset.v = v[0]; }
       b.onclick = () => {
         Sound.play('uiClick');
@@ -1513,20 +1514,22 @@ const UI = (() => {
       el.appendChild(b);
     }
   }
+  // 高亮比较用原始色值：style.background 会被浏览器序列化为 rgb(...)，与 hex 直接比较恒为 false
+  function swatchMatches(b, val){
+    if (b.dataset.hex !== undefined) return String(b.dataset.hex) === String(val);
+    if (b.dataset.v !== undefined) return String(b.dataset.v) === String(val);
+    return false;
+  }
   function updateSwatchHighlight(target, val){
-    for (const b of $(target).children){
-      const on = b.dataset.v !== undefined ? String(b.dataset.v) === String(val) : (b.style.background === val);
-      b.classList.toggle('on', on);
-    }
+    for (const b of $(target).children) b.classList.toggle('on', swatchMatches(b, val));
   }
   function refreshCharSwatches(){
-    for (const b of $('ccSkin').children) b.classList.toggle('on', b.style.background === cc.app.skin);
-    for (const b of $('ccHair').children) b.classList.toggle('on', b.style.background === cc.app.hair);
-    for (const b of $('ccSuit').children) b.classList.toggle('on', b.style.background === cc.app.suit);
-    for (const b of $('ccTrim').children) b.classList.toggle('on', b.style.background === cc.app.trim);
-    for (const b of $('ccPants').children) b.classList.toggle('on', b.style.background === cc.app.pants);
-    for (const b of $('ccBoots').children) b.classList.toggle('on', b.style.background === cc.app.boots);
-    for (const b of $('ccVisor').children) b.classList.toggle('on', b.style.background === cc.app.visor);
+    const groups = ['ccSkin', 'ccHair', 'ccSuit', 'ccTrim', 'ccPants', 'ccBoots', 'ccVisor'];
+    const keys  = ['skin', 'hair', 'suit', 'trim', 'pants', 'boots', 'visor'];
+    for (let i = 0; i < groups.length; i++){
+      const val = cc.app[keys[i]];
+      for (const b of $(groups[i]).children) b.classList.toggle('on', swatchMatches(b, val));
+    }
     for (const b of $('ccHairStyle').children) b.classList.toggle('on', String(b.dataset.v) === String(cc.app.hairStyle));
     for (const b of $('ccHelmet').children) b.classList.toggle('on', String(b.dataset.v) === String(cc.app.helmet));
   }
@@ -1539,7 +1542,7 @@ const UI = (() => {
     const w = canvas.width, h = canvas.height;
     const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-    renderer.setSize(w, h, false);
+    renderer.setSize(w, h, true);   // updateStyle=true：HiDPI 下缓冲按 CSS 尺寸缩放显示，避免画面被裁掉 3/4
     renderer.setClearColor(0x000000, 0);
     const scene = new THREE.Scene();
     const cam = new THREE.PerspectiveCamera(30, w / h, 0.1, 60);

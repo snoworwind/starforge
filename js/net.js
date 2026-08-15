@@ -685,6 +685,8 @@ const Net = (() => {
     chatInput = input;
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter'){
+        // 中文输入法候选确认（isComposing/keyCode 229）不得触发发送，否则拼音上屏即误发
+        if (e.isComposing || e.keyCode === 229){ e.stopPropagation(); return; }
         e.preventDefault();
         const text = chatInput.value.trim();
         chatInput.value = '';
@@ -698,6 +700,7 @@ const Net = (() => {
     document.addEventListener('keydown', e => {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON')) return;
       if (e.code === 'Enter'){
+        if (e.isComposing || e.keyCode === 229) return;   // IME 候选确认不开聊天框
         if (!chatOpen && connected){
           const st = window.Game ? Game.state : 'menu';
           const panelOpen = window.UI && UI.anyPanelOpen && UI.anyPanelOpen();

@@ -141,6 +141,33 @@ __SF_TEST__.suite('net', function (t, api) {
     a.close(); b.close(); c.close();
   });
 
+  t.test('未认证连接（不发 hello）不得修改世界或广播', async function () {
+    var a = wsClient(); await a.open;
+    // 被动收集旁观者收到的所有消息（保留原 onmessage 派发）
+    var seen = [];
+    var orig = a.ws.onmessage;
+    a.ws.onmessage = function (e) {
+      if (orig) orig.call(a.ws, e);
+      try { seen.push(JSON.parse(e.data)); } catch (err) {}
+    };
+    a.send({ t: 'hello', v: 3, name: '旁观者', role: 'guest' });
+    await a.next(function (m) { return m.t === 'init'; });
+    // 攻击者：完成 WebSocket 握手后直接发状态修改消息，完全跳过 hello（无密码/无名字）
+    var atk = wsClient(); await atk.open;
+    var full = [24576, 0];   // 整块空气 RLE（未知区块必须携带 full）
+    atk.send({ t: 'blk', planet: 0, x: 20, y: 3, z: 20, b: 1, full: full });   // chunk '1,1'
+    atk.send({ t: 'chat', text: '未认证注入' });
+    await sleep(600);
+    A.eq(seen.some(function (m) { return m.t === 'blk' && m.x === 20; }), false, '旁观者未收到未认证 blk 广播');
+    A.eq(seen.some(function (m) { return m.t === 'chat' && m.text === '未认证注入'; }), false, '旁观者未收到未认证聊天');
+    // 新连接读取服务器世界：攻击者的方块改动不得落盘
+    var c = wsClient(); await c.open;
+    c.send({ t: 'hello', v: 3, name: '验证者', role: 'guest' });
+    var init = await c.next(function (m) { return m.t === 'init'; });
+    A.eq(init.world.planets['0'].mods['1,1'], undefined, '未认证 blk 未写入世界（chunk 1,1 不存在）');
+    a.close(); atk.close(); c.close();
+  });
+
   t.test('机器增删 + 运行数据合并持久化', async function () {
     var a = wsClient(); await a.open;
     a.send({ t: 'hello', v: 3, name: '机器甲', role: 'guest' });

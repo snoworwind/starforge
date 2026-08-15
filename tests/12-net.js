@@ -274,8 +274,12 @@ __SF_TEST__.suite('net', function (t, api) {
     b.send({ t: 'pos', planet: 0, st: 'planet', p: [21, 22, 23], yaw: 0.5, app: bigApp });
     // 3) 异常动作位（对象）：act 被剥离
     b.send({ t: 'pos', planet: 0, st: 'planet', p: [31, 32, 33], yaw: 0.5, act: { evil: 1 } });
-    await sleep(600);
-    var normal = seen.filter(function (m) { return m.id === bId; });
+    // 轮询等待中继消息到位（固定短 sleep 在高负载下偶发漏收 → 断言抖动）
+    var normal = [];
+    await api.waitUntil(function () {
+      normal = seen.filter(function (m) { return m.id === bId; });
+      return normal.some(function (m) { return m.p[0] === 21; }) && normal.some(function (m) { return m.p[0] === 31; });
+    }, 5000, 50);
     A.eq(normal.some(function (m) { return m.p.length > 3; }), false, '超长坐标数组未被中继');
     A.eq(normal.some(function (m) { return m.p[0] === 1; }), false, '超长坐标消息整体被丢弃');
     var okApp = normal.filter(function (m) { return m.p[0] === 21; })[0];
@@ -400,6 +404,46 @@ __SF_TEST__.suite('net', function (t, api) {
     A.ok((idB.players || []).some(function (p) { return p.name === '先到者'; }), '晚加入者能看到先到玩家');
     A.ok((idB.players || []).some(function (p) { return p.name === '后到者'; }), '名单包含自己');
     a.close(); b.close();
+  });
+
+  t.test('market 键数上限 + 上传包自由字段大小上限', async function () {
+    // 1) market：5000 键只接受前 128 个合法键
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 4, name: '行情甲', role: 'guest' });
+    var initA = await a.next(function (m) { return m.t === 'init'; });
+    var before = Object.keys(initA.world.market || {}).length;
+    var b = wsClient(); await b.open;
+    b.send({ t: 'hello', v: 4, name: '行情乙', role: 'guest' });
+    await b.next(function (m) { return m.t === 'init'; });
+    var big = {};
+    var i;
+    for (i = 0; i < 5000; i++) big['k' + i] = 1.5;
+    b.send({ t: 'market', market: big });
+    var mk = await a.next(function (m) { return m.t === 'market'; });
+    A.ok(Object.keys(mk.market).length <= before + 128, 'market keys capped at 128 per message (before=' + before + ', got ' + Object.keys(mk.market).length + ')');
+    a.close(); b.close();
+    // 2) 上传包：超大 flags / galaxyArchives / warpLock 被丢弃（不入内存/存档/init 广播）
+    var h = wsClient(); await h.open;
+    h.send({ t: 'hello', v: 4, name: '上限主机', role: 'host', hostKey: HOSTKEY });
+    await h.next(function (m) { return m.t === 'init' || m.t === 'world-missing'; });
+    var giant = '';
+    for (i = 0; i < 200000; i++) giant += 'x';
+    var huge = '';
+    for (i = 0; i < 600000; i++) huge += 'x';   // galaxyArchives 上限 512KB：600KB 应被丢弃
+    h.send({ t: 'world-upload', world: {
+      v: 4, name: '上限世界', creative: false, dropMult: 4,
+      galaxySeed: 777, galaxyCount: 1, currentPlanet: 0, dayTime: 0.4,
+      planets: { '0': { mods: {}, machines: [], shipPos: [5, 30, 5], seed: 777, biome: 'green' } },
+      galaxyArchives: { big: huge }, market: {}, mapMarks: {}, flags: { big: giant }, warpLock: { big: giant },
+    }});
+    await sleep(300);
+    var g = wsClient(); await g.open;
+    g.send({ t: 'hello', v: 4, name: '上限访客', role: 'guest' });
+    var init = await g.next(function (m) { return m.t === 'init'; });
+    A.eq(Object.keys(init.world.flags).length, 0, 'giant flags dropped');
+    A.eq(Object.keys(init.world.galaxyArchives).length, 0, 'giant galaxyArchives dropped');
+    A.eq(init.world.warpLock, null, 'giant warpLock dropped');
+    h.close(); g.close();
   });
 });
 

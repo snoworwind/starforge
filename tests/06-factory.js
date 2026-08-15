@@ -258,4 +258,44 @@ __SF_TEST__.suite('factory', function (t, api) {
     api.removeMachine(X, y, Z + 1);
     api.setBlock(X, y - 1, Z, 'air');
   });
+
+  t.test('医疗站：站近消耗钠+氧气治疗，供电不足不开工', function () {
+    var y = groundY() + 1;
+    api.placeMachine('solar', X, y, Z + 2, 0);
+    api.placeMachine('medbay', X, y, Z, 0);
+    api.setPos(X + 0.5, y + 0.2, Z + 0.5);   // 站到医疗站旁
+    api.setStat('shield', 0);
+    api.setStat('hp', 3);                    // hpMax=8：缺 5 点
+    api.clearInv();
+    api.give('sodium', 10);
+    api.give('oxygen', 10);
+    api.tickFactory(3.0, 1);
+    var hp = api.stats().hp;
+    A.ok(hp > 3, 'healed (hp=' + hp + ')');
+    A.ok(api.count('sodium') < 10, 'sodium consumed (na=' + api.count('sodium') + ')');
+    A.ok(api.count('oxygen') < 10, 'oxygen consumed (ox=' + api.count('oxygen') + ')');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 2);
+    api.setStat('hp', 8);
+  });
+
+  t.test('医疗站：满血/缺补给时不产生电网需求', function () {
+    var y = groundY() + 1;
+    api.placeMachine('solar', X, y, Z + 2, 0);
+    api.placeMachine('medbay', X, y, Z, 0);
+    api.setPos(X + 0.5, y + 0.2, Z + 0.5);
+    api.setStat('hp', 8);   // 满血
+    api.clearInv();
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 0, 'no demand when full hp');
+    api.setStat('hp', 3);    // 缺补给
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 0, 'no demand without supplies');
+    api.give('sodium', 5); api.give('oxygen', 5);
+    api.tickFactory(1.0, 1);
+    A.eq(api.power().use, 6, 'demand 6kW when healing possible');
+    api.removeMachine(X, y, Z);
+    api.removeMachine(X, y, Z + 2);
+    api.setStat('hp', 8);
+  });
 });

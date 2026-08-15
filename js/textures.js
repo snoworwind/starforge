@@ -376,6 +376,13 @@ const Tex = (() => {
     speckle(px, r, ['#a8824f','#9d7948']);
     for (let i = 0; i < 16; i++){ px(i,0,'#7a5c35'); px(i,15,'#7a5c35'); px(0,i,'#7a5c35'); px(15,i,'#7a5c35'); }
   });
+  tile('medbay_top', (px, r) => {
+    speckle(px, r, ['#4e5a63','#46525b','#57636c']);
+    // 医疗十字（绿）
+    for (let y = 4; y <= 11; y++){ px(7, y, '#7dff8a'); px(8, y, '#7dff8a'); }
+    for (let x = 4; x <= 11; x++){ px(x, 7, '#7dff8a'); px(x, 8, '#7dff8a'); }
+    for (let i = 0; i < 16; i++){ px(i,0,'#68747d'); px(0,i,'#68747d'); px(i,15,'#333d44'); px(15,i,'#333d44'); }
+  });
 
   const texture = new THREE.CanvasTexture(canvas);
   // 像素风：近距最邻近采样（硬边像素块）；远距用最近 mip 层级消除闪烁/摩尔纹

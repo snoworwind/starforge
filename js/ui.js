@@ -483,7 +483,7 @@ const UI = (() => {
     const m = openMachine;
     if (!m) return;
     const body = $('machineBody');
-    const titles = { furnace: '熔炉', miner: '自动采矿机', assembler: '装配机', refinery: '精炼厂', chest: '储物箱', reactor: '核子反应堆', belt: '传送带', solar: '太阳能板', launchpad: '发射平台', wind: '风力涡轮机', burner: '火力发电机', beacon: '信标', lumberbot: '伐木机器人', collector: '收集点' };
+    const titles = { furnace: '熔炉', miner: '自动采矿机', assembler: '装配机', refinery: '精炼厂', chest: '储物箱', reactor: '核子反应堆', belt: '传送带', solar: '太阳能板', launchpad: '发射平台', wind: '风力涡轮机', burner: '火力发电机', beacon: '信标', lumberbot: '伐木机器人', collector: '收集点', medbay: '医疗站' };
     $('machineTitle').textContent = '◈ ' + (titles[m.type] || m.type);
     body.innerHTML = '';
     const d = m.data;
@@ -610,6 +610,19 @@ const UI = (() => {
         `携带碳素：<b style="color:#ffd94d">${m.data.cargo || 0}</b> / 40（满载自动卸货）<br>` +
         `工作半径 32 格 · 锯倒树干与树冠 · 树干每段碳×4 · 整树完成 +6` +
         (hasCol ? '' : '<br><span class="warn">⚠ 附近没有收集点！请放置收集点方块接收木料</span>');
+      body.appendChild(stat);
+    }
+    else if (m.type === 'medbay'){
+      const stat = document.createElement('div'); stat.className = 'mstat';
+      stat.style.padding = '16px';
+      const p = window.Player;
+      const missing = !p || p.countItem('sodium') < 1 ? '钠' : (p.countItem('oxygen') < 1 ? '氧气' : null);
+      stat.innerHTML = `<div style="font-size:26px;margin-bottom:8px">🏥</div>` +
+        (m.active
+          ? `正在治疗：<b style="color:#7dff8a">生命 +3 / 钠×1 + 氧气×1</b>`
+          : `<span class="warn">待机</span> — 生命值不满时站在 4 格内自动治疗`) +
+        `<br>耗电 6kW · 每次消耗 1 钠 + 1 氧气回复 3 点生命` +
+        (missing ? `<br><span class="warn">⚠ 背包缺少${missing}，无法治疗</span>` : '');
       body.appendChild(stat);
     }
     else if (m.type === 'reactor'){
@@ -1911,6 +1924,11 @@ const UI = (() => {
         return [m.active ? 1 : 0, d.fuel ? d.fuel.item + ':' + d.fuel.n : '-', (d.burn * 10) | 0].join('|');
       case 'wind': return (d.out || 0).toFixed(1);
       case 'lumberbot': return [m.bot ? m.bot.state : 'init', d.cargo || 0].join('|');
+      case 'medbay': {
+        const p = window.Player;
+        const miss = !p ? 2 : p.countItem('sodium') < 1 ? 1 : p.countItem('oxygen') < 1 ? 0 : -1;
+        return [m.active ? 1 : 0, miss].join('|');
+      }
       default: return 'static';
     }
   }

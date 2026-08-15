@@ -150,6 +150,7 @@ function freshWorld(){
     flags: {},            // 世界事件旗标
     warpLock: null,
     players: {},          // 玩家名 -> { char, pos:{planet,p,st,yaw} }
+    hostKey: '',          // 主机所有权密钥：首个上传世界的客户端签发，后续声明主机必须出示
   };
 }
 function dayTimeNow(){
@@ -171,6 +172,7 @@ function loadWorld(){
     w.terrainV = Number.isFinite(w.terrainV) ? Math.max(1, w.terrainV | 0) : 1;
     w.warpLock = w.warpLock && typeof w.warpLock === 'object' ? w.warpLock : null;
     w.players = w.players && typeof w.players === 'object' ? w.players : {};
+    w.hostKey = (typeof w.hostKey === 'string' && w.hostKey.length > 0 && w.hostKey.length <= 64) ? w.hostKey : '';
     w.v = 4;
     w.dayAt = Date.now();
     world = w;
@@ -185,11 +187,20 @@ function scheduleSave(){
   if (saveTimer) return;
   saveTimer = setTimeout(() => { saveTimer = null; saveWorld(); }, 2000);
 }
+// 玩家档案修剪：world.players 按名字无限累积会胀大 world.json —— 仅保留最近活跃的 200 名
+function prunePlayers(){
+  if (!world || !world.players) return;
+  const names = Object.keys(world.players);
+  if (names.length <= 200) return;
+  names.sort((a, b) => (world.players[a].lastSeen || 0) - (world.players[b].lastSeen || 0));
+  for (let i = 0; i < names.length - 200; i++) delete world.players[names[i]];
+}
 // 存档写入串行化：防 debounce 与周期自动存档并发竞争同一临时文件
 let saveChain = Promise.resolve();
 async function saveWorld(){
   if (!world) return;
   worldDirty = false;
+  prunePlayers();
   const snapshot = JSON.stringify(world);   // 立即快照，避免串行期间世界继续变化导致写旧值
   saveChain = saveChain.then(async () => {
     try {
@@ -239,19 +250,28 @@ function applyBlk(pid, x, y, z, b, full){
   return true;
 }
 
+// 机器 data 规模上限：恶意客户端可注入巨型对象图拖垮广播/存档
+function capData(d){
+  if (!d || typeof d !== 'object') return {};
+  const s = JSON.stringify(d).length;
+  return s <= 65536 ? d : {};
+}
 function applyMac(pid, m){
   const p = planetOf(pid);
   const at = p.machines.findIndex(s => s.x === m.x && s.y === m.y && s.z === m.z);
   if (m.op === 'add'){
-    if (!Number.isInteger(m.x) || !Number.isInteger(m.y) || !Number.isInteger(m.z)) return false;
-    if (typeof m.type !== 'string' || m.type.length > 20 || m.type.length < 1) return false;
-    const rec = { x: m.x, y: m.y, z: m.z, type: m.type, dir: Number.isInteger(m.dir) ? m.dir : 0, data: (m.data && typeof m.data === 'object') ? m.data : {} };
+    if (!Number.isInteger(m.x) || !Number.isInteger(m.y) || !Number.isInteger(m.z)) return null;
+    if (typeof m.type !== 'string' || m.type.length > 20 || m.type.length < 1) return null;
+    if (at < 0 && p.machines.length >= 20000) return null;   // 每星球机器规模上限
+    const rec = { x: m.x, y: m.y, z: m.z, type: m.type, dir: Number.isInteger(m.dir) ? m.dir : 0, data: capData(m.data) };
     if (at >= 0) p.machines[at] = rec; else p.machines.push(rec);
+    return rec;
   } else if (m.op === 'remove'){
     if (at >= 0) p.machines.splice(at, 1);
-    else return false;
+    else return null;
+    return { x: m.x, y: m.y, z: m.z };
   }
-  return true;
+  return null;
 }
 function applyMacData(pid, arr){
   if (!Array.isArray(arr) || arr.length > 4096) return false;
@@ -259,7 +279,7 @@ function applyMacData(pid, arr){
   for (const d of arr){
     if (!d || !Number.isInteger(d.x) || !Number.isInteger(d.y) || !Number.isInteger(d.z)) continue;
     const at = p.machines.findIndex(s => s.x === d.x && s.y === d.y && s.z === d.z);
-    if (at >= 0 && d.data && typeof d.data === 'object') p.machines[at].data = d.data;
+    if (at >= 0) p.machines[at].data = capData(d.data);
   }
   return true;
 }
@@ -326,6 +346,22 @@ function playerList(){
 }
 function byName(name){ for (const c of clients.values()){ if (c.name === name) return c; } return null; }
 
+// ---------- 主机所有权（防伪造 role:'host' 覆盖/重置世界）----------
+function onlineHost(){
+  for (const c of clients.values()) if (c.role === 'host') return c;
+  return null;
+}
+function canClaimHost(key){
+  if (onlineHost()) return false;              // 已有在线主机：主机席位不重复
+  if (!world || !world.hostKey) return true;   // 尚无世界 / 未签发密钥：先到先得
+  return typeof key === 'string' && key.length > 0 && key === world.hostKey;
+}
+function issueHostKey(){
+  if (!world) return null;
+  if (!world.hostKey) world.hostKey = crypto.randomBytes(16).toString('hex');
+  return world.hostKey;
+}
+
 function makeClient(socket){
   return {
     id: nextId++, socket, name: '', app: null, role: 'guest',
@@ -337,6 +373,7 @@ function makeClient(socket){
       blk: makeBucket(40, 20), mac: makeBucket(20, 10), macdata: makeBucket(4, 1),
       cre: makeBucket(4, 2), chat: makeBucket(5, 1), char: makeBucket(2, 0.1),
       market: makeBucket(2, 0.5), world: makeBucket(2, 0.1), tp: makeBucket(3, 1),
+      pos: makeBucket(40, 20),   // 位置：客户端 10/s，突发 40 帧后限到 20/s
     },
   };
 }
@@ -465,11 +502,17 @@ function handleMessage(c, m){
       if (m.v !== 3){ kick(c, 'version'); return; }
       c.named = true;
       c.name = sanitizeName(m.name);
-      c.role = m.role === 'host' ? 'host' : 'guest';
+      c.role = 'guest';
+      if (m.role === 'host'){
+        // 主机席位：已有在线主机或密钥不符时降级为成员（防伪造主机身份覆写/重置世界）
+        if (canClaimHost(m.hostKey)) c.role = 'host';
+        else sendText(c, JSON.stringify({ t: 'chat', sys: 1, text: '已有主机在线（或主机密钥不符），你以成员身份加入' }));
+      }
       if (m.app && typeof m.app === 'object' && JSON.stringify(m.app).length < 800) c.app = m.app;
-      // 回送服务器信息
+      // 回送服务器信息（role = 服务器裁定后的实际角色；players = 当前在线名单，晚加入也能看到先到者）
       sendText(c, JSON.stringify({
         t: 'ws-id', id: c.id, svName: CFG.serverName, motd: CFG.motd,
+        role: c.role,
         players: playerList(), hasWorld: !!world,
         worldName: world ? world.name : null,
         worldTime: world ? dayTimeNow() : null,
@@ -504,14 +547,16 @@ function handleMessage(c, m){
     }
     case 'pos': {
       // 位置中继：服务器记录最后位置（传送/重生用），转发给其他玩家
-      if (!Array.isArray(m.p) || m.p.length < 3 || !m.p.every(Number.isFinite) || !Number.isFinite(m.yaw)) return;
+      if (!take(c.buckets.pos)) return;   // 高频消息唯一无上限路径 → 令牌桶限速（客户端 10/s，突发 40）
+      if (!Array.isArray(m.p) || m.p.length < 3 || !m.p.every(v => Number.isFinite(v) && Math.abs(v) <= 1e6) || !Number.isFinite(m.yaw)) return;
       if (Number.isInteger(m.planet)) c.lastPlanet = m.planet;
-      c.lastSt = typeof m.st === 'string' ? m.st : '';
+      c.lastSt = typeof m.st === 'string' ? m.st.slice(0, 24) : '';
       c.lastPos = { planet: c.lastPlanet, p: m.p.slice(0, 3), st: c.lastSt, yaw: m.yaw };
       c.lastYaw = m.yaw;
       if (world && c.name){
         world.players[c.name] = world.players[c.name] || {};
         world.players[c.name].pos = c.lastPos;
+        world.players[c.name].lastSeen = Date.now();
       }
       // 优化：外观只在 hello/外观变化时发（app 字段仅透传已有消息，不额外包装）
       const out = { t: 'pos', id: c.id, planet: c.lastPlanet, st: c.lastSt, p: m.p, yaw: m.yaw };
@@ -531,18 +576,22 @@ function handleMessage(c, m){
     case 'mac': {
       if (!take(c.buckets.mac)) return;
       if (!world || !Number.isInteger(m.planet)) return;
-      if (!applyMac(m.planet, m)) return;
+      const rec = applyMac(m.planet, m);   // 返回清洗后的记录，广播用清洗值而非原始消息
+      if (!rec) return;
       scheduleSave();
-      broadcast({ t: 'mac', id: c.id, planet: m.planet, op: m.op, x: m.x, y: m.y, z: m.z, type: m.type, dir: m.dir, data: m.data }, c);
+      broadcast({ t: 'mac', id: c.id, planet: m.planet, op: m.op, x: rec.x, y: rec.y, z: rec.z, type: rec.type, dir: rec.dir, data: rec.data }, c);
       break;
     }
     case 'mac-data': {
       if (!take(c.buckets.macdata)) return;
       if (!world || !Number.isInteger(m.planet)) return;
       if (!applyMacData(m.planet, m.arr)) return;
-      // 低频率：合并保存节流
+      // 低频率：合并保存节流（广播清洗后的 arr，避免脏数据注入其他客户端）
       scheduleSave();
-      broadcast({ t: 'mac-data', planet: m.planet, arr: m.arr }, c);
+      const clean = (Array.isArray(m.arr) ? m.arr.slice(0, 4096) : [])
+        .filter(d => d && Number.isInteger(d.x) && Number.isInteger(d.y) && Number.isInteger(d.z))
+        .map(d => ({ x: d.x, y: d.y, z: d.z, data: capData(d.data) }));
+      broadcast({ t: 'mac-data', id: c.id, planet: m.planet, arr: clean }, c);
       break;
     }
     case 'market': {
@@ -573,7 +622,9 @@ function handleMessage(c, m){
     case 'cre-hit':
     case 'cre-kill': {
       if (!take(c.buckets.cre)) return;
-      // 生物同步：直接中继（含发送者 id 与星球）
+      // 生物同步：直接中继（含发送者 id 与星球）；先做基础校验防脏数据注入
+      if (m.t === 'cre' && (!Array.isArray(m.arr) || m.arr.length > 2048 ||
+          !m.arr.every(e => Array.isArray(e) && e.length <= 12 && e.every(v => Number.isFinite(v))))) return;
       broadcast({ t: m.t, id: c.id, planet: m.planet, arr: m.arr, cid: m.cid, dmg: m.dmg }, c);
       break;
     }
@@ -585,6 +636,7 @@ function handleMessage(c, m){
       if (size > 512 * 1024) return;
       world.players[c.name] = world.players[c.name] || {};
       world.players[c.name].char = m.char;
+      world.players[c.name].lastSeen = Date.now();
       c.lastCharAt = Date.now();
       scheduleSave();
       break;
@@ -606,9 +658,12 @@ function handleMessage(c, m){
       if (!take(c.buckets.world)){ sendText(c, JSON.stringify({ t: 'chat', sys: 1, text: '上传过于频繁，请稍候' })); return; }
       const w = sanitizeUpload(m.world);
       if (!w){ sendText(c, JSON.stringify({ t: 'chat', sys: 1, text: '世界数据无效，上传被拒绝' })); return; }
+      const prevKey = world ? world.hostKey : '';
       world = w;
+      world.hostKey = prevKey || issueHostKey();   // 首次上传签发所有权密钥（旧密钥随世界保留）
       worldDirty = true;
       saveWorld();
+      if (!prevKey) sendText(c, JSON.stringify({ t: 'host-key', key: world.hostKey }));
       console.log(`[world] ${c.name} 上传了世界「${w.name}」（${Object.keys(w.planets).length} 颗星球）`);
       sys(`✦ 主机 ${c.name} 上传了世界「${w.name}」，正在为所有玩家重建…`, c);
       for (const other of clients.values()){
@@ -618,7 +673,7 @@ function handleMessage(c, m){
     }
     case 'reset-world': {
       if (c.role !== 'host') return;
-      world = null;
+      world = null;   // 密钥随世界一并清除：重置后下一位主机重新签发
       try { fs.rmSync(worldFilePath(), { force: true }); } catch(e){}
       console.log(`${ts()} [world] ${c.name} 重置了服务器世界`);
       broadcast({ t: 'world-missing' });
@@ -764,6 +819,7 @@ function serveHttp(req, res){
         hasWorld: !!world, worldName: world ? world.name : null,
         dayTime: world ? dayTimeNow() : null,
         players: playerList().map(p => p.name),
+        maxPlayers: CFG.maxPlayers,
         uptimeSec: Math.round(process.uptime()),
       }));
       return;

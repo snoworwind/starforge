@@ -11,11 +11,31 @@ __SF_TEST__.suite('combat', function (t, api) {
 
   t.test('守卫无人机追击玩家', function () {
     var p = api.pos();
-    var s = window.Creatures.debugSpawnSentinel(p[0] + 12, p[2] + 6);
-    var d0 = Math.hypot(s.position.x - p[0], s.position.z - p[2]);
+    // 找 13 格宽平地（x..x+12 等高、顶块实心）：守卫与玩家之间无障碍——
+    // 出生点在地形起伏处时，墙体碰撞（#86）会把追击拦在坡后
+    var x = 0, z = 0, y0 = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var bx = Math.floor(p[0]) + dx, bz = Math.floor(p[2]) + dz;
+          var gy = window.World.topAt(bx, bz);
+          var flat = true;
+          for (var w = 1; w <= 12; w++) if (window.World.topAt(bx + w, bz) !== gy) { flat = false; break; }
+          if (flat){
+            var dd0 = window.World.getDef(bx, gy, bz);
+            if (dd0 && !dd0.liquid && dd0.key !== 'log' && dd0.key !== 'leaves'){ x = bx; z = bz; y0 = gy; ok = true; }
+          }
+        }
+      }
+    }
+    A.ok(ok, 'found flat 13-wide ground near player');
+    api.setPos(x + 0.5, y0 + 1.2, z + 0.5);
+    var s = window.Creatures.debugSpawnSentinel(x + 12.5, z + 0.5);
+    var d0 = Math.hypot(s.position.x - x - 0.5, s.position.z - z - 0.5);
     A.ok(d0 > 8, 'spawned at distance (d0=' + d0.toFixed(1) + ')');
     step(60);   // 2s @30fps
-    var d1 = Math.hypot(s.position.x - p[0], s.position.z - p[2]);
+    var d1 = Math.hypot(s.position.x - x - 0.5, s.position.z - z - 0.5);
     A.ok(d1 < d0 - 2, 'sentinel closed in (d0=' + d0.toFixed(1) + ' → d1=' + d1.toFixed(1) + ')');
     window.Creatures.kill(s);
   });

@@ -1315,11 +1315,24 @@ const World = (() => {
   function findSpawn(){
     const SEAB = SEA + (biome.seaLift || 0);
     const rnd = mulberry32((seed ^ 0xB00B5) >>> 0);   // 种子派生：同一世界种子出生点确定（联机/复现一致）
-    for (let r = 0; r < 140; r++){
+    // 有效出生列：顶块是实心地面（非液体/树叶/原木）——此前只排除水，
+    // 海洋星球会生在浅滩/湖心，植被星球会生在树冠上（出生即卡树叶里）
+    const valid = (x, z) => {
+      const y = topAt(x, z);
+      if (y <= SEAB) return false;
+      const d = getDef(x, y, z);
+      return d && d.solid && !d.liquid && d.key !== 'leaves' && d.key !== 'log';
+    };
+    for (let r = 0; r < 400; r++){
       const range = 20 + r;                       // 海洋星球逐步扩大搜索
       const x = ((rnd() * range * 2 - range) | 0), z = ((rnd() * range * 2 - range) | 0);
-      const y = topAt(x, z);
-      if (y > SEAB && getDef(x, y, z).id !== BLOCKS.water.id) return new THREE.Vector3(x + 0.5, y + 2, z + 0.5);
+      if (valid(x, z)) return new THREE.Vector3(x + 0.5, topAt(x, z) + 2, z + 0.5);
+    }
+    // 兜底：确定性网格扫描（步长 8，±256）——随机搜索在极端海洋星球会耗尽
+    for (let gx = -256; gx <= 256; gx += 8){
+      for (let gz = -256; gz <= 256; gz += 8){
+        if (valid(gx, gz)) return new THREE.Vector3(gx + 0.5, topAt(gx, gz) + 2, gz + 0.5);
+      }
     }
     return new THREE.Vector3(0.5, topAt(0, 0) + 2, 0.5);
   }

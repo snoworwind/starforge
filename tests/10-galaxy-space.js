@@ -214,7 +214,8 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.ok(fx(), 'reentry fx shown on seamless entry');
     window.Game.tpTo(0, null, 'planet', 'test');   // loading 期间 reentryT 冻结，落回 planet 后必须清特效
     await api.waitUntil(function () { return window.Game.state === 'planet'; }, 30000, 50);
-    await api.sleep(150);
+    // 清除由主循环下一帧执行：CI 帧率低（6~15fps）时固定 sleep(150) 会竞态，改为轮询
+    await api.waitUntil(function () { return !fx(); }, 8000, 50);
     A.ok(!fx(), 'reentry fx cleared after leaving atmo (teleport path)');
     // —— 路径 2：再入中途直接按 E 落地（真实玩家路径）——
     await window.Game.tpTo(0, null, 'space', 'test');
@@ -237,7 +238,8 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     window.Space.shipGroup.position.z = lp[1] + 0.5;
     document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
     await api.waitUntil(function () { return window.Game.state === 'seated'; }, 20000, 50);
-    await api.sleep(150);
+    // 同路径 1：CI 低帧率下固定 sleep 会竞态，轮询等待特效撤下
+    await api.waitUntil(function () { return !fx(); }, 8000, 50);
     A.ok(!fx(), 'reentry fx cleared after landing (E path)');
   });
 

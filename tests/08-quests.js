@@ -95,6 +95,35 @@ __SF_TEST__.suite('quests', function (t, api) {
     A.eq(api.questIdx(), Q.length, 'questIdx == QUESTS.length');
   });
 
+  // 回归：flags.newPlanet 一旦置位永不清除——提前探索第二颗星球的玩家到达 q_explore 时
+  // 任务被瞬时完成（旗标提前满足）。修复：q_explore 激活时作废旧旗标，必须重新着陆
+  t.test('q_explore 要求新着陆：提前着陆的旗标不重复结算', function () {
+    return api.boot('normal', { fresh: true }).then(function () {
+      window.Game.flags.newPlanet = true;   // 提前「探索过第二颗星球」
+      api.setFlag('checkedShip', true); api.pokeQuests();
+      api.give('carbon', 15); api.pokeQuests();
+      api.give('sodium', 8); api.pokeQuests();
+      api.give('stone', 12); api.pokeQuests();
+      api.placeEvent('furnace');
+      api.give('iron', 10); api.pokeQuests();
+      api.setFlag('shipRepaired', true); api.pokeQuests();
+      api.give('data', 99); api.research('metallurgy');
+      api.placeEvent('miner');
+      for (var i = 0; i < 6; i++) api.placeEvent('belt');
+      api.placeEvent('solar'); api.placeEvent('solar');
+      api.placeEvent('refinery');
+      api.give('fuel', 2); api.pokeQuests();
+      api.setFlag('launched', true); api.pokeQuests();
+      api.setFlag('docked', true); api.pokeQuests();
+      api.setFlag('traded', true); api.pokeQuests();
+      A.eq(api.questId(), 'q_explore', 'reached q_explore');
+      api.pokeQuests();
+      A.eq(api.questId(), 'q_explore', 'stale flag cleared: no instant completion (修复前直接跳到 q_nuclear)');
+      api.setFlag('newPlanet', true); api.pokeQuests();   // 真正再次着陆
+      A.eq(api.questId(), 'q_nuclear', 'completes on fresh landing');
+    });
+  });
+
   t.test('collect quest requires full amount', function () {
     return api.boot('normal', { fresh: true }).then(function () {
       api.clearInv();   // 清除 newGame 赠送的起始物资（碳×10 钠×5）

@@ -184,4 +184,14 @@ __SF_TEST__.suite('style', function (t, api) {
     document.querySelector('#setWeather button[data-q="on"]').onclick();
     A.ok(window.Game.debugWeather.on, 'weather re-enabled');
   });
+
+  // 回归：buildWeather 的 state==='planet' 门控与所有调用时机（loading/space 态）互斥——
+  // 正常启动/读档/入星从不下雨，改画面设置才意外生效。修复：移除状态门控 + 星球态兜底重建
+  t.test('天气粒子在正常启动时即生成（无需改设置）', function () {
+    return api.reboot('normal').then(function () {
+      var w = window.Game.debugWeather;
+      A.ok(w && w.on, 'weather active right after fresh boot (修复前 false, got ' + JSON.stringify(w) + ')');
+      A.ok(w.n > 0, 'particles allocated at boot');
+    });
+  });
 });

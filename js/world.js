@@ -1031,6 +1031,26 @@ const World = (() => {
         markDirty(c);   // 回来时重建
       }
     }
+    // 数据剔除：超出卸载半径 + 6 格、未被机器占用、未被玩家改动、无待落盘的区块整体删除。
+    // 此前 chunk 数据永不删除——玩家沿一个方向探索，内存以 ~24KB/块 无界增长（OOM 隐患）。
+    // 未改动的区块重新生成时由程序化地形（或已落盘的完整快照）确定性还原，无数据丢失；
+    // 机器所在区块钉住不剔（矿机/伐木机远场仍在运行，需要其方块数据）。
+    const pinned = new Set();
+    if (window.Factory && Factory.machines){
+      for (const m of Factory.machines.values()){
+        if (Number.isFinite(m.x) && Number.isFinite(m.z)) pinned.add(ckey(cf(m.x), cf(m.z)));
+      }
+    }
+    for (const c of chunks.values()){
+      if (c.mesh || c.waterMesh) continue;   // 网格仍在（≤UNLOAD_R）或待重建
+      const k = ckey(c.cx, c.cz);
+      if (pinned.has(k)) continue;
+      // 未改动的区块可无条件剔除（重新生成时程序化地形确定性还原，落盘与否不丢数据）；
+      // 改过的区块永远保留（数据在内存中随存档/上传流转）
+      if (Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) > UNLOAD_R + 6 && !c.modified){
+        chunks.delete(k);
+      }
+    }
     // 本轮未生成/重建任何区块 → 进入空闲，等待脏标记或玩家移动再唤醒
     lastStreamP = [pcx, pcz];   // 诊断：记录扫描中心（stats 据此统计视距内网格化进度）
     if (genBudget === 4 && meshBudget === 2){ streamDirty = false; lastScCx = pcx; lastScCz = pcz; }
@@ -1459,6 +1479,8 @@ const World = (() => {
     get debugLamps(){ return lampPool ? lampPool.map(l => ({ on: l.intensity > 0, color: l.color.getHex(), pos: [l.position.x, l.position.y, l.position.z] })) : []; },
     // 测试钩子：水面波浪计时（update 推进，用于断言水面动画运行）
     get debugWaterTime(){ return waterWaveU.t.value; },
+    // 测试钩子：区块数据是否在内存（不触发生成——数据剔除回归断言用）
+    debugHasChunk(cx, cz){ return chunks.has(ckey(cx | 0, cz | 0)); },
   };
 })();
 window.World = World;

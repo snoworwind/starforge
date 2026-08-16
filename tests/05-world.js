@@ -92,4 +92,26 @@ __SF_TEST__.suite('world', function (t, api) {
     A.eq(st.pending, 0, '视距内无待网格化区块（破洞=0）, stats=' + JSON.stringify(st));
     A.ok(st.meshed > 0, '视距内已有网格化区块, stats=' + JSON.stringify(st));
   });
+
+  // 回归：区块数据从不剔除——玩家沿一个方向探索，内存以 ~24KB/块 无界增长。
+  // 修复：超出卸载半径+6 格、未被机器占用、未改动、无待落盘的区块整体删除
+  t.test('远场未改动区块数据剔除（内存有界）', async function () {
+    var sp = api.pos();
+    var kx = Math.floor(sp[0] / 16), kz = Math.floor(sp[2] / 16);
+    // 让主循环跑几帧：出生区块落盘完成（needSave=false 才可剔除）
+    for (var i = 0; i < 30; i++) window.World.stream(sp[0], sp[2]);
+    await api.sleep(300);
+    A.ok(window.World.debugHasChunk(kx, kz), 'spawn chunk in memory');
+    // 传送 800m（远超 UNLOAD_R+6≈400m）：流式扫描在远场生成、近场卸载
+    var fx = sp[0] + 800, fz = sp[2] + 800;
+    api.setPos(fx, sp[1] + 30, fz);
+    for (var j = 0; j < 300; j++){ window.World.stream(fx, fz); window.World.update(1 / 30, fx, fz); }
+    await api.sleep(200);
+    A.ok(!window.World.debugHasChunk(kx, kz), 'distant pristine chunk evicted (内存有界)');
+    // 返回出生点：数据由程序化地形确定性还原
+    api.setPos(sp[0], sp[1], sp[2]);
+    for (var k = 0; k < 300; k++){ window.World.stream(sp[0], sp[2]); window.World.update(1 / 30, sp[0], sp[2]); }
+    await api.sleep(200);
+    A.ok(window.World.debugHasChunk(kx, kz), 'spawn chunk regenerated on return');
+  });
 });

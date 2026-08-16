@@ -86,6 +86,28 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(el.style.display, 'none', 'ship marker hidden in space (修复前冻结可见)');
   });
 
+  // 回归：大气层 C 扫描不清旧标记——连续扫描同一村庄/遗迹堆叠多个重复 POI 标记
+  t.test('repeated atmo scans replace old POI markers (no duplicates)', async function () {
+    var pd = api.defs.SYSTEM_PLANETS[0];
+    var dir = [0.5, 0.6, 0.6];
+    var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.fromArray([
+      pd.pos[0] + dir[0] / len * (pd.radius + 40),
+      pd.pos[1] + dir[1] / len * (pd.radius + 40),
+      pd.pos[2] + dir[2] / len * (pd.radius + 40),
+    ]);
+    window.Space.shipState.speed = 0;
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC' }));
+    var n1 = document.querySelectorAll('#markers .wmark.ore').length;   // 同步计数：扫描在 keydown 内同步完成
+    A.ok(n1 > 0, 'first scan found POI markers (' + n1 + ')');
+    // 第二次扫描走冷却旁路钩子（冷却按游戏时间计，低帧率下墙钟不可预期）
+    window.Game.debugAtmoScanNow();
+    var n2 = document.querySelectorAll('#markers .wmark.ore').length;
+    A.eq(n2, n1, 'second scan replaces old markers (修复前翻倍), got ' + n2 + ' want ' + n1);
+  });
+
   // 回归：nearestTarget 无 bestD 比较——每个进入 220 的星球都覆盖 best（迭代序最后一个
   // 胜出），空间站又无条件覆盖星球：交互提示报的不是最近的星球。修复：最近者胜
   t.test('nearestTarget picks the nearest body (not the last iterated)', async function () {

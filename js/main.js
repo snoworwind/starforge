@@ -3614,12 +3614,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v166';
+    bd.textContent = 'build v167';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v166';
+  window.__V_MAIN = 'v167';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4111,6 +4111,8 @@ const Game = (() => {
     if (scanCd > 0) return;
     scanCd = 6;
     Sound.play('scan');
+    // 新一次扫描替换旧结果：此前不清——同机连续按 C，同一村庄/遗迹堆叠多个重复标记
+    clearScanMarkers();
     const sp = shipMesh.position;
     // NMS 式地表扫描：青色波前贴地扩张扫过地形（注入地形着色器），兴趣点在波前抵达时浮现
     atmoScanFx = { t: 0, x: sp.x, z: sp.z, dur: 3.4 };
@@ -4794,6 +4796,10 @@ const Game = (() => {
     get shipPos(){ return shipPos; },
     // 测试钩子：当前状态是否允许请求指针锁定（seated/atmoland 曾被漏掉）
     debugLockAllowed(){ return lockPointerAllowed(); },
+    // 测试钩子：扫描冷却剩余（帧率无关地等待冷却结束，再驱动下一次扫描）
+    get debugScanCd(){ return scanCd; },
+    // 测试钩子：无视冷却立即执行大气层扫描（标记替换语义的回归断言用）
+    debugAtmoScanNow(){ scanCd = 0; shipScanPOI(); },
     // 测试钩子：新游戏建档代数（boot 用「已启动新流程」确认，避免等到上一局的旧 planet 态）
     get bootSeq(){ return bootSeq; },
     // 战利品入舱：优先飞船货仓（合并→空格，享受 ×5 大格），溢出转随身背包；返回实际入库数

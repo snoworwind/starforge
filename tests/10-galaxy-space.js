@@ -89,6 +89,30 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     }
   });
 
+  // 回归：clearSpaceMarkers 只删 DOM 不清 backing 数组——扫描标记带 120s 有效期，
+  // 入星/泊入后返回太空，updateSpaceMarkers 会把「已清除」的标记重新画出来
+  t.test('space scan markers cleared on seamless entry (no reappear)', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);
+    A.eq(window.Space.spaceScan(), true, 'scan started');
+    A.ok(window.Space.getSpaceMarkers().length > 0, 'markers scanned (' + window.Space.getSpaceMarkers().length + ')');
+    // 无缝入星：clearSpaceMarkers 被调用（修复后 backing 数组同步清空）
+    var pd = api.defs.SYSTEM_PLANETS[0];
+    var dir = [0.5, 0.6, 0.6];
+    var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    window.Space.shipState.pos.fromArray([
+      pd.pos[0] + dir[0] / len * (pd.radius + 40),
+      pd.pos[1] + dir[1] / len * (pd.radius + 40),
+      pd.pos[2] + dir[2] / len * (pd.radius + 40),
+    ]);
+    window.Space.shipState.speed = 0;
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    A.eq(window.Space.getSpaceMarkers().length, 0, 'backing array cleared on entry');
+    await window.Game.tpTo(0, null, 'space', 'test');
+    await api.sleep(200);   // 若干帧 updateSpaceMarkers
+    A.eq(document.querySelectorAll('#markers .wmark.ore').length, 0, 'no stale scan markers after re-entry');
+  });
+
   // 回归：星系图打开时飞船照常飞行——W/S/J 输入与飞船模拟在星图后面继续跑，
   // 船漂移/脉冲消耗，甚至 tickWarpAutoJump 白耗曲率电池。修复：面板打开冻结飞行
   t.test('ship frozen while galaxy map open', async function () {

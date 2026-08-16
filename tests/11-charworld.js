@@ -360,4 +360,13 @@ __SF_TEST__.suite('charworld', function (t, api) {
     await window.Game.tpTo(0, null, 'planet', 'test');   // 回星球 0：从 visitedPlanets[0] 恢复
     A.ok(window.Creatures.debugHerds() > 0, 'herds restored after beacon save (修复前 0)');
   });
+
+  // 回归：newGame 复用角色建新世界时不调 syncShipLoadout——太空座驾模型/武器停留在
+  // 默认 C 级（joinGame/loadFrom 都有该调用，仅 newGame 缺）
+  t.test('newGame 同步太空座驾武器（syncShipLoadout）', function () {
+    window.Space.shipState.weapon = 'laser';   // 故意写错
+    return window.Game.newGame(false, 1, { char: { key: null }, world: { name: '新世界' } }).then(function () {
+      A.eq(window.Space.shipState.weapon, 'pulse', 'weapon synced from ship loadout (修复前残留 laser)');
+    });
+  });
 });

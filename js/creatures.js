@@ -604,6 +604,10 @@ const Creatures = (() => {
     herds.clear();
     herdBuckets.clear();
     removedMasks.clear();
+    // 与首帧 update 的生态类型检查对齐：init() 把 lastInfoType 置空，若这里不接上当前生态
+    // 类型，第一次 update 会误判「换生态」并 clearBatches——把刚恢复的兽群与击杀记录整体抹掉
+    const info = (World.biome && World.biome.animal) || null;
+    lastInfoType = info ? info.type : null;
     if (!data || typeof data !== 'object') return;
     if (Array.isArray(data.removed)){
       for (const e of data.removed){

@@ -139,6 +139,58 @@ __SF_TEST__.suite('combat', function (t, api) {
     return api.reboot('normal');
   });
 
+  t.test('密度统计用兽群活体位置（陈旧记录坐标不参与）', async function () {
+    // 上一个用例以 reboot 收尾：先步进几帧让生态类型/注册状态在新世界上落定，
+    // 否则本用例的 restore 可能撞上 update 里的 clearBatches（lastInfoType 未就绪）
+    for (var s = 0; s < 3; s++) window.Creatures.update(1 / 30, window.Player.pos, window.World.biome);
+    var alive = window.Creatures.debugList().slice();
+    for (var q = 0; q < alive.length; q++) window.Creatures.kill(alive[q]);
+    var sp = window.World.findSpawn();
+    var x = 0, z = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var gx = Math.floor(sp.x) + dx, gz = Math.floor(sp.z) + dz;
+          var gy2 = window.World.topAt(gx, gz);
+          var dd2 = window.World.getDef(gx, gy2, gz);
+          if (dd2 && !dd2.liquid && dd2.key !== 'log' && dd2.key !== 'leaves'){ x = gx; z = gz; ok = true; }
+        }
+      }
+    }
+    A.ok(ok, 'found a valid standing spot near spawn');
+    var cx = Math.floor(x / 24), cz = Math.floor(z / 24);
+    // 目标兽群的 nid（candIdx=0）：精确匹配，避免同细胞自然生成的兽群干扰
+    function batchSeedOf(cx2, cz2){
+      var h = (window.World.seed ^ 0xC7EA5) >>> 0;
+      h = Math.imul(h ^ cx2, 374761393);
+      h = Math.imul(h ^ cz2, 668265263);
+      h = (h ^ (h >>> 13)) >>> 0;
+      return h;
+    }
+    var myNid = batchSeedOf(cx, cz) * 64 + 0;
+    window.Creatures.restore({ herds: [[cx, cz, 0, (x + 0.5) * 10, (z + 0.5) * 10, 4, (x + 0.5) * 10, (z + 0.5) * 10]], removed: [] });
+    var found = null;
+    await api.waitUntil(function () {
+      for (var i = 0; i < 3; i++) window.Creatures.update(1 / 30, window.Player.pos, window.World.biome);
+      var list = window.Creatures.debugList();
+      for (var j = 0; j < list.length; j++){
+        var u = list[j].userData;
+        if (u.herd && u.herd.nid === myNid){ found = list[j]; break; }
+      }
+      return !!found;
+    }, 5000, 50);
+    A.ok(found, 'herd materialized (spot=' + x + ',' + z + ' cell=' + cx + ',' + cz + ' herds=' + window.Creatures.debugHerds() + ' active=' + window.Creatures.debugList().length + ')');
+    // 相对计数断言：同细胞可能还有自然兽群，挪走目标兽群后计数应恰好 -1。
+    // 修复前统计用记录坐标（停在玩家脚下）→ 挪走活体后计数不变 → 断言失败
+    var c0 = window.Creatures.debugLocalHerdCount(window.Player.pos);
+    A.ok(c0 >= 1, 'herd counted local before move (c0=' + c0 + ')');
+    found.position.x += 200;
+    A.eq(window.Creatures.debugLocalHerdCount(window.Player.pos), c0 - 1, 'herd moved 200m away excluded from count');
+    found.position.x -= 170;   // 挪回 30m 内
+    A.eq(window.Creatures.debugLocalHerdCount(window.Player.pos), c0, 'herd back within 30m counted again');
+  });
+
   t.test('读档恢复兽群行为参数由 nid 确定性派生（联机两端一致）', function () {
     // 在出生点（地形必然有效）恢复一个兽群，步进物化后断言
     // speed/dir/timer/animT 全部等于 nid 派生值——修复前 animT 用 Math.random、

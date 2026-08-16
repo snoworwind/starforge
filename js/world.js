@@ -595,10 +595,10 @@ const World = (() => {
         for (let i = 1; i <= n; i++) put(h + i, key === 'amber' && i === 1 ? BLOCKS.amber.id : BLOCKS.stone.id);
       }
     } else if (key === 'frozen'){
-      // 冰锥（晶块尖 + 冰座）
+      // 冰锥（晶块尖 + 冰座）：顶部必须是可采集的氚晶，底部冰座——此前反了
       if (cr() < 0.007){
         const n = 1 + ((cr() * 3) | 0);
-        for (let i = 1; i <= n; i++) put(h + i, i === n ? BLOCKS.ice.id : BLOCKS.crystal.id);
+        for (let i = 1; i <= n; i++) put(h + i, i === n ? BLOCKS.crystal.id : BLOCKS.ice.id);
       }
     } else if (key === 'volcanic' || key === 'obsidian' || key === 'ferrous'){
       // 玄武岩/曜岩尖塔
@@ -613,10 +613,10 @@ const World = (() => {
         if (cr() < 0.4) put(h + 2, BLOCKS.log.id);
       }
     } else if (key === 'salt'){
-      // 盐晶柱
+      // 盐晶柱：应为盐晶块（产钠）——此前误用氚晶簇（产氚，钠系星球挖出别的资源）
       if (cr() < 0.006){
         const n = 1 + ((cr() * 2) | 0);
-        for (let i = 1; i <= n; i++) put(h + i, BLOCKS.crystal.id);
+        for (let i = 1; i <= n; i++) put(h + i, BLOCKS.salt.id);
       }
     } else if (key === 'murk'){
       // 荧光蕈密集点缀

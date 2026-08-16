@@ -36,4 +36,27 @@ __SF_TEST__.suite('audio', function (t, api) {
     }
     A.eq(calls.join(','), 'jet,laser', 'die() stops jet and laser loops (spy)');
   });
+
+  // 回归：打开系统面板（ESC 菜单/设置/帮助/存档）时 worldPaused 冻结整个世界，
+  // 但任何持续音都不停——激光/喷气/引擎/脉冲与氛围音乐在菜单后面继续响
+  t.test('打开系统面板冻结世界时停止所有持续音与音乐', async function () {
+    var names = ['engine', 'jet', 'laser', 'pulse', 'warp'];
+    var stops = [];
+    var originals = {};
+    names.forEach(function (n){ originals[n] = Sound.loops[n].stop; });
+    names.forEach(function (n){ Sound.loops[n].stop = function(){ stops.push(n); }; });
+    var m0 = Sound.Music.stop;
+    var musicStopped = false;
+    Sound.Music.stop = function(){ musicStopped = true; };
+    try {
+      window.UI.toggle('pausePanel');   // 打开：下一帧 loop() 触发暂停边沿
+      await api.waitUntil(function () { return stops.length === 5; }, 3000, 50);
+      A.eq(stops.length, 5, 'all five loops stopped on pause edge (' + stops.join(',') + ')');
+      A.ok(musicStopped, 'ambient music stopped on pause edge');
+    } finally {
+      names.forEach(function (n){ Sound.loops[n].stop = originals[n]; });
+      Sound.Music.stop = m0;
+      window.UI.closeAll();   // 关闭面板恢复世界运行（并触发恢复边沿）
+    }
+  });
 });

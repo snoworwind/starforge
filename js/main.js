@@ -3583,12 +3583,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v151';
+    bd.textContent = 'build v152';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v151';
+  window.__V_MAIN = 'v152';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3622,6 +3622,7 @@ const Game = (() => {
     Sound.play(show ? 'uiOpen' : 'uiClose');
   }
 
+  let lastPaused = false;   // 暂停边沿检测（打开系统面板瞬间停掉全部持续音）
   function loop(){
     requestAnimationFrame(loop);
     const now = performance.now();
@@ -3630,8 +3631,19 @@ const Game = (() => {
     // 联机：位置广播 + 远程玩家化身 + need-init 重试。必须在菜单/加载/暂停早退之前运行，
     // 否则访客在「等待房主世界同步」的 menu/loading 态永远不重发 need-init，卡死在主菜单。
     if (window.Net) Net.tick(dt);
+    // 暂停边沿：系统面板（ESC 菜单/设置/帮助/存档）打开瞬间停掉全部持续音与氛围音乐——
+    // 此前只冻结世界模拟，激光/喷气/引擎/脉冲声在菜单后面继续响（联机不冻结，跳过）
+    const paused = worldPaused();
+    if (paused && !lastPaused){
+      Sound.loops.engine.stop(); Sound.loops.jet.stop(); Sound.loops.laser.stop();
+      Sound.loops.pulse.stop(); Sound.loops.warp.stop();
+      Sound.Music.stop();
+    } else if (!paused && lastPaused){
+      Sound.Music.start();   // 关闭面板恢复氛围音乐（tick 内自守 ctx 状态）
+    }
+    lastPaused = paused;
     if (state === 'menu' || state === 'loading') return;
-    if (worldPaused()) return;   // 单机系统面板打开：整个世界冻结（联机除外）
+    if (paused) return;   // 单机系统面板打开：整个世界冻结（联机除外）
     flushChunkQueue(6);       // 后台完整区块落盘（Minecraft 式，修改区块优先）
     playTime += dt;
     Space.tickRotation(dt);   // 星球自转：任何状态下持续推进

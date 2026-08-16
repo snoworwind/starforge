@@ -353,6 +353,29 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     window.Station.closeDialog();
   });
 
+  // 回归：购船信用点不足时保留对话可原地重试——此前先关对话再回调且忽略返回值，
+  // 失败后必须走开再走回驾驶员才能重新议价
+  t.test('buy-ship failure keeps dialog open for retry', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);
+    var B = window.Space.SHIP_CLASSES.B;
+    var v = new THREE.Group();
+    v.userData = { price: B.price, model: 'ship', cls: 'B', pad: -1, pilotFig: null };
+    window.Station.debugWalkTo(5000, 5000, 5000);   // 行走相位（远离一切交互目标）
+    window.Station.debugOpenBuyDlg(v);
+    A.ok(window.Station.dialogOpen, 'buy dialog open');
+    window.Player.credits = 0;
+    window.Station.pressE();
+    A.ok(window.Station.dialogOpen, 'insufficient credits keeps dialog open (retry in place)');
+    A.eq(window.Player.credits, 0, 'no charge on failed purchase');
+    // 补足信用点 → 同一对话原地成交：对话关闭、扣款、座驾换成 B 级
+    window.Player.credits = B.price;
+    window.Station.pressE();
+    A.ok(!window.Station.dialogOpen, 'dialog closed on success');
+    A.eq(window.Player.credits, 0, 'price deducted');
+    A.eq(window.Game.debugPlayerShip.cls, 'B', 'player ship upgraded to B');
+  });
+
   // 回归：跃迁完成块把 warpAnim 置 null 而 state 仍为 warping——下一帧解引用崩溃，
   // catch 兜底以 seed=0 错误跃迁（跳到 0 号星系），200ms 白闪超时又二次 finishWarp（双重抵达）
   t.test('warp arrival lands on the locked galaxy (no null-warpAnim crash)', async function () {

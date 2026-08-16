@@ -2165,7 +2165,11 @@ const Game = (() => {
     UI.bigMessage('曲速引擎充能', '正在撕裂空间…');
     lockPointer();
   }
+  let warpFinishing = false;   // finishWarp 幂等保护：并发调用只允许一次完成流程
   async function finishWarp(){
+    if (warpFinishing) return;   // 已在完成流程中（防白闪超时与异常兜底双重触发）
+    warpFinishing = true;
+    try {
     Sound.loops.warp.stop();
     Sound.play('pulseEnd');
     warpLock = null;        // 抵达即解除锁定
@@ -2213,6 +2217,9 @@ const Game = (() => {
     }
     UI.bigMessage(`✦ ${gal.name}`, `${gal.planets.length} 颗未知星球在呼唤 · 按 C 扫描本星系`, 4200);
     lockPointer();
+    } finally {
+      warpFinishing = false;
+    }
   }
 
   // ---------- 空间站（重制版）：泊入/停机/行走/交易/离站全部收口在 station.js —— 主循环仅保留胶水 ----------
@@ -3603,12 +3610,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v161';
+    bd.textContent = 'build v162';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v161';
+  window.__V_MAIN = 'v162';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3798,7 +3805,8 @@ const Game = (() => {
       try {
       // 启航→星轨 双幕：0→6s 加速驶离原星系 / 6→15s 目标旋涡星系在航向前方逐帧放大至满屏
       // 全段第三人称硬锁船尾，与进出空间站同一镜头语言（相机固定在机尾后上方不动）
-      if (!warpAnim || !warpAnim._f) warpAnim._f = 0;
+      if (!warpAnim) return;   // 白闪等待段（warpAnim 已归位但 state 仍 warping）：本帧不推进
+      if (!warpAnim._f) warpAnim._f = 0;
       warpAnim._f++;
       const ship = Space.shipGroup;
       if (!ship) return;
@@ -3933,13 +3941,16 @@ const Game = (() => {
       if (kRide >= 1){
         // 清理跃迁粒子尘
         if (warpAnim._dust){ Space.scene.remove(warpAnim._dust); warpAnim._dust.geometry.dispose(); warpAnim._dust = null; }
-        const anim = warpAnim;
-        warpAnim = null;
+        // 保持 warpAnim 非空（携带目标种子）直到白闪超时真正 finishWarp——
+        // 此前这里置 null 而 state 仍为 warping：下一帧解引用崩溃，catch 兜底
+        // 以 seed=0 错误跃迁，200ms 超时又二次 finishWarp（双重抵达 + 跳错星系）
+        const animSeed = warpAnim.seed;
+        warpAnim = { t: -99, seed: animSeed };
         renderer.setClearColor(0xffffff); renderer.clear();
         setTimeout(() => {
           renderer.setClearColor(0x000000);
           $('fader').classList.remove('show');
-          warpAnim = { t: -99, seed: anim.seed };
+          warpAnim = { t: -99, seed: animSeed };
           finishWarp();
         }, 200);
         return;

@@ -105,13 +105,33 @@ __SF_TEST__.suite('world', function (t, api) {
     // 传送 800m（远超 UNLOAD_R+6≈400m）：流式扫描在远场生成、近场卸载
     var fx = sp[0] + 800, fz = sp[2] + 800;
     api.setPos(fx, sp[1] + 30, fz);
+    // 先扫一个与主循环中心不同的格：确保一轮扫描真实执行（同中心 + 无脏块会被空闲门控早退）
+    window.World.stream(fx + 16, fz);
     for (var j = 0; j < 300; j++){ window.World.stream(fx, fz); window.World.update(1 / 30, fx, fz); }
     await api.sleep(200);
-    A.ok(!window.World.debugHasChunk(kx, kz), 'distant pristine chunk evicted (内存有界)');
+    // 剔除可能被并发扫描延迟一帧：轮询等待 + 失败时携带区块状态诊断
+    await api.waitUntil(function () { return !window.World.debugHasChunk(kx, kz); }, 5000, 100);
+    A.ok(!window.World.debugHasChunk(kx, kz), 'distant pristine chunk evicted (内存有界) flags=' + JSON.stringify(window.World.debugChunkFlags(kx, kz)) + ' spawn=[' + sp[0] + ',' + sp[2] + '] k=[' + kx + ',' + kz + ']');
     // 返回出生点：数据由程序化地形确定性还原
     api.setPos(sp[0], sp[1], sp[2]);
+    window.World.stream(sp[0] + 16, sp[2]);
     for (var k = 0; k < 300; k++){ window.World.stream(sp[0], sp[2]); window.World.update(1 / 30, sp[0], sp[2]); }
     await api.sleep(200);
     A.ok(window.World.debugHasChunk(kx, kz), 'spawn chunk regenerated on return');
+  });
+
+  // 回归：findSpawn 只排除水——海洋星球出生在浅滩，植被星球出生在树冠上（lush@1
+  // 旧逻辑落在树叶顶 y=51）；兜底坐标 (0,0) 完全无校验。修复：顶块必须是实心地面 + 网格兜底
+  t.test('findSpawn lands on solid ground across biomes (no water/tree crowns)', function () {
+    var cases = [['lush', 1], ['lush', 1000], ['desert', 1007], ['frozen', 1014], ['volcanic', 1021], ['alien', 1028]];
+    for (var i = 0; i < cases.length; i++){
+      window.World.init(cases[i][0], cases[i][1], null, null);
+      var sp = window.World.findSpawn();
+      var gy = window.World.topAt(Math.floor(sp.x), Math.floor(sp.z));
+      var d = window.World.getDef(Math.floor(sp.x), gy, Math.floor(sp.z));
+      A.ok(d && d.solid && !d.liquid && d.key !== 'leaves' && d.key !== 'log',
+        'spawn ground valid for ' + cases[i][0] + '@' + cases[i][1] + ' (got ' + (d ? d.key : 'none') + ')');
+    }
+    return api.reboot('normal');   // 恢复干净世界
   });
 });

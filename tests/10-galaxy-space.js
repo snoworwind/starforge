@@ -327,6 +327,32 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.ok(!window.Station.dialogOpen, 'dialog closed when switching NPC (was A, now B)');
   });
 
+  // 回归：站内对话纳入全局 dialogActive/Esc/点击——Esc 应关闭对话而非开暂停面板，
+  // 点击画面应推进打字机（此前站内 dlg 与 main 的 dlg 互不感知）
+  t.test('station dialog responds to Esc and click via global dialog system', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);   // 远离星球，防无缝入星
+    var dk = window.Space.getDock();
+    var a = dk.staff[1];   // 站务长（大厅侧翼，离终端/船/换船电脑都远）
+    var wa = a.position.clone().add(dk.origin);
+    window.Station.debugWalkTo(wa.x, wa.y, wa.z);
+    window.Station.update(1 / 60, new THREE.PerspectiveCamera(), false, { mouseDX: 0, mouseDY: 0 });
+    window.Station.pressE();
+    A.ok(window.Station.dialogOpen, 'dialog open');
+    // Esc：关闭站内对话，而不是打开暂停面板（修复前 dialogActive 恒 false → 开暂停面板）
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape' }));
+    A.ok(!window.Station.dialogOpen, 'Esc closes station dialog');
+    A.ok(document.getElementById('pausePanel').classList.contains('hidden'), 'Esc did not open pause panel');
+    // 再开对话，打字机未显完时点击 → 立即补完当前句（修复前点击只锁定指针不推进）
+    window.Station.pressE();
+    A.ok(window.Station.dialogOpen, 'dialog reopened');
+    var before = window.Station.debugDlgChars();
+    document.dispatchEvent(new MouseEvent('mousedown', { button: 0 }));
+    var after = window.Station.debugDlgChars();
+    A.ok(after > before, 'click advances station dialog (chars ' + before + ' -> ' + after + ')');
+    window.Station.closeDialog();
+  });
+
   // 回归：跃迁完成块把 warpAnim 置 null 而 state 仍为 warping——下一帧解引用崩溃，
   // catch 兜底以 seed=0 错误跃迁（跳到 0 号星系），200ms 白闪超时又二次 finishWarp（双重抵达）
   t.test('warp arrival lands on the locked galaxy (no null-warpAnim crash)', async function () {

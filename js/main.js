@@ -974,7 +974,12 @@ const Game = (() => {
     // 配合 pointer lock 一起，可显著降低被浏览器手势/扩展劫持的概率。
     if (e.button === 1 || e.button === 2) e.preventDefault();
     if (state === 'menu' || UI.anyPanelOpen()) return;
-    if (dialogActive()){ advanceDialog(); return; }   // 对话中：点击推进，不触发挖掘
+    if (dialogActive()){
+      // 对话中：点击推进，不触发挖掘/开火；站内对话走站内打字机
+      if (window.Station && Station.dialogOpen) Station.dialogAdvance();
+      else advanceDialog();
+      return;
+    }
     if (!pointerLocked){ lockPointer(); return; }
     if (state === 'planet'){
       if (e.button === 0) Player.mineHeld = true;
@@ -1007,7 +1012,12 @@ const Game = (() => {
         toggleErrPanel();
         return;
       }
-      if (dialogActive()){ closeDialog(); return; }
+      if (dialogActive()){
+        // 站内对话优先关闭自身（此前 Esc 会绕过它直接开暂停面板）
+        if (window.Station && Station.dialogOpen) Station.closeDialog();
+        else closeDialog();
+        return;
+      }
       if (UI.anyPanelOpen()){ UI.closeAll(); Sound.play('uiClose'); lockPointer(); }
       else UI.toggle('pausePanel');
     }
@@ -1101,7 +1111,7 @@ const Game = (() => {
     { item: 'glass_b', need: 8, reward: 160 },
     { item: 'circuit', need: 3, reward: 400 },
   ];
-  function dialogActive(){ return !!dlg; }
+  function dialogActive(){ return !!dlg || (window.Station && Station.dialogOpen); }
   function startDialog(name, lines, anchorPos){
     dlg = {
       lines: lines.map(t => ({ name, text: t })),
@@ -3622,12 +3632,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v184';
+    bd.textContent = 'build v185';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v184';
+  window.__V_MAIN = 'v185';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

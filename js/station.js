@@ -439,8 +439,10 @@ const Station = (() => {
     set onGarage(fn){ onGarage = fn; },
     get dialogOpen(){ return !!dlg; },
     closeDialog(){ dlg = null; closeDlgBox(); },
+    dialogAdvance(){ if (dlg) advanceDlg(); },   // 全局点击推进入口（main.js mousedown 路由）
+    debugDlgChars(){ return dlg ? (dlg.chars | 0) : null; },
     debugFloorAt, debugWalkTo,
   };
 })();
 window.Station = Station;
-window.__V_STATION = 'v184';
+window.__V_STATION = 'v185';

@@ -2724,13 +2724,15 @@ const Space = (() => {
 
   // ---------- 目标检测 ----------
   function nearestTarget(){
-    let best = null;
+    let best = null, bestD = Infinity;
     for (const p of planets){
       const d = shipState.pos.distanceTo(p.mesh.position) - p.def.radius;
-      if (d < 220) best = { type: 'planet', def: p.def, dist: d };
+      // 此前无 bestD 比较：每个进入 220 的星球都覆盖 best（迭代序最后一个胜出），
+      // 而空间站又无条件覆盖星球——提示里报的不是最近的星球
+      if (d < 220 && d < bestD){ best = { type: 'planet', def: p.def, dist: d }; bestD = d; }
     }
     const ds = shipState.pos.distanceTo(station.position);
-    if (ds < 160) best = { type: 'station', dist: ds };
+    if (ds < 160 && ds < bestD) best = { type: 'station', dist: ds };
     return best;
   }
   function aheadInfo(camera){
@@ -2787,4 +2789,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v162';
+window.__V_SPACE = 'v163';

@@ -67,4 +67,15 @@ __SF_TEST__.suite('survival', function (t, api) {
         'jet/laser restored on respawn (jet=' + s.jet + '/' + s.jetMax + ' laser=' + s.laser + '/' + s.laserMax + ')');
     });
   });
+
+  // 回归：deserialize 直接读 d.inv[i]——旧档/脏数据缺 inv 字段时抛 TypeError，整个读档中断
+  t.test('deserialize tolerates missing inv field (empty backpack fallback)', function () {
+    api.give('carbon', 5);
+    // 缺 inv 的脏数据：修复前抛 TypeError（读档整体失败），修复后按空背包恢复其余字段
+    window.Player.deserialize({ pos: [0, 40, 0], yaw: 0, pitch: 0, stats: { hp: 12, hpMax: 20 }, hotIdx: 0, credits: 77, appearance: null });
+    var s = api.stats();
+    A.eq(s.hp, 12, 'stats restored despite missing inv');
+    A.eq(api.credits(), 77, 'credits restored despite missing inv');
+    A.eq(api.inv().filter(Boolean).length, 0, 'inventory treated as empty');
+  });
 });

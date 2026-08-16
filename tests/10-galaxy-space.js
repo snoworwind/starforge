@@ -304,6 +304,29 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.ok(f.z < -0.8, 'forward points -Z per heading (z=' + f.z.toFixed(2) + ')');
   });
 
+  // 回归：站内对话归属发起 NPC——走近另一个站员时对话必须结束，否则可以
+  // 「对着 B 结算 A 的对话」（购船对话同理：走到别的驾驶员旁仍能成交 A 的船）
+  t.test('station dialog ends when switching to another NPC', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);   // 远离星球，防无缝入星
+    var dk = window.Space.getDock();
+    A.ok(dk && dk.staff.length >= 3, 'staff for owner switch');
+    // staff[0] 站在交易终端旁（<4.2 会判 near='terminal'）；用大厅两侧的站务长/领航员
+    var a = dk.staff[1], b = dk.staff[2];
+    var cam = new THREE.PerspectiveCamera();
+    // 走到 A 旁 → 开对话（归属 A）
+    var wa = a.position.clone().add(dk.origin);
+    window.Station.debugWalkTo(wa.x, wa.y, wa.z);
+    window.Station.update(1 / 60, cam, false, { mouseDX: 0, mouseDY: 0 });
+    window.Station.pressE();
+    A.ok(window.Station.dialogOpen, 'dialog open with owner A');
+    // 走到 B 旁：near 变为 B ≠ 归属 A → 对话结束（修复前仍开着）
+    var wb = b.position.clone().add(dk.origin);
+    window.Station.debugWalkTo(wb.x, wb.y, wb.z);
+    window.Station.update(1 / 60, cam, false, { mouseDX: 0, mouseDY: 0 });
+    A.ok(!window.Station.dialogOpen, 'dialog closed when switching NPC (was A, now B)');
+  });
+
   // 回归：跃迁完成块把 warpAnim 置 null 而 state 仍为 warping——下一帧解引用崩溃，
   // catch 兜底以 seed=0 错误跃迁（跳到 0 号星系），200ms 白闪超时又二次 finishWarp（双重抵达）
   t.test('warp arrival lands on the locked galaxy (no null-warpAnim crash)', async function () {

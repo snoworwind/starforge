@@ -102,6 +102,7 @@ const Station = (() => {
         ],
         idx: 0, chars: 0,
         buy: v,
+        owner: near,   // 归属驾驶员：走近别的 NPC 时对话结束，防止「对着 B 结算 A 的购船」
       };
       el('dialogBox').classList.remove('hidden');
       Sound.play('uiOpen');
@@ -112,7 +113,7 @@ const Station = (() => {
     }
     if (near && near.userData && near.userData.talks){   // 站员对话
       const sets = near.userData.talks;
-      dlg = { name: near.userData.name, lines: sets[(Math.random() * sets.length) | 0], idx: 0, chars: 0 };
+      dlg = { name: near.userData.name, lines: sets[(Math.random() * sets.length) | 0], idx: 0, chars: 0, owner: near };
       el('dialogBox').classList.remove('hidden');
       Sound.play('uiOpen');
       // 站员转身面向玩家（模型前方 -Z）
@@ -205,6 +206,15 @@ const Station = (() => {
     const dk = Space.getDock();
     if (!dk) return null;
     return floorAt(dk, lx, lz);
+  }
+  // 测试专用：直接进入行走相位并传送到指定世界坐标（不触碰对话/交互状态）
+  function debugWalkTo(x, y, z){
+    const dk = Space.getDock();
+    if (!dk) return false;
+    walk = { pos: new THREE.Vector3(x, y, z), boardCd: 0 };
+    Player.pos.copy(walk.pos);
+    phase = 'walk';
+    return true;
   }
 
   // ---------- 曲线飞行段通用：位置+机头朝向（模型前方 -Z）----------
@@ -363,11 +373,12 @@ const Station = (() => {
           }
         }
       }
-      // 对话推进 + 走远自动结束
+      // 对话推进 + 走远自动结束；走近另一个 NPC（near 换成别的对象）同样结束——
+      // 否则可以「对着 B 结算 A 的对话/购船」
       if (dlg){
         dlg.chars = Math.min(dlg.lines[dlg.idx].length, dlg.chars + dt * 26);
         renderDlg();
-        if (near === null || typeof near === 'string'){ dlg = null; closeDlgBox(); }
+        if (near === null || typeof near === 'string' || (dlg.owner && near !== dlg.owner)){ dlg = null; closeDlgBox(); }
       }
       // 提示
       if (panelOpen) UI.setInteractHint(null);
@@ -428,8 +439,8 @@ const Station = (() => {
     set onGarage(fn){ onGarage = fn; },
     get dialogOpen(){ return !!dlg; },
     closeDialog(){ dlg = null; closeDlgBox(); },
-    debugFloorAt,
+    debugFloorAt, debugWalkTo,
   };
 })();
 window.Station = Station;
-window.__V_STATION = 'v183';
+window.__V_STATION = 'v184';

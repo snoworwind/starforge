@@ -942,6 +942,28 @@ const Creatures = (() => {
   }
 
   // ---------- 飞行移动（无人机/浮翼）：悬浮高度保持 + 空中避障 + 敌对追击 ----------
+  // 机身占用带（当前高度至 +1 格）内任一点为实心方块即视为阻挡
+  function flyBlockedAt(x, y, z){
+    const by = Math.floor(y);
+    for (let yy = by; yy <= by + 1; yy++){
+      const d = World.getDef(Math.floor(x), yy, Math.floor(z));
+      if (d && d.id !== 0 && !d.cross && !d.liquid && !d.lowbox) return true;
+    }
+    return false;
+  }
+  // 视线检查：从 a 到 b 分步采样，任一点实心即被墙体遮挡（守卫不能隔墙伤人）
+  function losClear(ax, ay, az, bx, by, bz){
+    const dx = bx - ax, dy = by - ay, dz = bz - az;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist < 0.001) return true;
+    const steps = Math.max(1, Math.ceil(dist / 0.4));
+    for (let i = 1; i < steps; i++){
+      const t = i / steps;
+      const dd = World.getDef(Math.floor(ax + dx * t), Math.floor(ay + dy * t), Math.floor(az + dz * t));
+      if (dd && dd.id !== 0 && !dd.cross && !dd.liquid && !dd.lowbox) return false;
+    }
+    return true;
+  }
   function flyMove(g, u, dt, plyPos){
     let moving = false;
     if (u.hostile){
@@ -968,7 +990,10 @@ const Creatures = (() => {
           u.windup -= dt;
           if (u.windup <= 0){
             clearSentinelEye(u);
-            if (d < 1.9 && window.Player && !Player.dead){
+            // 视线检查：隔墙/隔板不能伤人（此前只判水平距离，墙体形同虚设）
+            const see = window.Player && !Player.dead
+              && losClear(g.position.x, g.position.y, g.position.z, Player.pos.x, Player.pos.y + 1, Player.pos.z);
+            if (d < 1.9 && see){
               Player.damage(2);
               Sound.play('laserHit');
               Player.spawnParticles(g.position.x, g.position.y - 0.25, g.position.z, 0x66ccff, 6);   // 电击火花
@@ -976,9 +1001,14 @@ const Creatures = (() => {
             }
           }
         } else {
-          g.position.x += Math.cos(u.dir) * mv * dt;
-          g.position.z += Math.sin(u.dir) * mv * dt;
-          moving = true;
+          // 水平推进前做机体占用带碰撞：不再穿墙追人（此前无人机无视一切墙体/封闭房间）
+          const nx = g.position.x + Math.cos(u.dir) * mv * dt;
+          const nz = g.position.z + Math.sin(u.dir) * mv * dt;
+          if (!flyBlockedAt(nx, g.position.y, nz)){
+            g.position.x = nx;
+            g.position.z = nz;
+            moving = true;
+          }
           if (!back && d < 1.15){
             u.atkCd -= dt;
             if (u.atkCd <= 0){
@@ -1013,11 +1043,7 @@ const Creatures = (() => {
       g.position.y += (targetY - g.position.y) * Math.min(1, dt * 3);
     }
     // 空中避障：机身高度有实心方块 → 快速爬升
-    const by = Math.floor(g.position.y);
-    for (let y = by; y <= by + 1; y++){
-      const d = World.getDef(Math.floor(g.position.x), y, Math.floor(g.position.z));
-      if (d && d.id !== 0 && !d.cross && !d.liquid && !d.lowbox){ g.position.y += 9 * dt; break; }
-    }
+    if (flyBlockedAt(g.position.x, g.position.y, g.position.z)) g.position.y += 9 * dt;
     // 朝向 + 侧倾（转向时倾斜机身）
     const wantYaw = -u.dir - Math.PI / 2;
     let dy = wantYaw - g.rotation.y;
@@ -1485,6 +1511,8 @@ const Creatures = (() => {
       const u = { typeDef: info ? (CREATURE_TYPES[info.type] || CREATURE_TYPES.strider) : CREATURE_TYPES.strider };
       return blockedAhead(u, nx, nz, topAtRo(Math.floor(x), Math.floor(z)));
     },
+    // 测试钩子：飞行单位视线采样（守卫隔墙伤人回归断言）
+    debugLosClear(ax, ay, az, bx, by, bz){ return losClear(ax, ay, az, bx, by, bz); },
     debugSkyFlock(){ return skyFlock; },
     // 测试钩子：立即生成一簇高空浮翼（仅在生态有 skywings 配色时）
     debugSpawnSkyFlock(plyPos){

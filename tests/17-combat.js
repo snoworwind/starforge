@@ -349,6 +349,48 @@ __SF_TEST__.suite('combat', function (t, api) {
     A.eq(window.Creatures.debugHerdBuckets(), 0, 'empty restore clears all buckets');
   });
 
+  // 回归：守卫无人机此前无视一切墙体——水平推进无碰撞、命中只判水平距离，
+  // 隔墙/隔天花板也能伤人，封闭房间形同虚设。修复后：不穿墙、无视线不攻击
+  t.test('守卫无人机被墙体阻挡：不穿墙、不隔墙伤人', function () {
+    var sp = window.World.findSpawn();
+    // 找 4 格宽平地（x..x+3 等高、顶块实心可站立）：玩家站 x 列，守卫放 x+3，墙建在 x+1
+    var x = 0, z = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var bx = Math.floor(sp.x) + dx, bz = Math.floor(sp.z) + dz;
+          var y0 = window.World.topAt(bx, bz);
+          var y1 = window.World.topAt(bx + 1, bz), y2 = window.World.topAt(bx + 2, bz), y3 = window.World.topAt(bx + 3, bz);
+          if (y0 === y1 && y1 === y2 && y2 === y3){
+            var dd0 = window.World.getDef(bx, y0, bz);
+            if (dd0 && !dd0.liquid && dd0.key !== 'log' && dd0.key !== 'leaves'){ x = bx; z = bz; ok = true; }
+          }
+        }
+      }
+    }
+    A.ok(ok, 'found flat 4-wide ground near spawn');
+    var gy = window.World.topAt(x, z);
+    api.setPos(x + 0.5, gy + 1.2, z + 0.5);
+    // 6 格高石墙：覆盖守卫悬浮高度（hoverAlt≈4.5~6）的机体占用带与视线
+    var stoneId = api.defs.BLOCKS.stone.id;
+    for (var wy = gy + 1; wy <= gy + 6; wy++) window.World.set(x + 1, wy, z, stoneId, true);
+    // 视线单元断言：墙两侧直线采样必须被墙体截断
+    A.eq(window.Creatures.debugLosClear(x + 3.5, gy + 5, z + 0.5, x + 0.5, gy + 1.7, z + 0.5), false, 'wall blocks line of sight');
+    var s = window.Creatures.debugSpawnSentinel(x + 3.5, z + 0.5);
+    api.setStat('shield', 0);
+    api.setStat('hp', 40);
+    step(150);   // 5s：修复前穿墙贴脸并隔墙扣血
+    A.eq(api.stats().hp, 40, 'no damage through wall (hp=' + api.stats().hp + ')');
+    A.ok(s.position.x >= x + 1.5, 'sentinel did not phase into wall cell (x=' + s.position.x.toFixed(2) + ')');
+    // 拆墙后恢复威胁：可接近并正常造成伤害（视线/碰撞只在有墙时生效）
+    for (var wy2 = gy + 1; wy2 <= gy + 6; wy2++) window.World.set(x + 1, wy2, z, 0, true);
+    A.eq(window.Creatures.debugLosClear(x + 3.5, gy + 5, z + 0.5, x + 0.5, gy + 1.7, z + 0.5), true, 'line of sight clear after wall removed');
+    step(150);
+    A.ok(api.stats().hp < 40, 'damage resumes after wall removed (hp=' + api.stats().hp + ')');
+    window.Creatures.kill(s);
+  });
+
   // 回归：真实读档顺序 buildPlanetScene(Creatures.init) → Creatures.restore → 首帧 update。
   // 修复前 init 置 lastInfoType=null，首帧 update 误判「换生态」→ clearBatches 把
   // 刚恢复的兽群与击杀记录整体抹掉（农场动物全部重生、已杀动物复活）

@@ -85,4 +85,30 @@ __SF_TEST__.suite('inventory', function (t, api) {
     A.ok(window.Player.inv.slice(13).every(function (s) { return s === null; }), 'rest compacted empty');
     api.clearInv();
   });
+
+  // 回归：货仓「热栏选中物整组存入」用 Player.removeItem 扣物——removeItem 从最高索引开始扣，
+  // 若储存舱有同类物品，被清空的是别的堆（选中格原封不动），语义与提示完全相反
+  t.test('ship cargo deposit moves the selected hotbar stack (not a storage stack)', function () {
+    api.clearInv();
+    window.UI.closeAll();
+    window.Player.inv[0] = { item: 'iron', n: 5 };    // 热栏选中格
+    window.Player.inv[20] = { item: 'iron', n: 3 };   // 储存格同物品（removeItem 会先扣它）
+    window.Player.hotIdx = 0;
+    window.UI.toggle('invPanel');
+    var shipBtn = document.querySelector('#invTabs .invtab[data-t="ship"]');
+    A.ok(shipBtn, 'ship tab built');
+    shipBtn.onclick();
+    var slots = document.querySelectorAll('#shipInvGrid [data-ssi]');
+    A.ok(slots.length > 0, 'cargo grid built');
+    slots[0].onclick();   // 空手点空格 → 热栏选中物整组存入
+    A.eq(window.Player.inv[0], null, 'selected hotbar slot emptied');
+    A.ok(window.Player.inv[20] && window.Player.inv[20].item === 'iron' && window.Player.inv[20].n === 3,
+      'untouched storage stack intact (got ' + JSON.stringify(window.Player.inv[20]) + ')');
+    var cnt0 = document.querySelector('#shipInvGrid [data-ssi="0"] .cnt');
+    A.eq(cnt0 && cnt0.textContent, '5', 'cargo slot 0 received the full stack ×5');
+    // 清理：空手再点 0 号格取回背包，随后清空背包——不留货仓/背包残留污染后续套件
+    document.querySelector('#shipInvGrid [data-ssi="0"]').onclick();
+    api.clearInv();
+    window.UI.closeAll();
+  });
 });

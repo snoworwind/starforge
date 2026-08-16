@@ -518,7 +518,14 @@ const Player = (() => {
     const px = hit.x + hit.face[0], py = hit.y + hit.face[1], pz = hit.z + hit.face[2];
     if (!World.inBounds(px, py, pz)) return null;
     let ok = World.getDef(px, py, pz).id === 0;
-    if (px === Math.floor(pos.x) && pz === Math.floor(pos.z) && (py === Math.floor(pos.y) || py === Math.floor(pos.y + 1))) ok = false;
+    // 自挡检查：与 collides() 同口径的 AABB 单元格——此前只查单个 (floor(x), floor(z))
+    // 列与头/脚两格，玩家跨两格站位（小数部分 >0.7 或 <0.3）时方块可放进身体内部
+    if (ok){
+      const bx0 = Math.floor(pos.x - W), bx1 = Math.floor(pos.x + W);
+      const by0 = Math.floor(pos.y), by1 = Math.floor(pos.y + H);
+      const bz0 = Math.floor(pos.z - W), bz1 = Math.floor(pos.z + W);
+      if (px >= bx0 && px <= bx1 && pz >= bz0 && pz <= bz1 && py >= by0 && py <= by1) ok = false;
+    }
     return { px, py, pz, ok, item };
   }
   function updateGhostPreview(camera){

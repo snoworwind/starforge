@@ -816,6 +816,7 @@ const Creatures = (() => {
     registerQueue.length = 0;
     lastCenter = null;
     spawnTimer = 0;
+    herdBuckets.clear();   // 兽群已清空，分桶必须同步清空：否则换星球/换生态后僵尸桶残留，herdsNear 永远遍历空桶
   }
   // 从活跃列表移除（击杀/淡出移除共用）
   function removeFromList(g){
@@ -1505,6 +1506,8 @@ const Creatures = (() => {
     },
     // 测试钩子：兽群分桶数量（验证分桶随增删正确维护）
     debugHerdBuckets(){ return herdBuckets.size; },
+    // 测试钩子：完整清场（与换星球/换生态时 update 内的 clearBatches 同路径）
+    debugClearBatches(){ clearBatches(); },
     // 测试钩子：以当前生态陆地生物的通行规则判断 (nx,nz) 是否可通行
     debugBlockedAhead(x, z, nx, nz){
       const info = (World.biome && World.biome.animal) || null;

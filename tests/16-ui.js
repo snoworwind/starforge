@@ -185,4 +185,17 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     for (var k in window.Player.keys){ if (window.Player.keys[k]) allClear = false; }
     A.ok(allClear, 'all player keys cleared on blur');
   });
+
+  t.test('地图标记标签按纯文本渲染（防 HTML 注入）', function () {
+    var pid = window.Game.currentPlanet;
+    var saved = window.Game.mapMarks[pid] || [];
+    window.Game.mapMarks[pid] = [{ x: 1, z: 2, y: 3, label: '<b>炸</b>', gal: false }];
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM', bubbles: true, cancelable: true }));   // 打开星球地图
+    var nm = document.querySelector('#mapMarkList .mm-name');
+    A.ok(nm, 'mark row rendered');
+    A.eq(nm.children.length, 0, 'no element injected into label');
+    A.eq(nm.textContent, '⚑ <b>炸</b>', 'label shown as plain text');
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM', bubbles: true, cancelable: true }));   // 关闭地图
+    window.Game.mapMarks[pid] = saved;   // 还原世界状态
+  });
 });

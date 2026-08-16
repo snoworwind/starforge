@@ -71,4 +71,23 @@ __SF_TEST__.suite('saveload', function (t, api) {
       });
     });
   });
+
+  t.test('loadPair 新建配对条目字段完整（列表不显示 undefined）', async function () {
+    var s = await api.save('配对源档');
+    A.ok(s, 'save ok');
+    var saves = await api.listSaves();
+    var src = saves.find(function (e) { return e.name === '配对源档'; });
+    A.ok(src && src.charKey && src.worldKey, 'entry has char+world keys');
+    await api.deleteSave(src.key);   // 只删配对条目，保留人物与世界
+    await api.loadPair(src.charKey, src.worldKey);
+    var after = await api.listSaves();
+    var ne = after.find(function (e) { return e.charKey === src.charKey && e.worldKey === src.worldKey; });
+    A.ok(ne, 'new pair entry created by loadPair');
+    A.ok(Number.isFinite(ne.credits), 'credits numeric (got ' + JSON.stringify(ne.credits) + ')');
+    A.ok(Number.isFinite(ne.playMin), 'playMin numeric (got ' + JSON.stringify(ne.playMin) + ')');
+    A.ok(typeof ne.charName === 'string' && ne.charName.length > 0, 'charName present');
+    A.ok(typeof ne.worldName === 'string' && ne.worldName.length > 0, 'worldName present');
+    A.ok(typeof ne.planetName === 'string' && ne.planetName.length > 0, 'planetName present');
+    await api.deleteSave(ne.key);   // 清理
+  });
 });

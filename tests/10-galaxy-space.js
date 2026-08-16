@@ -72,6 +72,55 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(f(20, 31), 2, 'landing pad area (20,31) height 2');
   });
 
+  // 回归：再入摩擦特效层只在 atmo 态衰减（reentryT>0 时）。再入中途 E 落地（atmoland→seated）
+  // 或传送离开大气后 updateAtmo 不再执行，reentryT 永远不为零——特效层永久卡在屏幕上
+  t.test('reentry FX overlay cleared when leaving atmo mid-reentry', async function () {
+    var fx = function () { return document.getElementById('reentryFx').classList.contains('show'); };
+    var pd = api.defs.SYSTEM_PLANETS[0];
+    var dir = [0.5, 0.6, 0.6];
+    var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    function nearPlanet(){
+      window.Space.shipState.pos.fromArray([
+        pd.pos[0] + dir[0] / len * (pd.radius + 40),
+        pd.pos[1] + dir[1] / len * (pd.radius + 40),
+        pd.pos[2] + dir[2] / len * (pd.radius + 40),
+      ]);
+      window.Space.shipState.speed = 0;
+    }
+    // —— 路径 1：再入中传送离开大气 ——
+    await window.Game.tpTo(0, null, 'space', 'test');
+    nearPlanet();
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    A.ok(fx(), 'reentry fx shown on seamless entry');
+    window.Game.tpTo(0, null, 'planet', 'test');   // loading 期间 reentryT 冻结，落回 planet 后必须清特效
+    await api.waitUntil(function () { return window.Game.state === 'planet'; }, 30000, 50);
+    await api.sleep(150);
+    A.ok(!fx(), 'reentry fx cleared after leaving atmo (teleport path)');
+    // —— 路径 2：再入中途直接按 E 落地（真实玩家路径）——
+    await window.Game.tpTo(0, null, 'space', 'test');
+    nearPlanet();
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    A.ok(fx(), 'reentry fx shown on second entry');
+    // 找一块非液体着陆点：liquid 顶部会拒绝降落（状态留在 atmo）
+    var lp = null, cx = Math.floor(window.Space.shipGroup.position.x), cz = Math.floor(window.Space.shipGroup.position.z);
+    for (var r = 0; r <= 60 && !lp; r++){
+      for (var dx = -r; dx <= r && !lp; dx++){
+        for (var dz = -r; dz <= r && !lp; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var gy = window.World.topAt(cx + dx, cz + dz);
+          if (!window.World.getDef(cx + dx, gy, cz + dz).liquid) lp = [cx + dx, cz + dz];
+        }
+      }
+    }
+    A.ok(lp, 'land column found near entry point');
+    window.Space.shipGroup.position.x = lp[0] + 0.5;
+    window.Space.shipGroup.position.z = lp[1] + 0.5;
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
+    await api.waitUntil(function () { return window.Game.state === 'seated'; }, 20000, 50);
+    await api.sleep(150);
+    A.ok(!fx(), 'reentry fx cleared after landing (E path)');
+  });
+
   // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
   // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
   t.test('seamless atmosphere entry loads target planet biome', async function () {

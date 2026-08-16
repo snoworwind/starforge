@@ -3583,12 +3583,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v146';
+    bd.textContent = 'build v147';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v146';
+  window.__V_MAIN = 'v147';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3636,6 +3636,12 @@ const Game = (() => {
     playTime += dt;
     Space.tickRotation(dt);   // 星球自转：任何状态下持续推进
     applyAtmoTint(dt);        // 大气颜色滤镜（接近/再入渐显，其余状态自动淡出）
+    // 再入摩擦特效层只应在 atmo 态衰减：再入中途落地（atmoland/seated）或传送离开大气时，
+    // updateAtmo 不再执行、reentryT 永远不为零——特效层会永久卡在屏幕上，这里强制撤下
+    if (reentryT > 0 && state !== 'atmo'){
+      reentryT = 0;
+      $('reentryFx').classList.remove('show');
+    }
     tickAtmoScan(dt);         // 地表扫描波前动画（跨状态走完）
     tickShipPreview(dt);      // 背包飞船页 3D 预览（打开时才渲染）
 

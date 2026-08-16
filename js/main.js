@@ -3610,12 +3610,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v163';
+    bd.textContent = 'build v164';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v163';
+  window.__V_MAIN = 'v164';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4441,6 +4441,9 @@ const Game = (() => {
     spaceBeaconEls = [];
     hideEnemyArrows();
     hideWarpMarker();
+    // 同步清空标记数据源：此前只删 DOM，扫描标记的 backing 数组还带着 120s 有效期——
+    // 泊入/入星后返回太空，updateSpaceMarkers 会把「已清除」的标记重新画出来
+    Space.clearSpaceMarkers();
   }
   // ---------- 敌舰屏幕边缘指示箭头（NMS 式：目标出屏后沿屏缘红色箭头指向其方位）----------
   let enemyArrowEls = [];

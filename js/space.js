@@ -2271,6 +2271,7 @@ const Space = (() => {
     return true;
   }
   function getSpaceMarkers(){ return spaceMarkers; }
+  function clearSpaceMarkers(){ spaceMarkers.length = 0; }   // 与 DOM 元素清理同步（此前只删元素，返回太空后过期标记原地复活）
   function tickSpaceScan(dt){
     if (scanRingT > 0){
       scanRingT = Math.max(0, scanRingT - dt);
@@ -2773,7 +2774,7 @@ const Space = (() => {
   }
 
   return { init, enter, update, tickRotation, setAttitude, shoot, nearestTarget, aheadInfo, stopSounds,
-    warpGalaxy, restoreGalaxy, spaceScan, getSpaceMarkers, tickSpaceScan, getCurrentGalaxySeed,
+    warpGalaxy, restoreGalaxy, spaceScan, getSpaceMarkers, clearSpaceMarkers, tickSpaceScan, getCurrentGalaxySeed,
     paintSurfaceRegion, setSurfaceHole, paintGlobe, displaceGlobe, updateLOD, restoreGlobe, clearLodTiles,
     SUN_POS, PLANET_DAY, SUN_R, sunTextures, setLodQuality, lodRange, setClouds, setRealAtmo,
     getDock, tickStation, bakeStationPortrait, removeVisitorShip, setShipModel, setVisitorCount, cloneStationModel,
@@ -2789,4 +2790,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v163';
+window.__V_SPACE = 'v164';

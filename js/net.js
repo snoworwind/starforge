@@ -137,7 +137,8 @@ const Net = (() => {
             let u;
             try { u = new URL(url); saveToken(u.hostname, u.port, myName, m.token); if (myName !== pickName()) saveToken(u.hostname, u.port, pickName(), m.token); } catch(e){}
           }
-          try { localStorage.setItem(NAME_KEY, myName.replace(/#\d+$/, '')); } catch(e2){}
+          try { localStorage.setItem(NAME_KEY, myName); } catch(e2){}   // 存服务器确认的全名（含 #N 去重后缀）：
+          // 此前去掉后缀 → 重名用户重连时用原名认领到别人的档案或被误踢
           // 房主中途（已在游戏里）创建房间：服务器无世界时立即上传本机世界
           if (role === 'host' && !m.hasWorld && window.Game && gameReady() && Game.buildNetWorld){
             broadcast({ t: 'world-upload', world: Game.buildNetWorld() });
@@ -164,6 +165,10 @@ const Net = (() => {
       ws2.onclose = () => {
         connected = false;
         role = null;
+        gotInit = false;
+        waitingWorld = false;
+        pendingInit = null;        // 意外断线：挂起的世界包与星球增量全部作废（重连后服务器会重发 init）
+        clearPendingQueues();
         clearRemotes();
         players.clear();
         onStatus();
@@ -230,9 +235,15 @@ const Net = (() => {
     waitingWorld = false;
     pendingInit = null;
     serverInfo = null;
+    clearPendingQueues();   // 断线前的星球增量不得在重连后的新世界上重放
     clearRemotes();
     players.clear();
     onStatus();
+  }
+  function clearPendingQueues(){
+    for (const k in pendingBlk) delete pendingBlk[k];
+    for (const k in pendingMac) delete pendingMac[k];
+    for (const k in pendingMacData) delete pendingMacData[k];
   }
   function broadcast(msg){
     if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
@@ -860,6 +871,15 @@ const Net = (() => {
     get serverInfo(){ return serverInfo; },
     get waitingWorld(){ return waitingWorld; },
     get gotInit(){ return gotInit; },
+    // 测试钩子：挂起队列/世界包计数（验证断线清理）
+    debugPendingCounts(){
+      return {
+        blk: Object.keys(pendingBlk).length,
+        mac: Object.keys(pendingMac).length,
+        macData: Object.keys(pendingMacData).length,
+        init: pendingInit ? 1 : 0,
+      };
+    },
     active, status,
     set statusChanged(fn){ onStatus = fn || (() => {}); },
     set toastChanged(fn){ onToast = fn || onToast; },

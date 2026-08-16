@@ -315,6 +315,32 @@ __SF_TEST__.suite('factory', function (t, api) {
     api.removeMachine(X, y, Z + 2);
   });
 
+  t.test('拆机退还制作中的原料（装配机）', function () {
+    var y = groundY() + 1;
+    api.placeMachine('solar', X, y, Z + 2, 0);
+    api.placeMachine('assembler', X, y, Z, 0);
+    api.setMachineRecipe(X, y, Z, 'gear');
+    api.machineInsert(X, y, Z, 'iron');
+    api.machineInsert(X, y, Z, 'iron');
+    api.tickFactory(0.5, 1);   // 开工扣料：prog > 0、d.in 归零
+    var drops0 = window.Player.dropCount;
+    A.eq(window.Player.debugBreakBlock(X, y, Z), true, 'machine broken via mining path');
+    // 修复后：2 铁（同位置合并为 1 个掉落）+ 装配机本体 = 2 个掉落；修复前只有本体 1 个
+    A.ok(window.Player.dropCount - drops0 >= 2, 'mid-craft inputs refunded (drops ' + drops0 + '→' + window.Player.dropCount + ')');
+    api.removeMachine(X, y, Z + 2);
+  });
+
+  t.test('拆机退铀按剩余量四舍五入（残量不过半不退整枚）', function () {
+    var y = groundY() + 1;
+    api.placeMachine('reactor', X, y, Z, 0);
+    api.machineInsert(X, y, Z, 'uranium');       // fuel = 60
+    window.Factory.at(X, y, Z).data.fuel = 1;     // 只剩 1 秒残量
+    var drops0 = window.Player.dropCount;
+    A.eq(window.Player.debugBreakBlock(X, y, Z), true, 'reactor broken');
+    // 修复后：round(1/60)=0 → 只有本体 1 个掉落；修复前 ceil → 退 1 铀 + 本体 = 2
+    A.eq(window.Player.dropCount - drops0, 1, 'no whole uranium refunded for 1s residue (drops ' + drops0 + '→' + window.Player.dropCount + ')');
+  });
+
   t.test('miner: 矿脉耗尽后缓存矿石仍可送出（不再永久卡死）', function () {
     var y = groundY() + 1;
     api.setBlock(X, y - 1, Z, 'iron_ore');

@@ -1554,6 +1554,10 @@ const Game = (() => {
     // 记录最后停泊点（地面）——爬升时已预存档则跳过，消除换系瞬间卡顿
     if (!atmo.presaved) savePlanetState();
     Space.enter(currentPlanet);
+    // 离星即清地面 HUD 标记：太空态不跑 updateMarkers——不清的话
+    // 矿物标记与飞船标记冻结在屏幕上的最后位置（冲向太空仍挂在准星旁）
+    clearScanMarkers();
+    if (shipMarkerEl) shipMarkerEl.style.display = 'none';
     // 连续换系：体素位置/朝向 → 太空球面位置/朝向（与再入互为精确逆映射）
     const planet = Space.planets.find(p => p.def.id === currentPlanet);
     if (planet){
@@ -3610,12 +3614,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v165';
+    bd.textContent = 'build v166';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v165';
+  window.__V_MAIN = 'v166';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4756,6 +4760,10 @@ const Game = (() => {
           Space.enter(pid);
           if (Array.isArray(p) && p.length >= 3 && p.every(Number.isFinite)) Space.shipState.pos.fromArray(p);
           state = 'space';
+          // 离星即清地面 HUD 标记（与 finishLaunch 同口径）：太空态不跑 updateMarkers，
+          // 矿物/飞船标记会冻结在屏幕上
+          clearScanMarkers();
+          if (shipMarkerEl) shipMarkerEl.style.display = 'none';
           $('spaceHud').classList.remove('hidden');
           Sound.Music.setMode('space');
         } else {

@@ -2593,6 +2593,7 @@ const Game = (() => {
       techState, questIdx, playTime,
       fuelLoaded,                      // 飞船燃料（人物装备）
       playerShip, shipGarage,          // NMS 式飞船档案与仓库
+      researching: UI.researching,     // 进行中的计时研究（进度与已付成本随人物落盘）
     };
   }
   function applyCharData(c, place){
@@ -2611,6 +2612,8 @@ const Game = (() => {
     fuelLoaded = c.fuelLoaded || 0;
     if (c.playerShip) playerShip = c.playerShip;
     shipGarage = c.shipGarage || [];
+    // 恢复进行中的研究：此前不落盘，读档后已付的研究成本凭空消失（tech 仍锁定）
+    UI.researching = (c.researching && c.researching.id && TECH[c.researching.id]) ? c.researching : null;
   }
 
   // ---------- 世界存档（地形改动/机器/星系/位置 — 独立于人物）----------
@@ -3583,12 +3586,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v154';
+    bd.textContent = 'build v155';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v154';
+  window.__V_MAIN = 'v155';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

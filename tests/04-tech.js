@@ -39,4 +39,27 @@ __SF_TEST__.suite('tech', function (t, api) {
       A.ok(api.tech('scan1'), 'scan1 unlocked');
     });
   });
+
+  // 回归：进行中的计时研究不随人物存档落盘——读档后已付的研究成本凭空消失、
+  // 科技仍锁定、进度条归零（研究被静默吞掉）
+  t.test('in-progress research survives save/load roundtrip', function () {
+    api.give('data', 99); api.give('circuit', 99);
+    var t = TECH['scan2'];
+    A.ok(window.Player.payItems(t.cost), 'research cost paid');
+    window.UI.researching = { id: 'scan2', t: 1.2 };   // 研究中途
+    return api.save('研究中途档').then(function (ok) {
+      A.ok(ok, 'save ok');
+      return api.listSaves();
+    }).then(function (saves) {
+      var key = saves[0].key;
+      window.UI.researching = null;   // 污染当前状态后读档
+      return api.load(key).then(function () {
+        var r = window.UI.researching;
+        A.ok(r && r.id === 'scan2', 'research restored after load (got ' + JSON.stringify(r) + ')');
+        // 存档→读档期间研究计时仍在推进，只要求进度不回退（修复前整条研究消失）
+        A.ok(r && typeof r.t === 'number' && r.t >= 1.2, 'research progress preserved (t=' + (r && r.t) + ')');
+        return api.deleteSave(key);
+      });
+    });
+  });
 });

@@ -609,7 +609,7 @@ const Player = (() => {
 
     // 液体检测（脚部/眼部任一在水中或熔岩中；用上一帧位置判定，1 帧滞后无感）
     const liqFeet = World.getDef(Math.floor(pos.x), Math.floor(pos.y + 0.1), Math.floor(pos.z));
-    const liqEye  = World.getDef(Math.floor(pos.x), Math.floor(pos.y + 1.2), Math.floor(pos.z));
+    const liqEye  = World.getDef(Math.floor(pos.x), Math.floor(pos.y + EYE), Math.floor(pos.z));   // 眼部 = 摄像机高度 EYE(1.62)；此前用 1.2，水面在 1.2~1.62 之间时头已在水中却不触发浮力/游泳/熔岩灼烧
     const inLiquid = liqFeet.liquid || liqEye.liquid;
 
     // 跳跃 / 喷气背包（水中不用喷气背包——游泳代替）
@@ -1063,6 +1063,11 @@ const Player = (() => {
     get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
     // 测试钩子：最后一个掉落物的高度（新掉落实体追加在队尾，避免旧掉落干扰）
     debugLastDropY(){ return worldDrops.length ? worldDrops[worldDrops.length - 1].mesh.position.y : null; },
+    // 测试钩子：眼部（摄像机高度）是否浸入液体（与 update 内检测同口径）
+    debugEyeInLiquid(){
+      const d = World.getDef(Math.floor(pos.x), Math.floor(pos.y + EYE), Math.floor(pos.z));
+      return !!(d && d.liquid);
+    },
     // 测试钩子：按真实挖掘路径拆除 (x,y,z) 处方块（含机器退款与掉落逻辑）
     debugBreakBlock(x, y, z){
       const def = World.getDef(x, y, z);

@@ -506,7 +506,7 @@ const Game = (() => {
 
   // ---------- 新游戏 / 换星球 ----------
   const loadFlavors = ['铺设体素地层', '注入矿脉', '培育生态植被', '校准大气散射', '唤醒机器之灵', '压缩量子存档'];
-  async function genPlanet(pid, fresh, center, seed, deferState){
+  async function genPlanet(pid, fresh, center, seed, deferState, forceWorld){
     state = 'loading';
     $('loading').classList.remove('hidden');
     $('loadTitle').textContent = `正在抵达「${SYSTEM_PLANETS[pid].name}」…`;
@@ -519,7 +519,10 @@ const Game = (() => {
     landedPlanet = pid;
     clearScanMarkers();
     const pd = SYSTEM_PLANETS[pid];
-    const saved = visitedPlanets[pid];
+    // forceWorld（联机世界包直传的星球记录）优先级高于共享的 visitedPlanets：
+    // joinGame 应用期间若并发的新游戏建档流程跑 buildWorldData→savePlanetState，
+    // visitedPlanets 会被旧世界状态覆盖——直传记录让服务器世界种子/机器/出生点不受竞态影响
+    const saved = forceWorld || visitedPlanets[pid];
     const savedChunks = await ensurePlanetChunks(pid);   // v4 完整区块快照（未建档/联机客人 → null）
     if (saved && !fresh){
       World.init(pd.biome, saved.seed, saved.mods || null, savedChunks);
@@ -695,9 +698,11 @@ const Game = (() => {
   }
 
   // opts.char = { name, appearance, key? }（key=复用已有角色）；opts.world = { name, seed }
+  let bootSeq = 0;   // 新游戏建档代数：每启动一次 newGame 自增（测试等待/竞态识别用）
   async function newGame(creativeMode, mult, opts){
     opts = opts || {};
     Sound.begin();
+    bootSeq++;
     creative = !!creativeMode;
     dropMult = creative ? 1 : (mult || 1);
     activeSaveKey = null;
@@ -818,7 +823,9 @@ const Game = (() => {
     const landPid = (spawn && Number.isInteger(spawn.planet) && SYSTEM_PLANETS[spawn.planet]) ? spawn.planet : currentPlanet;
     const landCenter = spawn && spawn.planet === landPid && Array.isArray(spawn.p) && spawn.p.length >= 3 && spawn.p.every(Number.isFinite)
       ? [spawn.p[0], spawn.p[2]] : null;
-    await genPlanet(landPid, false, landCenter);
+    // 星球记录直传 genPlanet：应用期间并发建档流程可能覆盖 visitedPlanets，直传免疫竞态
+    const pRec = (init.planets && init.planets[landPid]) ? init.planets[landPid] : null;
+    await genPlanet(landPid, false, landCenter, undefined, false, pRec);
     dayTime = init.dayTime !== undefined ? init.dayTime : 0.3;
     if (landCenter){
       Player.pos.fromArray(spawn.p);
@@ -3596,12 +3603,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v158';
+    bd.textContent = 'build v159';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v158';
+  window.__V_MAIN = 'v159';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4757,6 +4764,8 @@ const Game = (() => {
     get shipPos(){ return shipPos; },
     // 测试钩子：当前状态是否允许请求指针锁定（seated/atmoland 曾被漏掉）
     debugLockAllowed(){ return lockPointerAllowed(); },
+    // 测试钩子：新游戏建档代数（boot 用「已启动新流程」确认，避免等到上一局的旧 planet 态）
+    get bootSeq(){ return bootSeq; },
     // 战利品入舱：优先飞船货仓（合并→空格，享受 ×5 大格），溢出转随身背包；返回实际入库数
     addCargo(id, n){
       let left = n;

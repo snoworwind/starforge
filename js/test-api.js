@@ -151,6 +151,7 @@
     if (currentMode === mode && !opts.fresh) return snapshot();
 
     const seed = opts.seed != null ? opts.seed : bootSeed;
+    const seq0 = window.Game.bootSeq;       // 建档代数：boot 结束时必须已变（防等到上一局的旧 planet 态）
     Math.random = mulberry32(seed);        // 生成期挂种子随机（含世界种子/出生点）
     try {
       triggerNewGame(mode);
@@ -159,6 +160,10 @@
       throw e;
     }
     try {
+      // 先确认新流程真的启动了：btnWorldConfirm→newGame 链路可能是异步的。
+      // 若直接等 planet，可能等到上一局残留的 planet 态——测试在新游戏建档完成前
+      // 就开始运行，随后与 newGame 的建档写入（buildWorldData→savePlanetState）竞态
+      await waitUntil(() => window.Game.bootSeq !== seq0, 10000, 10);
       await waitUntil(() => window.Game.state === 'planet', 90000, 30);
     } finally {
       Math.random = _origRandom;           // 星球生成完毕即还原

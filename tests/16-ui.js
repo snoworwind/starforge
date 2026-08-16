@@ -145,4 +145,23 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     A.eq(window.Game.dropMult, 7, 'world panel easy choice honored (dropMult=7)');
     await api.reboot('normal');   // 复位干净世界
   });
+
+  t.test('背包满时 Shift 取回不静默丢失（溢出掉落在身旁）', function () {
+    api.clearInv();
+    var i;
+    for (i = 0; i < 36; i++) api.give('stone', 250);   // 36 格 × 250 = 塞满
+    A.eq(api.count('stone'), 9000, 'inventory full');
+    var y = api.topAt(60, 60) + 1;
+    api.placeMachine('chest', 60, y, 60, 0);
+    api.machineInsert(60, y, 60, 'iron');
+    window.UI.openMachinePanel(window.Factory.at(60, y, 60));
+    var drops0 = window.Player.dropCount;
+    var slot = document.querySelector('#machineBody .slot-grid .slot');
+    A.ok(slot, 'chest slot rendered');
+    slot.onmousedown({ shiftKey: true, button: 0, preventDefault: function () {} });
+    A.ok(window.Player.dropCount > drops0, 'overflow dropped instead of lost (drops ' + drops0 + '→' + window.Player.dropCount + ')');
+    A.eq(api.count('iron'), 0, 'iron did not fit into full inventory');
+    window.UI.closeAll();
+    api.removeMachine(60, y, 60);
+  });
 });

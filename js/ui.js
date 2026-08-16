@@ -41,7 +41,12 @@ const UI = (() => {
     return willOpen;
   }
   function dropCursor(){
-    if (cursorStack){ Player.addItem(cursorStack.item, cursorStack.n, true); cursorStack = null; updateGhost(); }
+    if (cursorStack){
+      // 入包并处理溢出：背包满时剩余部分掉落在玩家身旁（此前溢出部分凭空消失）
+      const added = Player.addItem(cursorStack.item, cursorStack.n, true);
+      if (added < cursorStack.n) Player.spawnDrop(Player.pos.x, Player.pos.y + 0.6, Player.pos.z, cursorStack.item, cursorStack.n - added);
+      cursorStack = null; updateGhost();
+    }
   }
 
   // ---------- Tooltip ----------
@@ -426,9 +431,10 @@ const UI = (() => {
       e.preventDefault();
       Sound.play('uiClick');
       const s = getStack();
-      // Shift+左键：整组取回背包
+      // Shift+左键：整组取回背包（背包满时溢出部分掉落在玩家身旁，不再凭空消失）
       if (e.shiftKey && s){
-        Player.addItem(s.item, s.n, true);
+        const added = Player.addItem(s.item, s.n, true);
+        if (added < s.n) Player.spawnDrop(Player.pos.x, Player.pos.y + 0.6, Player.pos.z, s.item, s.n - added);
         setStack(null);
         Sound.play('insert');
         updateGhost();
@@ -584,8 +590,9 @@ const UI = (() => {
         bindPanelSlot(el,
           () => d.slots[idx],
           v => d.slots[idx] = v,
-          (s, setStack) => {           // Shift：取回背包
-            Player.addItem(s.item, s.n, true);
+          (s, setStack) => {           // Shift：取回背包（背包满时溢出掉落，不再凭空消失）
+            const added = Player.addItem(s.item, s.n, true);
+            if (added < s.n) Player.spawnDrop(Player.pos.x, Player.pos.y + 0.6, Player.pos.z, s.item, s.n - added);
             setStack(null);
             Sound.play('insert');
           });

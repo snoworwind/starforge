@@ -349,6 +349,19 @@ __SF_TEST__.suite('combat', function (t, api) {
     A.eq(window.Creatures.debugHerdBuckets(), 0, 'empty restore clears all buckets');
   });
 
+  // 回归：clearBatches（换星球/换生态）清空兽群却不清空 herdBuckets——
+  // 僵尸桶跨星球累积、herdsNear 永远遍历它们，内存与扫描开销随换系次数单调增长
+  t.test('清场（换星球/换生态）同步清空兽群分桶', function () {
+    var sp = window.World.findSpawn();
+    var c1x = Math.floor(sp.x / 24), c1z = Math.floor(sp.z / 24);
+    var mk = function (cx, cz) { return [cx, cz, 0, Math.round(sp.x * 10), Math.round(sp.z * 10), 4, Math.round(sp.x * 10), Math.round(sp.z * 10)]; };
+    window.Creatures.restore({ herds: [mk(c1x, c1z), mk(c1x + 3, c1z)], removed: [] });
+    A.eq(window.Creatures.debugHerdBuckets(), 2, 'two buckets before clear');
+    window.Creatures.debugClearBatches();
+    A.eq(window.Creatures.debugHerds(), 0, 'herds cleared');
+    A.eq(window.Creatures.debugHerdBuckets(), 0, 'buckets cleared with batches (no zombie buckets)');
+  });
+
   // 回归：守卫无人机此前无视一切墙体——水平推进无碰撞、命中只判水平距离，
   // 隔墙/隔天花板也能伤人，封闭房间形同虚设。修复后：不穿墙、无视线不攻击
   t.test('守卫无人机被墙体阻挡：不穿墙、不隔墙伤人', function () {

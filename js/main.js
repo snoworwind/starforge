@@ -3632,12 +3632,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v185';
+    bd.textContent = 'build v186';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v185';
+  window.__V_MAIN = 'v186';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4815,6 +4815,8 @@ const Game = (() => {
     get shipPos(){ return shipPos; },
     // 测试钩子：当前状态是否允许请求指针锁定（seated/atmoland 曾被漏掉）
     debugLockAllowed(){ return lockPointerAllowed(); },
+    // 测试钩子：当前座驾档案（购船成交回归断言用）
+    get debugPlayerShip(){ return playerShip; },
     // 测试钩子：扫描冷却剩余（帧率无关地等待冷却结束，再驱动下一次扫描）
     get debugScanCd(){ return scanCd; },
     // 测试钩子：无视冷却立即执行大气层扫描（标记替换语义的回归断言用）

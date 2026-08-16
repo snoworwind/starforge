@@ -71,8 +71,9 @@ const Station = (() => {
       const last = dlg.lines[dlg.lines.length - 1];
       if (dlg.idx === dlg.lines.length - 1 && (dlg.chars | 0) >= last.length){
         const v = dlg.buy;
-        dlg = null; closeDlgBox();
-        if (onBuyShip) onBuyShip(v);
+        // 先成交后关对话：回调返回 false（信用点不足等）时保留对话，可原地补足重试
+        const ok = onBuyShip ? onBuyShip(v) : true;
+        if (ok !== false){ dlg = null; closeDlgBox(); }
         return;
       }
     }
@@ -215,6 +216,24 @@ const Station = (() => {
     Player.pos.copy(walk.pos);
     phase = 'walk';
     return true;
+  }
+  // 测试专用：直接构造购船二次确认对话（翻到末句且字符已满，下一次 pressE 即触发成交回调）
+  function debugOpenBuyDlg(v){
+    const u = v.userData;
+    const C = Space.SHIP_CLASSES[u.cls];
+    dlg = {
+      name: '调试驾驶员',
+      lines: [
+        '这艘飞船不错。',
+        '等级 ' + u.cls + ' 级 · 货仓 ' + C.slots + ' 格。',
+        '出价 ' + u.price.toLocaleString() + ' 信用点，一口价。想要的话，再按一次 E 成交。',
+      ],
+      idx: 2, chars: 999,
+      buy: v,
+      owner: null,
+    };
+    el('dialogBox').classList.remove('hidden');
+    renderDlg();
   }
 
   // ---------- 曲线飞行段通用：位置+机头朝向（模型前方 -Z）----------
@@ -441,8 +460,8 @@ const Station = (() => {
     closeDialog(){ dlg = null; closeDlgBox(); },
     dialogAdvance(){ if (dlg) advanceDlg(); },   // 全局点击推进入口（main.js mousedown 路由）
     debugDlgChars(){ return dlg ? (dlg.chars | 0) : null; },
-    debugFloorAt, debugWalkTo,
+    debugFloorAt, debugWalkTo, debugOpenBuyDlg,
   };
 })();
 window.Station = Station;
-window.__V_STATION = 'v185';
+window.__V_STATION = 'v186';

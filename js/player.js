@@ -763,7 +763,7 @@ const Player = (() => {
   let dmgAcc = 0;
   function damageTick(dt, rate){
     dmgAcc += dt * rate;
-    if (dmgAcc >= 1){ dmgAcc = 0; damage(1); }
+    if (dmgAcc >= 1){ dmgAcc -= 1; damage(1); }   // 保留跨过 1.0 的余数（此前归零：慢速来源的累计进度被吞）
   }
   function damage(n){
     if (dead || n <= 0 || isCreative()) return;
@@ -1074,6 +1074,8 @@ const Player = (() => {
     get dead(){ return dead; },
     keys, update, initVisuals, tryPlace, lookTarget, recharge, damage, setToolVisible,
     chargeStat, canCharge, CHARGE_DEFS, cycleRot,
+    // 测试钩子：单步驱动持续伤害累加器（余数保留回归断言用）
+    debugDamageTick(dt, rate){ damageTick(dt, rate); },
     addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop, sortInventory,
     get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
     // 测试钩子：地上掉落物内容快照（上限回收不丢物回归断言用）

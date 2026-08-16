@@ -348,4 +348,24 @@ __SF_TEST__.suite('combat', function (t, api) {
     window.Creatures.restore({ herds: [], removed: [] });
     A.eq(window.Creatures.debugHerdBuckets(), 0, 'empty restore clears all buckets');
   });
+
+  // 回归：真实读档顺序 buildPlanetScene(Creatures.init) → Creatures.restore → 首帧 update。
+  // 修复前 init 置 lastInfoType=null，首帧 update 误判「换生态」→ clearBatches 把
+  // 刚恢复的兽群与击杀记录整体抹掉（农场动物全部重生、已杀动物复活）
+  t.test('读档后首帧 update 不清空恢复的兽群与击杀记录', function () {
+    window.Creatures.init(window.Game.planetScene);
+    var sp = window.World.findSpawn();
+    var cx = Math.floor(sp.x / 24) + 10, cz = Math.floor(sp.z / 24);   // 远离玩家：不参与本帧注册/物化
+    window.Creatures.restore({
+      herds: [[cx, cz, 0, Math.round(sp.x * 10), Math.round(sp.z * 10), 4, Math.round(sp.x * 10), Math.round(sp.z * 10)]],
+      removed: [[cx + ',' + cz, 1]],
+    });
+    A.eq(window.Creatures.debugHerds(), 1, 'herd restored before first update');
+    window.Creatures.update(1 / 30, window.Player.pos, window.World.biome);
+    var s2 = window.Creatures.serialize();
+    var kept = s2.herds.some(function (h) { return h[0] === cx && h[1] === cz && h[2] === 0; });
+    A.ok(kept, 'restored herd survives first update (load order init→restore→update)');
+    var maskKept = s2.removed.some(function (r) { return r[0] === (cx + ',' + cz) && r[1] === 1; });
+    A.ok(maskKept, 'kill mask survives first update (killed animals stay dead)');
+  });
 });

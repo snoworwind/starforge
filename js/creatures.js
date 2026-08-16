@@ -699,6 +699,15 @@ const Creatures = (() => {
     }
   }
 
+  // 兽群与玩家的当前距离平方：活跃时取活体位置（记录坐标只在卸载/序列化时更新），
+  // 休眠时取记录位置——此前统一用记录坐标，游荡过的兽群在 128m 边界造成密度统计偏差
+  function herdD2(herd, plyPos){
+    const hx = herd.g ? herd.g.position.x : herd.x;
+    const hz = herd.g ? herd.g.position.z : herd.z;
+    const dx = hx - plyPos.x, dz = hz - plyPos.z;
+    return dx * dx + dz * dz;
+  }
+
   // 周期补足：128m 内兽群少于目标密度时，在生成环 24~128m 内新建 1 个兽群
   function spawnCycle(plyPos, info){
     if (list.length >= CRE_CAP) return;
@@ -706,8 +715,7 @@ const Creatures = (() => {
     let local = 0;
     for (const herd of herds.values()){
       if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;
-      const dx = herd.x - plyPos.x, dz = herd.z - plyPos.z;
-      if (dx * dx + dz * dz < UNLOAD_D * UNLOAD_D) local++;
+      if (herdD2(herd, plyPos) < UNLOAD_D * UNLOAD_D) local++;
     }
     if (local >= TARGET_DENSITY) return;
     const cells = [];
@@ -1411,6 +1419,16 @@ const Creatures = (() => {
       if (!info) return false;
       registerCell(cx | 0, cz | 0, info);
       return true;
+    },
+    // 测试钩子：与 spawnCycle 同口径的 128m 本地兽群计数（活体位置口径）
+    debugLocalHerdCount(plyPos){
+      const pcx = Math.floor(plyPos.x / CRE_CELL), pcz = Math.floor(plyPos.z / CRE_CELL);
+      let local = 0;
+      for (const herd of herds.values()){
+        if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;
+        if (herdD2(herd, plyPos) < UNLOAD_D * UNLOAD_D) local++;
+      }
+      return local;
     },
     debugSkyFlock(){ return skyFlock; },
     debugList(){ return list; },

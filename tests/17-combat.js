@@ -334,4 +334,18 @@ __SF_TEST__.suite('combat', function (t, api) {
     A.eq(window.Creatures.debugBlockedAhead(x + 0.5, z + 0.5, x + 1.5, z + 0.5), true, 'water column blocks ground creatures');
     window.World.set(x + 1, gy + 1, z, 0, true);   // 清理
   });
+
+  t.test('兽群按出生细胞分桶维护（增删同步，扫描不再遍历全图）', function () {
+    var sp = window.World.findSpawn();
+    var c1x = Math.floor(sp.x / 24), c1z = Math.floor(sp.z / 24);
+    var c2x = c1x + 3, c2z = c1z;
+    var mk = function (cx, cz) { return [cx, cz, 0, Math.round(sp.x * 10), Math.round(sp.z * 10), 4, Math.round(sp.x * 10), Math.round(sp.z * 10)]; };
+    // restore 会整体重建桶：断言桶数等于数据中的不同细胞数（先清后加）
+    window.Creatures.restore({ herds: [mk(c1x, c1z), mk(c2x, c2z)], removed: [] });
+    A.eq(window.Creatures.debugHerdBuckets(), 2, 'two cells → two buckets (got ' + window.Creatures.debugHerdBuckets() + ')');
+    window.Creatures.restore({ herds: [mk(c1x, c1z)], removed: [] });
+    A.eq(window.Creatures.debugHerdBuckets(), 1, 're-restore one herd → one bucket');
+    window.Creatures.restore({ herds: [], removed: [] });
+    A.eq(window.Creatures.debugHerdBuckets(), 0, 'empty restore clears all buckets');
+  });
 });

@@ -460,6 +460,36 @@ __SF_TEST__.suite('net', function (t, api) {
       window.Game = G;
     }
   });
+
+  t.test('断线/重连清理挂起增量：残留队列不在新世界上重放', async function () {
+    await Net.joinRoom('127.0.0.1:17886');
+    A.eq(Net.active(), true, 'Net connected');
+    // 原始连接向「非当前星球」放方块 → 本页 onBlk 进挂起队列
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 4, name: '增量注入者', role: 'guest' });
+    await a.next(function (m) { return m.t === 'init'; });
+    a.send({ t: 'blk', planet: 1, x: 3, y: 40, z: 3, b: 1, full: [24576, 0] });
+    await api.waitUntil(function () { return Net.debugPendingCounts().blk === 1; }, 5000, 50);
+    A.eq(Net.debugPendingCounts().blk, 1, 'blk for other planet queued');
+    Net.disconnect();
+    A.eq(Net.debugPendingCounts().blk, 0, 'pending queue cleared on disconnect');
+    a.close();
+  });
+
+  t.test('重名去重：确认名（含 #N）持久化，重连不误领他人档案', async function () {
+    var a = wsClient(); await a.open;
+    a.send({ t: 'hello', v: 4, name: '占名者', role: 'guest' });
+    await a.next(function (m) { return m.t === 'init'; });
+    var inp = document.getElementById('netName');
+    if (inp) inp.value = '占名者';
+    await Net.joinRoom('127.0.0.1:17886');
+    A.eq(Net.myName, '占名者#2', 'server-confirmed deduped name');
+    A.eq(localStorage.getItem('starforge_net_name'), '占名者#2', 'full confirmed name persisted (with #2 suffix)');
+    Net.disconnect();
+    try { localStorage.removeItem('starforge_net_name'); } catch (e) {}
+    if (inp) inp.value = '';   // 清空输入框：否则后续套件的 joinRoom 会沿用「占名者」误撞档案
+    a.close();
+  });
 });
 
 /* STARFORGE 测试套件 12b — 客户端世界包应用（Game.joinGame 全量重建） */

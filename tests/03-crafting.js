@@ -42,6 +42,23 @@ __SF_TEST__.suite('crafting', function (t, api) {
     A.eq(api.count('fuel'), 1);
   });
 
+  t.test('craft with full backpack drops overflow instead of vanishing', function () {
+    // 需要星球场景（dropGroup 挂在世界场景上）才能真实掉落
+    return api.boot('normal', { fresh: true }).then(function () {
+      api.clearInv();
+      // 36 格全部填满，第 0 格放原料
+      for (var i = 0; i < 36; i++) window.Player.inv[i] = { item: 'stone', n: 250 };
+      window.Player.inv[0] = { item: 'carbon', n: 250 };
+      var d0 = window.Player.dropCount;
+      var r = RECIPE_BY_ID['planks_b'];
+      A.ok(r, 'recipe lookup available');
+      A.eq(window.UI.tryCraft(r), true, 'craft completes even when backpack full');
+      A.eq(api.count('carbon'), 246, '4 carbon consumed');
+      A.eq(api.count('planks_b'), 0, 'no room in backpack');
+      A.eq(window.Player.dropCount, d0 + 1, 'overflow planks dropped beside player');
+    });
+  });
+
   t.test('survival dropMult multiplies output', function () {
     return api.boot('normal', { fresh: true }).then(function () {
       api.clearInv();

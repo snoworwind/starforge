@@ -27,6 +27,9 @@ const Creatures = (() => {
   // ---------- Minecraft 式（Java 版）生成与持久化 ----------
   const cellStates = new Map();    // 'cx,cz' -> { cx, cz, cands: [候选出生点], mask: 已占用位图, herdCount: 引用本格的兽群数 }
   const herds = new Map();         // nid -> 兽群记录（自然生成生物的世界状态：生成后永不消失，仅卸载/重载）
+  const herdBuckets = new Map();   // 'cx,cz' -> Set<nid>（按出生细胞分桶：物化/密度扫描不再逐帧遍历全图）
+  const BUCKET_R = 10;             // 扫描细胞半径：记录坐标离细胞中心可达 ~132m（候选环 92m + 游荡），
+                                   // 覆盖 96m 物化半径需 (96+132)/24 ≈ 9.5 → 10 格
   const removedMasks = new Map();  // 'cx,cz' -> 被杀候选位图（存档持久化：被杀动物不复活，读档后同样不重生）
   const registerQueue = [];        // 待注册候选细胞（分帧补齐，避免集中生成地形卡顿）
   const fadingOut = [];            // 淡出中的生物（已移出活跃列表，只做视觉收尾）
@@ -57,6 +60,32 @@ const Creatures = (() => {
     return h;
   }
   function creatureNid(cx, cz, i){ return batchSeedOf(cx, cz) * 64 + i; }
+  // ---------- 兽群细胞分桶（物化/密度扫描不再逐帧遍历全图，探索过的世界再大也不拖累帧率）----------
+  function bucketKeyOf(cx, cz){ return cx + ',' + cz; }
+  function herdAddBucket(h){
+    const k = bucketKeyOf(h.cx, h.cz);
+    let s = herdBuckets.get(k);
+    if (!s){ s = new Set(); herdBuckets.set(k, s); }
+    s.add(h.nid);
+  }
+  function herdRemoveBucket(h){
+    const k = bucketKeyOf(h.cx, h.cz);
+    const s = herdBuckets.get(k);
+    if (s){ s.delete(h.nid); if (!s.size) herdBuckets.delete(k); }
+  }
+  // 迭代玩家周边 BUCKET_R 格内的兽群（物化扫描 + 密度统计共用；桶按出生细胞建）
+  function* herdsNear(pcx, pcz){
+    for (let dx = -BUCKET_R; dx <= BUCKET_R; dx++){
+      for (let dz = -BUCKET_R; dz <= BUCKET_R; dz++){
+        const s = herdBuckets.get(bucketKeyOf(pcx + dx, pcz + dz));
+        if (!s) continue;
+        for (const nid of s){
+          const h = herds.get(nid);
+          if (h) yield h;
+        }
+      }
+    }
+  }
   // 行为参数统一由兽群 nid 确定性派生：新建 / 读档恢复 / 注册补全三路同源，
   // 跨客户端一致——读档不再用 Math.random 占位（此前各端 animT 相位漂移、速度朝向错误）
   function herdParams(nid){
@@ -211,6 +240,7 @@ const Creatures = (() => {
     ruinGuards.clear();
     cellStates.clear();
     herds.clear();
+    herdBuckets.clear();
     removedMasks.clear();
     registerQueue.length = 0;
     fadingOut.length = 0;
@@ -572,6 +602,7 @@ const Creatures = (() => {
   // 读档恢复：兽群（位置/血量/领地）与击杀记录全部还原；被杀动物不会复活
   function restore(data){
     herds.clear();
+    herdBuckets.clear();
     removedMasks.clear();
     if (!data || typeof data !== 'object') return;
     if (Array.isArray(data.removed)){
@@ -588,11 +619,13 @@ const Creatures = (() => {
         const hx = Number.isFinite(e[6]) ? e[6] / 10 : x, hz = Number.isFinite(e[7]) ? e[7] / 10 : z;
         const nid = creatureNid(e[0], e[1], e[2]);
         const bp = herdParams(nid);
-        herds.set(nid, {
+        const rec = {
           nid, cx: e[0], cz: e[1], candIdx: e[2],
           x, z, hp: e[5] | 0, homeX: hx, homeZ: hz, g: null, first: false,
           speed: bp.speed, dir: bp.dir, timer: bp.timer, animT: bp.animT,
-        });
+        };
+        herds.set(nid, rec);
+        herdAddBucket(rec);
       }
     }
   }
@@ -602,11 +635,13 @@ const Creatures = (() => {
   function createHerd(st, c){
     const nid = creatureNid(st.cx, st.cz, c.i);
     const bp = herdParams(nid);
-    herds.set(nid, {
+    const rec = {
       nid, cx: st.cx, cz: st.cz, candIdx: c.i,
       x: c.x, z: c.z, homeX: c.x, homeZ: c.z, hp: 4, g: null, first: true,
       speed: bp.speed, dir: bp.dir, timer: bp.timer, animT: bp.animT,
-    });
+    };
+    herds.set(nid, rec);
+    herdAddBucket(rec);
     st.mask |= (1 << c.i);
     st.herdCount++;
     return nid;
@@ -665,6 +700,7 @@ const Creatures = (() => {
   // 删除兽群记录（击杀后：动物真的死了，不会复活；周期补足会另建新兽群）
   function removeHerdRecord(herd){
     herds.delete(herd.nid);
+    herdRemoveBucket(herd);
     const key = herd.cx + ',' + herd.cz;
     // 被杀候选永久移除（Java 式）：占用位保持、并记入 removed 掩码随存档持久化
     removedMasks.set(key, (removedMasks.get(key) || 0) | (1 << herd.candIdx));
@@ -687,13 +723,10 @@ const Creatures = (() => {
   function materializePass(plyPos, info){
     const pcx = Math.floor(plyPos.x / CRE_CELL), pcz = Math.floor(plyPos.z / CRE_CELL);
     let budget = 3;
-    for (const herd of herds.values()){
+    // 分桶迭代：只扫玩家周边 BUCKET_R 格内的兽群（探索过的世界再大也不拖累每帧扫描）
+    for (const herd of herdsNear(pcx, pcz)){
       if (budget <= 0) return;
       if (herd.g) continue;                                          // 已活跃
-      // 远格快速跳过。门限必须放宽到 10 格：候选环距细胞中心可达 92m，游荡+卸载时
-      // 记录坐标离细胞中心可达 ~132m——6 格门限下（最小距离 7×24−132=36m）会把
-      // 物化半径（96m）内的休眠兽群漏掉，永不重载
-      if (Math.abs(herd.cx - pcx) > 10 || Math.abs(herd.cz - pcz) > 10) continue;
       const dx = herd.x - plyPos.x, dz = herd.z - plyPos.z;
       const d2 = dx * dx + dz * dz;
       if (d2 >= RELOAD_D * RELOAD_D) continue;                       // 尚未进入重载半径
@@ -717,7 +750,7 @@ const Creatures = (() => {
     if (list.length >= CRE_CAP) return;
     const pcx = Math.floor(plyPos.x / CRE_CELL), pcz = Math.floor(plyPos.z / CRE_CELL);
     let local = 0;
-    for (const herd of herds.values()){
+    for (const herd of herdsNear(pcx, pcz)){
       if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;
       if (herdD2(herd, plyPos) < UNLOAD_D * UNLOAD_D) local++;
     }
@@ -740,7 +773,8 @@ const Creatures = (() => {
         if (materializeHerd(herds.get(nid), info)) return;
         // 注册后地形被破坏（挖掉/被水淹）：回滚本次占用并继续尝试下一候选，
         // 否则失败的记录留在 herds 里成为幽灵兽群，逐轮累积直到该细胞再也刷不出生物
-        herds.delete(nid);
+        const rec = herds.get(nid);
+        if (rec){ herds.delete(nid); herdRemoveBucket(rec); }
         st.mask &= ~(1 << c.i);
         st.herdCount = Math.max(0, st.herdCount - 1);
       }
@@ -1202,6 +1236,7 @@ const Creatures = (() => {
     ruinGuards.clear();
     cellStates.clear();
     herds.clear();
+    herdBuckets.clear();
     removedMasks.clear();
     registerQueue.length = 0;
     lastCenter = null;
@@ -1432,12 +1467,14 @@ const Creatures = (() => {
     debugLocalHerdCount(plyPos){
       const pcx = Math.floor(plyPos.x / CRE_CELL), pcz = Math.floor(plyPos.z / CRE_CELL);
       let local = 0;
-      for (const herd of herds.values()){
+      for (const herd of herdsNear(pcx, pcz)){
         if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;
         if (herdD2(herd, plyPos) < UNLOAD_D * UNLOAD_D) local++;
       }
       return local;
     },
+    // 测试钩子：兽群分桶数量（验证分桶随增删正确维护）
+    debugHerdBuckets(){ return herdBuckets.size; },
     // 测试钩子：以当前生态陆地生物的通行规则判断 (nx,nz) 是否可通行
     debugBlockedAhead(x, z, nx, nz){
       const info = (World.biome && World.biome.animal) || null;

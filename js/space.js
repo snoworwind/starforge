@@ -2524,6 +2524,7 @@ const Space = (() => {
     if (shipGroup) shipGroup.quaternion.setFromEuler(new THREE.Euler(shipState.pitch, shipState.yaw, shipState.roll, 'YXZ'));
   }
   const _fwd = new THREE.Vector3();
+  const _sunV = new THREE.Vector3();   // 太阳碰撞专用临时向量——覆写共享 _fwd 会污染同帧脉冲星流线方向
   const _camRollQ = new THREE.Quaternion(), _zAxis = new THREE.Vector3(0, 0, 1);
   const _qAtt = new THREE.Quaternion(), _qDlt = new THREE.Quaternion(), _eAtt = new THREE.Euler();
   const _qMov = new THREE.Quaternion(), _eMov = new THREE.Euler();          // 移动/机身朝向
@@ -2579,9 +2580,9 @@ const Space = (() => {
       if (sunBody) sunBody.rotation.y += dt * 0.008;
       const sunD = shipState.pos.distanceTo(SUN_POS);
       if (sunD < SUN_R + 40){
-        _fwd.copy(shipState.pos).sub(SUN_POS);
-        if (_fwd.lengthSq() < 1) _fwd.set(0, 1, 0); else _fwd.normalize();
-        shipState.pos.copy(SUN_POS).addScaledVector(_fwd, SUN_R + 40);
+        _sunV.copy(shipState.pos).sub(SUN_POS);
+        if (_sunV.lengthSq() < 1) _sunV.set(0, 1, 0); else _sunV.normalize();
+        shipState.pos.copy(SUN_POS).addScaledVector(_sunV, SUN_R + 40);
         shipState.speed = Math.min(shipState.speed, 24);
       }
       if (sunD < SUN_R * 2.2){
@@ -2784,6 +2785,7 @@ const Space = (() => {
     warpGalaxy, restoreGalaxy, spaceScan, getSpaceMarkers, clearSpaceMarkers, tickSpaceScan, getCurrentGalaxySeed,
     paintSurfaceRegion, setSurfaceHole, paintGlobe, displaceGlobe, updateLOD, restoreGlobe, clearLodTiles,
     debugLodHoleAmt(pid){ const p = planets.find(q => q.def.id === pid); if (!p) return null; return p.lodMatPair ? p.lodMatPair.holeU.amt.value : 0; },
+    debugFwd(){ return _fwd.clone(); },
     SUN_POS, PLANET_DAY, SUN_R, sunTextures, setLodQuality, lodRange, setClouds, setRealAtmo,
     getDock, tickStation, bakeStationPortrait, removeVisitorShip, setShipModel, setVisitorCount, cloneStationModel,
     SHIP_CLASSES, SHIP_MODEL_NAMES,
@@ -2798,4 +2800,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v182';
+window.__V_SPACE = 'v183';

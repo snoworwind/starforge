@@ -286,6 +286,24 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(window.Game.debugLockAllowed(), true, 'seated allows pointer lock (fix: 起飞后鼠标可转向)');
   });
 
+  // 回归：贴近日面反弹分支曾覆写共享 _fwd 为径向向量——同帧速度 >150 时脉冲星流线
+  // 沿径向而非航向喷射。改用独立临时向量后，_fwd 保持机头朝向
+  t.test('near-sun bounce keeps _fwd aligned to heading', function () {
+    api.enterSpace();
+    var S = window.Space;
+    S.shipState.pitch = 0; S.shipState.yaw = 0; S.shipState.roll = 0;
+    S.shipState.speed = 200;   // >150：本帧脉冲星流线会读取 _fwd
+    // 正上方贴近日面：进入反弹分支（距离 SUN_R+20 < SUN_R+40）
+    S.shipState.pos.copy(S.SUN_POS).add(new THREE.Vector3(0, S.SUN_R + 20, 0));
+    S.update(1 / 60, new THREE.PerspectiveCamera(), {
+      mouseDX: 0, mouseDY: 0, thrust: false, brake: false, boost: false,
+      pulse: false, rollLeft: false, rollRight: false,
+    });
+    var f = S.debugFwd();
+    A.ok(Math.abs(f.y) < 0.2, 'forward stays on heading plane after sun bounce (y=' + f.y.toFixed(2) + ')');
+    A.ok(f.z < -0.8, 'forward points -Z per heading (z=' + f.z.toFixed(2) + ')');
+  });
+
   // 回归：跃迁完成块把 warpAnim 置 null 而 state 仍为 warping——下一帧解引用崩溃，
   // catch 兜底以 seed=0 错误跃迁（跳到 0 号星系），200ms 白闪超时又二次 finishWarp（双重抵达）
   t.test('warp arrival lands on the locked galaxy (no null-warpAnim crash)', async function () {

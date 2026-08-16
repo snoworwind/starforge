@@ -109,7 +109,9 @@ __SF_TEST__.suite('world', function (t, api) {
     window.World.stream(fx + 16, fz);
     for (var j = 0; j < 300; j++){ window.World.stream(fx, fz); window.World.update(1 / 30, fx, fz); }
     await api.sleep(200);
-    A.ok(!window.World.debugHasChunk(kx, kz), 'distant pristine chunk evicted (内存有界)');
+    // 剔除可能被并发扫描延迟一帧：轮询等待 + 失败时携带区块状态诊断
+    await api.waitUntil(function () { return !window.World.debugHasChunk(kx, kz); }, 5000, 100);
+    A.ok(!window.World.debugHasChunk(kx, kz), 'distant pristine chunk evicted (内存有界) flags=' + JSON.stringify(window.World.debugChunkFlags(kx, kz)) + ' spawn=[' + sp[0] + ',' + sp[2] + '] k=[' + kx + ',' + kz + ']');
     // 返回出生点：数据由程序化地形确定性还原
     api.setPos(sp[0], sp[1], sp[2]);
     window.World.stream(sp[0] + 16, sp[2]);

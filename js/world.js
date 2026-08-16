@@ -1494,6 +1494,8 @@ const World = (() => {
     get debugWaterTime(){ return waterWaveU.t.value; },
     // 测试钩子：区块数据是否在内存（不触发生成——数据剔除回归断言用）
     debugHasChunk(cx, cz){ return chunks.has(ckey(cx | 0, cz | 0)); },
+    // 测试钩子：区块内部状态（剔除断言失败时的诊断）
+    debugChunkFlags(cx, cz){ const c = chunks.get(ckey(cx | 0, cz | 0)); return c ? { modified: c.modified, needSave: c.needSave, mesh: !!c.mesh } : null; },
   };
 })();
 window.World = World;

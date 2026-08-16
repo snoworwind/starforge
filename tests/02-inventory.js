@@ -111,4 +111,22 @@ __SF_TEST__.suite('inventory', function (t, api) {
     api.clearInv();
     window.UI.closeAll();
   });
+
+  // 回归：掉落物上限（90）回收最旧掉落时忽略 addItem 返回值——背包满时被顶掉的掉落凭空消失
+  t.test('drop cap recycling keeps overflow (no item loss)', function () {
+    // 不 boot（boot 会改难度倍率，污染后续合成套件的 dropMult=1 假设）：
+    // 用一次性场景初始化掉落容器，直接驱动真实 spawnDrop 路径
+    window.Player.initVisuals(new THREE.Scene());
+    api.clearInv();
+    for (var i = 0; i < 36; i++) window.Player.inv[i] = { item: 'stone', n: 250 };   // 背包全满
+    // 90 个铁分散放置（避免同点合并），再放 1 个触发上限回收
+    for (var j = 0; j < 90; j++) window.Player.spawnDrop((j % 10) * 2, 45, Math.floor(j / 10) * 2, 'iron', 1);
+    A.eq(window.Player.dropCount, 90, '90 drops on ground');
+    window.Player.spawnDrop(30, 45, 30, 'iron', 1);
+    var items = window.Player.debugDropItems();
+    var iron = 0;
+    for (var k = 0; k < items.length; k++) if (items[k].item === 'iron') iron += items[k].n;
+    A.eq(iron, 91, 'no iron lost through cap recycling (修复前 90, got ' + iron + ')');
+    api.clearInv();
+  });
 });

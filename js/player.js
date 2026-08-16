@@ -150,8 +150,15 @@ const Player = (() => {
     // 上限保护：超量时最旧的直接入包
     if (worldDrops.length >= 90){
       const old = worldDrops.shift();
-      addItem(old.item, old.n, true);
-      dropGroup.remove(old.mesh);
+      const added = addItem(old.item, old.n, true);
+      if (added < old.n){
+        // 背包放不下：余量留在原地（换到队尾防立即再被顶掉）——
+        // 此前忽略 addItem 返回值，满背包时被顶掉的掉落凭空消失
+        old.n = old.n - added;
+        worldDrops.push(old);
+      } else {
+        dropGroup.remove(old.mesh);
+      }
     }
     const mesh = new THREE.Mesh(dropGeo, dropMat(item));
     mesh.position.set(x, y, z);
@@ -1065,6 +1072,8 @@ const Player = (() => {
     chargeStat, canCharge, CHARGE_DEFS, cycleRot,
     addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop, sortInventory,
     get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
+    // 测试钩子：地上掉落物内容快照（上限回收不丢物回归断言用）
+    debugDropItems(){ return worldDrops.map(d => ({ item: d.item, n: d.n })); },
     // 测试钩子：最后一个掉落物的高度（新掉落实体追加在队尾，避免旧掉落干扰）
     debugLastDropY(){ return worldDrops.length ? worldDrops[worldDrops.length - 1].mesh.position.y : null; },
     // 测试钩子：眼部（摄像机高度）是否浸入液体（与 update 内检测同口径）

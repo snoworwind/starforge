@@ -72,6 +72,20 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(f(20, 31), 2, 'landing pad area (20,31) height 2');
   });
 
+  // 回归：离开星球时地面 HUD 标记不清——太空态不跑 updateMarkers，矿物/飞船标记
+  // 冻结在屏幕上的最后位置（冲向太空仍挂在准星旁）
+  t.test('ground HUD markers cleared when leaving planet', async function () {
+    await window.Game.tpTo(0, null, 'planet', 'test');
+    var sp = api.pos();
+    api.setPos(sp[0] + 12, sp[1], sp[2]);   // 离船 >8m：飞船标记在星球上显示
+    await api.sleep(200);   // 若干帧 updateMarkers
+    var el = document.querySelector('#markers .wmark.ship');
+    A.ok(el && el.style.display !== 'none', 'ship marker visible on planet');
+    await window.Game.tpTo(0, null, 'space', 'test');
+    await api.sleep(200);
+    A.eq(el.style.display, 'none', 'ship marker hidden in space (修复前冻结可见)');
+  });
+
   // 回归：nearestTarget 无 bestD 比较——每个进入 220 的星球都覆盖 best（迭代序最后一个
   // 胜出），空间站又无条件覆盖星球：交互提示报的不是最近的星球。修复：最近者胜
   t.test('nearestTarget picks the nearest body (not the last iterated)', async function () {

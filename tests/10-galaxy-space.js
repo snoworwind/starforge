@@ -72,6 +72,29 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(f(20, 31), 2, 'landing pad area (20,31) height 2');
   });
 
+  // 回归：星系图打开时飞船照常飞行——W/S/J 输入与飞船模拟在星图后面继续跑，
+  // 船漂移/脉冲消耗，甚至 tickWarpAutoJump 白耗曲率电池。修复：面板打开冻结飞行
+  t.test('ship frozen while galaxy map open', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);   // 远离星球，防无缝入星
+    window.Space.shipState.speed = 60;   // 给初速：修复前星图打开仍会漂移
+    var p0 = window.Space.shipState.pos.toArray().slice();
+    window.UI.openGalaxyMap();
+    A.ok(!document.getElementById('galaxyPanel').classList.contains('hidden'), 'galaxy map open');
+    await api.sleep(400);
+    var p1 = window.Space.shipState.pos.toArray().slice();
+    A.ok(Math.abs(p1[0] - p0[0]) < 0.01 && Math.abs(p1[2] - p0[2]) < 0.01,
+      'ship frozen while map open (dx=' + (p1[0] - p0[0]).toFixed(3) + ')');
+    window.UI.closeAll();
+    // 帧率在 CI/本机差异大：用轮询等飞船真正位移（循环一旦恢复跑帧，位移必现）
+    await api.waitUntil(function () {
+      var pp = window.Space.shipState.pos;
+      return Math.hypot(pp.x - p0[0], pp.z - p0[2]) > 1;
+    }, 5000, 50);
+    var p2 = window.Space.shipState.pos.toArray().slice();
+    A.ok(Math.hypot(p2[0] - p0[0], p2[2] - p0[2]) > 1, 'ship resumes flight after map closed');
+  });
+
   // 回归：再入摩擦特效层只在 atmo 态衰减（reentryT>0 时）。再入中途 E 落地（atmoland→seated）
   // 或传送离开大气后 updateAtmo 不再执行，reentryT 永远不为零——特效层永久卡在屏幕上
   t.test('reentry FX overlay cleared when leaving atmo mid-reentry', async function () {

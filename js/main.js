@@ -1037,8 +1037,8 @@ const Game = (() => {
     if (state === 'seated' && e.code === 'KeyW' && !UI.anyPanelOpen()){ attemptTakeoff(); }
     // 空间站停机位：W 起飞离站
     if (state === 'station' && e.code === 'KeyW' && !e.repeat){ Station.pressW(); }
-    // 太空/大气层按键
-    if (state === 'space' || state === 'atmo'){
+    // 太空/大气层按键（面板打开时不吸收输入：星系图等界面背后飞船不再偷偷吃按键）
+    if ((state === 'space' || state === 'atmo') && !UI.anyPanelOpen()){
       if (e.code === 'KeyW') spaceInput.thrust = true;
       if (e.code === 'KeyS') spaceInput.brake = true;
       if (e.code === 'ShiftLeft') spaceInput.boost = true;
@@ -3603,12 +3603,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v160';
+    bd.textContent = 'build v161';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v160';
+  window.__V_MAIN = 'v161';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3732,7 +3732,8 @@ const Game = (() => {
     }
     else if (state === 'atmo'){
       const day = updateDayNight(dt);
-      updateAtmo(dt);
+      // 面板（行星图）打开时冻结飞行：与星系图在太空态的行为一致
+      if (!UI.anyPanelOpen()) updateAtmo(dt);
       if (state !== 'atmo'){
         // 已冲出大气层：立即以太空姿态渲染本帧，直飞无停顿
         if (state === 'space'){
@@ -3762,8 +3763,13 @@ const Game = (() => {
       renderer.render(planetScene, camera);
     }
     else if (state === 'space'){
-      Space.update(dt, camera, spaceInput);
-      Space.tickSpaceScan(dt);
+      // 星系图/面板打开：飞船冻结——否则 W/S/J 等输入与飞船模拟在星图后面继续跑，
+      // 船漂移/脉冲消耗，甚至 tickWarpAutoJump 白耗曲率电池
+      const mapOpen = UI.anyPanelOpen();
+      if (!mapOpen){
+        Space.update(dt, camera, spaceInput);
+        Space.tickSpaceScan(dt);
+      }
       // 机库入口/库内 → 空间站模块整体接管（station.js 重制版）
       if (Station.tryBegin(dt)){
         state = 'station';
@@ -3771,17 +3777,19 @@ const Game = (() => {
         spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;
         return;
       }
-      seamlessApproach();
-      spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;
-      if (state !== 'space') return;   // 已无缝入星（rAF 已在循环顶部调度）
-      if (worldLoadedFor !== null) World.update(dt);   // 地表贴附预览的区块淡入
-      if (!Space.galaxySpritesReady) Space.setGalaxySprites(neighborSeeds().map(s => ({ seed: s })));   // 远方星系贴图（惰性，跃迁后自动重建）
+      if (!mapOpen){
+        seamlessApproach();
+        spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;
+        if (state !== 'space') return;   // 已无缝入星（rAF 已在循环顶部调度）
+        if (worldLoadedFor !== null) World.update(dt);   // 地表贴附预览的区块淡入
+        if (!Space.galaxySpritesReady) Space.setGalaxySprites(neighborSeeds().map(s => ({ seed: s })));   // 远方星系贴图（惰性，跃迁后自动重建）
+      }
       $('speedVal').textContent = Space.shipState.speed.toFixed(0);
       refreshHints();
       updateSpaceMarkers();
       updateEnemyArrows();   // 敌舰出屏边缘箭头（NMS 式）
       updateWarpMarker();    // 锁定星系方框/屏缘箭头
-      tickWarpAutoJump();    // 对准 + 脉冲达速 → 自动跃迁
+      if (!mapOpen) tickWarpAutoJump();   // 对准 + 脉冲达速 → 自动跃迁
       if (state !== 'space') return;   // 本帧已点火跃迁
       UI.updateResearch(dt);
       renderer.render(Space.scene, camera);

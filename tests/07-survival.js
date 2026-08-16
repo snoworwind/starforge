@@ -54,4 +54,17 @@ __SF_TEST__.suite('survival', function (t, api) {
       A.eq(api.stats().shield, 6, 'shield unchanged in creative');
     });
   });
+
+  // 回归：die() 重生只回满 hp/shield/o2/haz，漏掉喷气/激光——空槽死亡后重生仍是空槽
+  t.test('死亡重生回满喷气与激光能量', async function () {
+    return api.boot('normal', { fresh: true }).then(async function () {
+      api.setStat('jet', 0);
+      api.setStat('laser', 0);
+      window.Player.damage(100);   // hp 归零触发 die()
+      await api.sleep(2000);       // 1.8s 重生延迟
+      var s = api.stats();
+      A.ok(s.jet >= s.jetMax - 0.01 && s.laser >= s.laserMax - 0.01,
+        'jet/laser restored on respawn (jet=' + s.jet + '/' + s.jetMax + ' laser=' + s.laser + '/' + s.laserMax + ')');
+    });
+  });
 });

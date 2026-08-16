@@ -793,6 +793,7 @@ const Player = (() => {
       vel.set(0, 0, 0);
       stats.hp = stats.hpMax; stats.shield = stats.shieldMax;
       stats.o2 = stats.o2Max; stats.haz = stats.hazMax;
+      stats.jet = stats.jetMax; stats.laser = stats.laserMax;   // 外骨骼整体重建：喷气/激光同样回满（此前漏掉，死亡后重生仍空槽）
       dead = false;
       document.getElementById('fader').classList.remove('show');
     }, 1800);

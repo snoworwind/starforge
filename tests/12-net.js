@@ -528,6 +528,23 @@ __SF_TEST__.suite('net-join', function (t, api) {
     A.ok(Number.isFinite(p[1]) && p[1] > 0, '出生点在地表');
   });
 
+  // 回归：joinGame 应用服务器世界期间，并发的新游戏建档流程跑
+  // buildWorldData→savePlanetState 把 visitedPlanets 覆盖成旧世界——genPlanet 的
+  // 50ms 等待窗口内读到被覆盖的种子，服务器世界被本地旧种子重建（世界对不上服务器）
+  t.test('并发世界快照不覆盖服务器世界种子（joinGame 应用竞态）', async function () {
+    var world = {
+      v: 4, name: '竞态世界', creative: false, dropMult: 1,
+      galaxySeed: 123456, galaxyCount: 1, currentPlanet: 0, dayTime: 0.3,
+      planets: { '0': { mods: {}, machines: [], shipPos: [6, 40, 6], seed: 42424242, biome: 'lush' } },
+      galaxyArchives: {}, market: {}, mapMarks: {}, flags: {}, warpLock: null,
+    };
+    var p = Game.joinGame(Object.assign({}, world, { spawn: null, you: null }));
+    // 在 genPlanet 的等待窗口内并发执行世界快照（与 newGame 建档同路径）
+    Game.buildNetWorld();
+    await p;
+    A.eq(World.seed, 42424242, 'server seed survives concurrent world snapshot');
+  });
+
   t.test('服务器人物数据应用（you.char）+ 指定出生点', async function () {
     var spawn = { planet: 0, p: [12, 45, 12], st: 'planet', yaw: 1.2 };
     var you = { id: 9, name: '服务器旅行者', char: {

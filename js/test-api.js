@@ -59,6 +59,10 @@
     try {
       const S = (typeof Sound !== 'undefined') ? Sound : window.Sound;
       if (!S) return;
+      // 保留真实实现引用：音频回归测试（如首声入队）用桩 AudioContext 驱动真实代码路径
+      S._realPlay = S.play;
+      S._realBegin = S.begin;
+      S._realResume = S.resume;
       S.play = function () {};
       S.begin = function () {};
       S.resume = function () {};

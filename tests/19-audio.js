@@ -59,4 +59,39 @@ __SF_TEST__.suite('audio', function (t, api) {
       window.UI.closeAll();   // 关闭面板恢复世界运行（并触发恢复边沿）
     }
   });
+
+  // 回归：suspended 态下 play() 先 resume 再同步判 state——resume 是异步的，判定恒为
+  // suspended 直接 return，解锁手势的第一声永远被吞；且难度/设置按钮连 begin() 都不调，
+  // ctx 未创建时 play 直接静默返回（第一屏全静音）。修复：未建 ctx 先建，suspended 入队
+  t.test('suspended 首声入队：resume 完成后发声（不被吞）', async function () {
+    // 测试环境 Sound.play 已被中性化：用保留的真实实现 + 桩 AudioContext 驱动真实代码路径
+    var RealAC = window.AudioContext || window.webkitAudioContext;
+    function FakeParam(){ this.value = 0; }
+    ['setValueAtTime', 'linearRampToValueAtTime', 'exponentialRampToValueAtTime', 'cancelScheduledValues'].forEach(function (m){ FakeParam.prototype[m] = function(){}; });
+    function FakeNode(){ this.frequency = new FakeParam(); this.gain = new FakeParam(); this.Q = new FakeParam(); }
+    FakeNode.prototype.connect = function(){}; FakeNode.prototype.start = function(){}; FakeNode.prototype.stop = function(){};
+    function FakeCtx(){
+      this.state = 'suspended'; this.currentTime = 0; this.sampleRate = 48000;
+      this.destination = new FakeNode();
+      this.createGain = function(){ return new FakeNode(); };
+      this.createOscillator = function(){ return new FakeNode(); };
+      this.createBiquadFilter = function(){ var f = new FakeNode(); f.type = ''; return f; };
+      this.createBufferSource = function(){ var s = new FakeNode(); s.loop = false; s.buffer = null; return s; };
+      this.createBuffer = function(){ return { getChannelData: function(){ return new Float32Array(16); } }; };
+      var self = this;
+      this.resume = function(){ return new Promise(function (res){ self._finish = function(){ self.state = 'running'; res(); }; }); };
+    }
+    var fake = new FakeCtx();
+    window.AudioContext = function(){ return fake; };
+    window.webkitAudioContext = window.AudioContext;
+    try {
+      Sound._realPlay('uiClick');   // ctx 尚未创建：修复后会先 ensure() 建桩再入队
+      A.eq(Sound.pendingFirstCount, 1, 'first sound queued until resume (fix: 不被吞)');
+      fake._finish();   // 模拟浏览器解锁：resume 完成
+      await api.waitUntil(function () { return Sound.pendingFirstCount === 0; }, 1000, 20);
+      A.eq(Sound.pendingFirstCount, 0, 'queued sound dispatched after resume');
+    } finally {
+      window.AudioContext = RealAC;
+    }
+  });
 });

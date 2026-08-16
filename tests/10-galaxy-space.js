@@ -86,7 +86,11 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.ok(Math.abs(p1[0] - p0[0]) < 0.01 && Math.abs(p1[2] - p0[2]) < 0.01,
       'ship frozen while map open (dx=' + (p1[0] - p0[0]).toFixed(3) + ')');
     window.UI.closeAll();
-    await api.sleep(400);
+    // 帧率在 CI/本机差异大：用轮询等飞船真正位移（循环一旦恢复跑帧，位移必现）
+    await api.waitUntil(function () {
+      var pp = window.Space.shipState.pos;
+      return Math.hypot(pp.x - p0[0], pp.z - p0[2]) > 1;
+    }, 5000, 50);
     var p2 = window.Space.shipState.pos.toArray().slice();
     A.ok(Math.hypot(p2[0] - p0[0], p2[2] - p0[2]) > 1, 'ship resumes flight after map closed');
   });

@@ -400,4 +400,40 @@ __SF_TEST__.suite('factory', function (t, api) {
     A.ok(window.Player.dropCount > drops1, 'old glass dropped (drops ' + drops1 + '→' + window.Player.dropCount + ')');
     api.removeMachine(X + 1, y, Z);
   });
+
+  // 回归：interact() 先判飞船 4.5 格距离后判视线——飞船停在机器旁时按 E 永远被飞船抢走，
+  // 任何建在停船旁的箱子/熔炉都无法用 E 打开。修复后：视线命中的机器优先于飞船
+  t.test('ship-side machine opens with E (gaze beats ship proximity)', async function () {
+    var sp = window.World.findSpawn();
+    var x = 0, z = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var bx = Math.floor(sp.x) + dx, bz = Math.floor(sp.z) + dz;
+          var y0 = window.World.topAt(bx, bz);
+          if (y0 === window.World.topAt(bx + 1, bz) && y0 === window.World.topAt(bx + 2, bz) && y0 === window.World.topAt(bx + 3, bz)){
+            var dd0 = window.World.getDef(bx, y0, bz);
+            if (dd0 && !dd0.liquid && dd0.key !== 'log' && dd0.key !== 'leaves'){ x = bx; z = bz; ok = true; }
+          }
+        }
+      }
+    }
+    A.ok(ok, 'found flat 4-wide ground near spawn');
+    var gy = window.World.topAt(x, z);
+    // 箱子在 x+1 列；飞船停在 x+2.5（距玩家 2 格）；玩家站 x+0.5 面向 +X 低头看箱子
+    api.placeMachine('chest', x + 1, gy + 1, z, 0);
+    window.Game.shipPos.set(x + 2.5, gy + 1, z + 0.5);
+    window.UI.closeAll();
+    api.setPos(x + 0.5, gy + 1.2, z + 0.5);
+    window.Player.yaw = -Math.PI / 2;
+    window.Player.pitch = -1.0;
+    await api.sleep(200);   // 让主循环几帧刷新相机
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
+    var mp = document.getElementById('machinePanel');
+    A.ok(mp && !mp.classList.contains('hidden'), 'machine panel opened via E (ship parked 2 blocks away)');
+    A.eq(api.state(), 'planet', 'state stays planet (no boarding)');
+    window.UI.closeAll();
+    api.removeMachine(x + 1, gy + 1, z);
+  });
 });

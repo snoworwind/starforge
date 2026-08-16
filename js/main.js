@@ -203,7 +203,10 @@ const Game = (() => {
   let weather = null;   // { def, points, pos:Float32Array, floors:Float32Array, n }
   function buildWeather(){
     disposeWeather();
-    if (settings.weather === 'off' || state !== 'planet' || !planetScene) return;
+    // 不检查 state：buildPlanetScene 的所有调用时机（genPlanet/无缝入星/场景预生成）都在
+    // loading/space 态——此前 state==='planet' 门控导致天气在正常游玩中永远不生成，
+    // 只有改画面设置（applySettings 在星球上触发）才意外生效
+    if (settings.weather === 'off' || !planetScene) return;
     const key = World.biome && World.biome.key;
     const def = WEATHER_DEFS[key];
     if (!def) return;
@@ -3614,12 +3617,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v176';
+    bd.textContent = 'build v177';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v176';
+  window.__V_MAIN = 'v177';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3690,6 +3693,7 @@ const Game = (() => {
 
     if (state === 'planet'){
       const day = updateDayNight(dt);
+      if (!weather) buildWeather();   // 星球态兜底建天气：buildPlanetScene 的调用时机都在 loading/space 态，此前天气从不生成
       Player.setToolVisible(true);
       if (!UI.anyPanelOpen()) Player.update(dt, camera);
       else Player.update(dt * 0, camera); // 面板打开时暂停移动但保持相机

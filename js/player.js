@@ -1054,7 +1054,10 @@ const Player = (() => {
   function deserialize(d){
     pos.fromArray(d.pos); yaw = d.yaw; pitch = d.pitch;
     Object.assign(stats, d.stats);
-    for (let i = 0; i < inv.length; i++) inv[i] = d.inv[i] ? { ...d.inv[i] } : null;
+    // inv 字段缺省/损坏时按空背包处理（此前直接读 d.inv[i]：旧档/脏数据缺 inv 会抛
+    // TypeError 中断整个读档流程，其余字段全部恢复失败）
+    const src = Array.isArray(d.inv) ? d.inv : [];
+    for (let i = 0; i < inv.length; i++) inv[i] = src[i] ? { ...src[i] } : null;
     hotIdx = d.hotIdx || 0;
     credits = d.credits || 0;
     appearance = d.appearance || null;

@@ -78,4 +78,12 @@ __SF_TEST__.suite('survival', function (t, api) {
     A.eq(api.credits(), 77, 'credits restored despite missing inv');
     A.eq(api.inv().filter(Boolean).length, 0, 'inventory treated as empty');
   });
+
+  // 回归：damageTick 每次触发后 dmgAcc 归零——跨过 1.0 的余数被吞，慢速持续伤害的实际速率低于标称
+  t.test('damageTick keeps fractional remainder (slow DoT accumulates)', function () {
+    api.setStat('shield', 0);
+    api.setStat('hp', 40);
+    for (var i = 0; i < 10; i++) window.Player.debugDamageTick(1, 0.75);   // 0.75/s × 10s = 7.5 → 7 点
+    A.eq(api.stats().hp, 33, 'accumulated 7 damage (修复前 5：余数每 tick 被归零, got ' + api.stats().hp + ')');
+  });
 });

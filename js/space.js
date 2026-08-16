@@ -835,7 +835,7 @@ const Space = (() => {
     pad:       { pos: [20, 3.2, 30], yaw: Math.PI },       // 玩家专属泊位（右前，永久保留空位）
     exit:      [0, 12, 150],
     terminal:  [0, 4, -3],
-    bounds:    { x: 30, zMin: -12, zMax: 74, concourseZ: 4, floorY: 0, concourseY: 3 },
+    bounds:    { x: 30, zMin: -12, zMax: 74, concourseZ: 6, floorY: 0, concourseY: 3 },   // 大厅平台顶面 y=3 横贯 z≤6 全宽（建模 64×4×20 @ z=-4）
     pads:      [[-20, 2, 30], [20, 2, 30], [-20, 2, 52], [20, 2, 52]],   // 四座停机坪（扩建）
   };
   // 访客机位：玩家位 (20,30) 之外的三座（无论如何为玩家保留至少一个空位）
@@ -2787,4 +2787,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v145';
+window.__V_SPACE = 'v146';

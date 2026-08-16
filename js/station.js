@@ -184,13 +184,14 @@ const Station = (() => {
   }
   function closeDlgBox(){ el('dialogBox').classList.add('hidden'); }
 
-  // ---------- 地板高度（大厅平台 3 / 阶梯 1·2·3 / 停机坪 2 / 库底 0）----------
+  // ---------- 地板高度（大厅平台 3 / 阶梯 2·1 / 停机坪 2 / 库底 0）----------
   function floorAt(dk, lx, lz){
     const B = dk.bounds;
+    // 大厅平台顶面 y=3 横贯 z≤6 的全宽（建模 |x|≤32、行走钳制 ±30）——
+    // 侧翼走道 |x|≥10、4<z≤6 同样站在平台上，不能塌到库底 y=0
     if (lz <= B.concourseZ) return B.concourseY;
-    // 中央阶梯（|x|<10，z 4~10）：每 2 格深抬升 1 格，与阶梯建模一致
+    // 中央阶梯（|x|<10，z 6~10）：每 2 格深下降 1 格，与阶梯建模一致
     if (Math.abs(lx) < 10){
-      if (lz <= 6) return 3;
       if (lz <= 8) return 2;
       if (lz <= 10) return 1;
     }
@@ -199,6 +200,11 @@ const Station = (() => {
       if (dx * dx + dz * dz < 81) return 2;
     }
     return B.floorY;
+  }
+  function debugFloorAt(lx, lz){
+    const dk = Space.getDock();
+    if (!dk) return null;
+    return floorAt(dk, lx, lz);
   }
 
   // ---------- 曲线飞行段通用：位置+机头朝向（模型前方 -Z）----------
@@ -422,7 +428,8 @@ const Station = (() => {
     set onGarage(fn){ onGarage = fn; },
     get dialogOpen(){ return !!dlg; },
     closeDialog(){ dlg = null; closeDlgBox(); },
+    debugFloorAt,
   };
 })();
 window.Station = Station;
-window.__V_STATION = 'v145';
+window.__V_STATION = 'v146';

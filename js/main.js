@@ -2849,7 +2849,18 @@ const Game = (() => {
     if (!entry){
       const chm = (await listChars()).find(e => e.key === charKey);
       const wdm = (await listWorlds()).find(e => e.key === worldKey);
-      entry = { key: newId('starforge_sv_'), name: (chm ? chm.name : '人物') + ' · ' + (wdm ? wdm.name : '世界'), time: Date.now(), charKey, worldKey };
+      // 展示字段必须补全：否则存档列表显示「₪undefined · 游玩undefined分钟」、
+      // 创造档被标成生存
+      entry = {
+        key: newId('starforge_sv_'),
+        name: (chm ? chm.name : '人物') + ' · ' + (wdm ? wdm.name : '世界'),
+        time: Date.now(), charKey, worldKey,
+        charName: chm ? chm.name : '人物', worldName: wdm ? wdm.name : '世界',
+        creative: !!(wdm && wdm.creative),
+        planetName: (wdm && wdm.planetName) ? wdm.planetName : '未知星球',
+        credits: (chm && Number.isFinite(chm.credits)) ? chm.credits : 0,
+        playMin: (chm && Number.isFinite(chm.playMin)) ? chm.playMin : 0,
+      };
       idx.push(entry);
       await SaveStore.atomicWrite(entry.key, { v: 4, kind: 'session', ...entry }, idx);
     }
@@ -3570,12 +3581,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v143';
+    bd.textContent = 'build v144';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v143';
+  window.__V_MAIN = 'v144';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

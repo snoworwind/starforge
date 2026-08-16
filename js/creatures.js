@@ -877,6 +877,10 @@ const Creatures = (() => {
     const fx = Math.floor(nx), fz = Math.floor(nz);
     const newGy = topAtRo(fx, fz);
     if (newGy === null) return true;   // 目标区块未加载：视为阻挡（AI 绝不触发生成）
+    // 目标列顶为液体（水/熔岩）→ 阻挡：陆地生物不得走上水面（此前 liquid 被排除在
+    // 阻挡之外、topAt 又返回水面高度 → 生物直接站到 1 格深的水面上）
+    const topDef = World.getDef(fx, newGy, fz);
+    if (topDef && topDef.liquid) return true;
     const maxStep = 1.05;
     if (newGy > curGy + maxStep) return true;
     const bodyH = Math.max(1, (u.typeDef && u.typeDef.h) || 1.4);
@@ -1433,6 +1437,12 @@ const Creatures = (() => {
         if (herdD2(herd, plyPos) < UNLOAD_D * UNLOAD_D) local++;
       }
       return local;
+    },
+    // 测试钩子：以当前生态陆地生物的通行规则判断 (nx,nz) 是否可通行
+    debugBlockedAhead(x, z, nx, nz){
+      const info = (World.biome && World.biome.animal) || null;
+      const u = { typeDef: info ? (CREATURE_TYPES[info.type] || CREATURE_TYPES.strider) : CREATURE_TYPES.strider };
+      return blockedAhead(u, nx, nz, topAtRo(Math.floor(x), Math.floor(z)));
     },
     debugSkyFlock(){ return skyFlock; },
     // 测试钩子：立即生成一簇高空浮翼（仅在生态有 skywings 配色时）

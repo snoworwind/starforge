@@ -690,7 +690,10 @@ const Creatures = (() => {
     for (const herd of herds.values()){
       if (budget <= 0) return;
       if (herd.g) continue;                                          // 已活跃
-      if (Math.abs(herd.cx - pcx) > 6 || Math.abs(herd.cz - pcz) > 6) continue;   // 远格快速跳过
+      // 远格快速跳过。门限必须放宽到 10 格：候选环距细胞中心可达 92m，游荡+卸载时
+      // 记录坐标离细胞中心可达 ~132m——6 格门限下（最小距离 7×24−132=36m）会把
+      // 物化半径（96m）内的休眠兽群漏掉，永不重载
+      if (Math.abs(herd.cx - pcx) > 10 || Math.abs(herd.cz - pcz) > 10) continue;
       const dx = herd.x - plyPos.x, dz = herd.z - plyPos.z;
       const d2 = dx * dx + dz * dz;
       if (d2 >= RELOAD_D * RELOAD_D) continue;                       // 尚未进入重载半径

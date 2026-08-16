@@ -72,6 +72,23 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(f(20, 31), 2, 'landing pad area (20,31) height 2');
   });
 
+  // 回归：nearestTarget 无 bestD 比较——每个进入 220 的星球都覆盖 best（迭代序最后一个
+  // 胜出），空间站又无条件覆盖星球：交互提示报的不是最近的星球。修复：最近者胜
+  t.test('nearestTarget picks the nearest body (not the last iterated)', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(60000, 0, 0);   // 远离真实星球与空间站
+    // 两个临时假想天体：A 距 50、B 距 100（迭代序 A 先 B 后——修复前 B 覆盖 A）
+    var mk = function (x) { return { mesh: { position: new THREE.Vector3(x, 0, 0) }, def: { id: 999, name: '假想', radius: 0 } }; };
+    var fa = mk(60050), fb = mk(60100);
+    window.Space.planets.push(fa, fb);
+    try {
+      var t = window.Space.nearestTarget();
+      A.ok(t && t.type === 'planet' && t.dist < 60, 'nearest (50u) wins (got dist ' + (t && t.dist) + ')');
+    } finally {
+      window.Space.planets.pop(); window.Space.planets.pop();
+    }
+  });
+
   // 回归：星系图打开时飞船照常飞行——W/S/J 输入与飞船模拟在星图后面继续跑，
   // 船漂移/脉冲消耗，甚至 tickWarpAutoJump 白耗曲率电池。修复：面板打开冻结飞行
   t.test('ship frozen while galaxy map open', async function () {

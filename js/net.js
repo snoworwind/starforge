@@ -854,8 +854,19 @@ const Net = (() => {
     ensurePlayersUI();
     if (!connected) return;
     refreshPlayersUI();
-    playersPanel.classList.toggle('hidden');
-    if (!playersPanel.classList.contains('hidden')) Sound.play('uiOpen');
+    const willOpen = playersPanel.classList.contains('hidden');
+    if (willOpen){
+      // 与其他面板一致：先关其余面板并退出指针锁定——锁定态下鼠标事件全被画布吞掉，
+      // 传送按钮点不到；且此前玩家面板不经过 closeAll，会与其他面板堆叠
+      if (window.UI) UI.closeAll();
+      if (document.exitPointerLock) document.exitPointerLock();
+      playersPanel.classList.remove('hidden');
+      Sound.play('uiOpen');
+    } else {
+      playersPanel.classList.add('hidden');
+      Sound.play('uiClose');
+      if (window.Game && Game.lockPointer) Game.lockPointer();
+    }
   }
 
   // ================= 出口 =================

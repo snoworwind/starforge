@@ -67,6 +67,17 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     Net.disconnect();
   });
 
+  t.test('玩家面板开启前 closeAll（不与其他面板堆叠）', async function () {
+    await Net.joinRoom('127.0.0.1:17886');
+    document.getElementById('pausePanel').classList.remove('hidden');
+    Net.togglePlayers();
+    var pp = document.getElementById('playersPanel');
+    A.ok(pp && !pp.classList.contains('hidden'), 'players panel open');
+    A.ok(document.getElementById('pausePanel').classList.contains('hidden'), 'other panels closed by togglePlayers');
+    window.UI.closeAll();
+    Net.disconnect();
+  });
+
   t.test('音量滑杆持久化：改动写回 localStorage 并恢复显示', function () {
     var slider = document.getElementById('volSlider');
     A.ok(slider, 'volume slider exists');

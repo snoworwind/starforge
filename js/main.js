@@ -3372,10 +3372,12 @@ const Game = (() => {
     list.forEach((m, i) => {
       const row = document.createElement('div');
       row.className = 'map-mark-row';
-      row.innerHTML = `<span class="mm-name">${m.gal ? '✦ ' : '⚑ '}${m.label}</span>` +
+      row.innerHTML = `<span class="mm-name"></span>` +
         `<span class="mm-pos">${m.x},${m.z}</span>` +
         `<button class="mm-scope" title="切换显示范围">${m.gal ? '全星系' : '本星球'}</button>` +
         `<button class="mm-del" title="删除标记">✕</button>`;
+      // 标签是玩家输入（且联机时经服务器广播到所有客户端）：用 textContent 渲染，防 HTML 注入
+      row.querySelector('.mm-name').textContent = (m.gal ? '✦ ' : '⚑ ') + m.label;
       row.querySelector('.mm-scope').onclick = () => {
         m.gal = !m.gal;
         Sound.play('uiClick');
@@ -3568,12 +3570,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v140';
+    bd.textContent = 'build v141';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v140';
+  window.__V_MAIN = 'v141';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

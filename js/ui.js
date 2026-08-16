@@ -1185,11 +1185,10 @@ const UI = (() => {
     const entries = [{ seed: cur, current: true, pos: new THREE.Vector3(0, 0, 0) }];
     if (cur !== HOME_GALAXY_SEED)
       entries.push({ seed: HOME_GALAXY_SEED, home: true, pos: new THREE.Vector3(-55, -12, 40) });
-    // 无限邻域：从当前种子扩散 12 个近邻 + 48 个远邻（4 层波纹，每层 12 星）
-    const rnd = mulberry32((cur ^ 0x9E3779B9) >>> 0);
-    const allSeeds = new Set();
-    for (let i = 0; i < 60; i++) allSeeds.add((rnd() * 1e9) | 0);
-    const seedList = [...allSeeds];
+    // 无限邻域：与太空跃迁精灵同源（Game.neighborSeeds）。此前本地生成 60 颗而跃迁精灵
+    // 只有 55 颗 → 多出的 5 颗「幽灵星」可锁定、可画航线，但太空里没有对应精灵，
+    // 方框/箭头永不出现，跃迁永远无法点火
+    const seedList = (window.Game && Game.neighborSeeds) ? Game.neighborSeeds() : [];
     for (let i = 0; i < 12; i++){
       const s = seedList[i];
       const jr = mulberry32((s ^ 0xC2B2) >>> 0);
@@ -1198,7 +1197,8 @@ const UI = (() => {
     }
     for (let ring = 0; ring < 4; ring++){
       for (let i = 0; i < 12; i++){
-        const s = seedList[12 + ring * 12 + i]; if (!s) continue;
+        const s = seedList[12 + ring * 12 + i];
+        if (!s || s === HOME_GALAXY_SEED || s === cur) continue;   // 起源星系/当前星系单独渲染，不重复入环
         const jr = mulberry32((s ^ 0xC2B2) >>> 0);
         const a = (i / 12 + ring * 0.07) * Math.PI * 2 + (jr() - 0.5) * 0.4;
         const r = 44 + ring * 16 + (i % 4) * 6 + jr() * 8;

@@ -34,6 +34,27 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     }
   });
 
+  t.test('星图恒星与跃迁精灵同源：每颗星都可实际跃迁（无幽灵星）', async function () {
+    // tpTo 才真正把 Game.state 置为 space（太空主循环在此分支惰性构建跃迁精灵）
+    await window.Game.tpTo(0, null, 'space', 'test');
+    // 远离所有星球：否则无缝入星会在下一帧把状态拉回 atmo，精灵构建永不执行
+    window.Space.shipState.pos.set(5000, 5000, 5000);
+    var ns0 = window.Game.neighborSeeds();
+    await api.waitUntil(function () { return window.Space.getGalaxySpritePos(ns0[0]) !== null; }, 5000, 50);
+    window.UI.openGalaxyMap();
+    var labels = document.querySelectorAll('#galMap .g3d-label');
+    var ns = window.Game.neighborSeeds();
+    // 星图 = 当前星系 + neighborSeeds 全部恒星（起源/当前单独渲染，数量恰好 +1）
+    A.eq(labels.length, ns.length + 1, 'galaxy map stars == warp targets + current (got ' + labels.length + ', want ' + (ns.length + 1) + ')');
+    // 每颗跃迁目标的精灵都必须存在（锁定后方框/箭头/点火依赖它）
+    var missing = [];
+    for (var i = 0; i < ns.length; i++){
+      if (!window.Space.getGalaxySpritePos(ns[i])) missing.push(ns[i]);
+    }
+    A.eq(missing.length, 0, 'every warp target has a space sprite (missing ' + missing.length + ')');
+    window.UI.closeAll();
+  });
+
   // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
   // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
   t.test('seamless atmosphere entry loads target planet biome', async function () {

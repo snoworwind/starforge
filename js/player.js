@@ -773,6 +773,10 @@ const Player = (() => {
   }
   function die(){
     dead = true;
+    // 死亡瞬间停止持续音：update 因 dead 早退，喷气/激光的正常停止路径不再可达，
+    // 不在这里掐断的话音效会穿过 1.8s 死亡淡出并持续到重生之后
+    Sound.loops.jet.stop();
+    Sound.loops.laser.stop();
     Sound.play('alarm');
     UI.bigMessage('信号丢失', '外骨骼将在重生点重建…物资保留');
     document.getElementById('fader').classList.add('show');

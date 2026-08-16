@@ -245,4 +245,23 @@ __SF_TEST__.suite('combat', function (t, api) {
     }
     A.ok(checked > 0, 'at least one herd checked (' + checked + ')');
   });
+
+  t.test('高空浮翼淡入出场（不从全尺寸凭空弹出）', function () {
+    if (!(window.World.biome && window.World.biome.skywings)){
+      A.eq(1, 1, 'biome has no skywings — skip');
+      return;
+    }
+    var before = window.Creatures.debugSkyFlock().length;
+    A.eq(window.Creatures.debugSpawnSkyFlock(window.Player.pos), true, 'flock spawned');
+    var fl = window.Creatures.debugSkyFlock();
+    A.ok(fl.length > before, 'new skywings added');
+    for (var i = before; i < fl.length; i++){
+      A.ok(fl[i].scale.x < 0.05, 'new skywing starts tiny for fade-in (scale=' + fl[i].scale.x.toFixed(3) + ')');
+    }
+    // 步进若干帧：scale 应逐渐增长（淡入进行中，而非瞬间全尺寸）
+    // 增速 dt×3/帧 → 5 帧 ≈ 0.51，远未到 1
+    for (var j = 0; j < 5; j++) window.Creatures.update(1 / 30, window.Player.pos, window.World.biome);
+    var grown = fl[before];
+    A.ok(grown && grown.scale.x > 0.05 && grown.scale.x < 1.0, 'skywing grows gradually (scale=' + (grown ? grown.scale.x.toFixed(3) : 'gone') + ')');
+  });
 });

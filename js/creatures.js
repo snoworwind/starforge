@@ -370,6 +370,7 @@ const Creatures = (() => {
     const ang0 = Math.random() * Math.PI * 2;
     for (let i = 0; i < n; i++){
       const g = buildSkywing(sky);
+      g.scale.setScalar(0.01);   // 从极小尺寸开始：配合 updateSky 的 scale 渐增分支淡入，避免凭空弹出
       const ang = ang0 + (i - n / 2) * 0.35;
       const dist = 26 + Math.random() * 30;
       const gy = World.topAt(Math.floor(plyPos.x), Math.floor(plyPos.z));
@@ -1431,6 +1432,13 @@ const Creatures = (() => {
       return local;
     },
     debugSkyFlock(){ return skyFlock; },
+    // 测试钩子：立即生成一簇高空浮翼（仅在生态有 skywings 配色时）
+    debugSpawnSkyFlock(plyPos){
+      const sky = (World.biome && World.biome.skywings) || null;
+      if (!sky) return false;
+      spawnSkyFlock(plyPos, sky);
+      return true;
+    },
     debugList(){ return list; },
     debugVillagers(){ return villagers; },
     debugCap(){ return CRE_CAP; },

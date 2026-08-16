@@ -307,4 +307,31 @@ __SF_TEST__.suite('combat', function (t, api) {
     var grown = fl[before];
     A.ok(grown && grown.scale.x > 0.05 && grown.scale.x < 1.0, 'skywing grows gradually (scale=' + (grown ? grown.scale.x.toFixed(3) : 'gone') + ')');
   });
+
+  t.test('陆地生物把水面视为阻挡（不走上 1 格深的水）', function () {
+    // 找一对等高相邻的实心地面列（排除树/水），在右侧列铺 1 格深水，
+    // 断言通行检测返回阻挡——修复前 liquid 被排除、生物会站到水面上
+    var sp = window.World.findSpawn();
+    var x = 0, z = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var gx = Math.floor(sp.x) + dx, gz = Math.floor(sp.z) + dz;
+          var gyA = window.World.topAt(gx, gz);
+          var gyB = window.World.topAt(gx + 1, gz);
+          if (gyA !== gyB) continue;
+          var ddA = window.World.getDef(gx, gyA, gz);
+          var ddB = window.World.getDef(gx + 1, gyB, gz);
+          var good = function (d) { return d && !d.liquid && d.key !== 'log' && d.key !== 'leaves' && d.key !== 'water'; };
+          if (good(ddA) && good(ddB)){ x = gx; z = gz; ok = true; }
+        }
+      }
+    }
+    A.ok(ok, 'found flat adjacent solid columns near spawn');
+    var gy = window.World.topAt(x + 1, z);
+    window.World.set(x + 1, gy + 1, z, api.defs.BLOCKS.water.id, true);
+    A.eq(window.Creatures.debugBlockedAhead(x + 0.5, z + 0.5, x + 1.5, z + 0.5), true, 'water column blocks ground creatures');
+    window.World.set(x + 1, gy + 1, z, 0, true);   // 清理
+  });
 });

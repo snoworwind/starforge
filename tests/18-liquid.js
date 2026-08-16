@@ -97,4 +97,19 @@ __SF_TEST__.suite('liquid', function (t, api) {
     A.ok(y1 !== null && y1 < y0 - 0.5, 'drop fell after ground mined (y0=' + y0.toFixed(2) + ' → y1=' + (y1 === null ? 'null' : y1.toFixed(2)) + ')');
     document.getElementById('pausePanel').classList.add('hidden');
   });
+
+  t.test('眼部液体检测按摄像机高度（1.62 而非 1.2）', function () {
+    // 悬浮水层：地面 gy、空气 gy+1、水 gy+2。玩家脚底放在 gy+0.6 处时，
+    // 眼块（+1.62 → gy+2.22）在水中，而旧检测高度（+1.2 → gy+1.8）在空气里
+    var X = 120, Z = 120;
+    var gy = api.topAt(X, Z);
+    api.setBlock(X, gy + 2, Z, 'water');
+    document.getElementById('pausePanel').classList.remove('hidden');
+    api.setPos(X + 0.5, gy + 0.6, Z + 0.5);
+    A.eq(window.Player.debugEyeInLiquid(), true, 'eye submerged in water detected');
+    api.setPos(X + 0.5, gy + 1.05, Z + 0.5);
+    A.eq(window.Player.debugEyeInLiquid(), true, 'standing under water layer still detected');
+    api.setBlock(X, gy + 2, Z, 'air');
+    document.getElementById('pausePanel').classList.add('hidden');
+  });
 });

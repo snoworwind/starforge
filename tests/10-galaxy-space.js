@@ -189,6 +189,27 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.eq(window.Game.debugLockAllowed(), true, 'seated allows pointer lock (fix: 起飞后鼠标可转向)');
   });
 
+  // 回归：跃迁完成块把 warpAnim 置 null 而 state 仍为 warping——下一帧解引用崩溃，
+  // catch 兜底以 seed=0 错误跃迁（跳到 0 号星系），200ms 白闪超时又二次 finishWarp（双重抵达）
+  t.test('warp arrival lands on the locked galaxy (no null-warpAnim crash)', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);   // 远离星球，防无缝入星
+    api.give('warpcell', 5);
+    var target = window.Game.neighborSeeds()[0];
+    window.Game.warpTo(target);
+    A.eq(window.Game.state, 'warping', 'warp engaged');
+    // 等待跃迁动画 + 白闪完成（修复前 catch 兜底提前跳到 seed 0 星系）
+    await api.waitUntil(function () { return window.Game.state === 'space'; }, 40000, 100);
+    A.eq(api.galaxySeed(), target, 'arrived at locked galaxy (got ' + api.galaxySeed() + ', want ' + target + ')');
+    await api.sleep(600);   // 白闪超时窗口后：不允许二次 finishWarp 跳走
+    A.eq(api.galaxySeed(), target, 'no second arrival (seed stable)');
+    // 复原：跃迁回起源星系（后续用例依赖母星系星球布局）
+    window.Game.warpTo(777);
+    await api.waitUntil(function () { return window.Game.state === 'space'; }, 40000, 100);
+    await api.sleep(600);
+    A.eq(api.galaxySeed(), 777, 'returned to home galaxy');
+  });
+
   // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
   // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
   t.test('seamless atmosphere entry loads target planet biome', async function () {

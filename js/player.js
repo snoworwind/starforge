@@ -934,7 +934,12 @@ const Player = (() => {
           for (const k in d.in) if (typeof d.in[k] === 'number' && d.in[k] > 0) spawnDrop(cx, cy, cz, k, d.in[k]);
         if (d.items) d.items.forEach(it => spawnDrop(cx, cy, cz, it.item, 1));
         if (m.type === 'reactor' && typeof d.fuel === 'number' && d.fuel > 0)
-          spawnDrop(cx, cy, cz, 'uranium', Math.ceil(d.fuel / 60));   // 核燃料按秒存：拆机按 60s/枚 返还铀
+          spawnDrop(cx, cy, cz, 'uranium', Math.round(d.fuel / 60));   // 核燃料按秒存：拆机按 60s/枚 返还铀（round：烧掉过半才不退，避免 ceil 把 1 秒残量也退成整枚）
+        // 装配机/精炼厂制作中被拆除：退还已扣除的进行中原料（切配方退款已有同样处理，拆机此前遗漏 → 一组原料凭空消失）
+        if ((m.type === 'assembler' || m.type === 'refinery') && d.prog > 0 && d.recipe){
+          const rr = RECIPE_BY_ID[d.recipe];
+          if (rr) for (const k in rr.in) spawnDrop(cx, cy, cz, k, rr.in[k]);
+        }
       }
     } else {
       World.set(hit.x, hit.y, hit.z, 0);
@@ -1054,6 +1059,13 @@ const Player = (() => {
     chargeStat, canCharge, CHARGE_DEFS, cycleRot,
     addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop, sortInventory,
     get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
+    // 测试钩子：按真实挖掘路径拆除 (x,y,z) 处方块（含机器退款与掉落逻辑）
+    debugBreakBlock(x, y, z){
+      const def = World.getDef(x, y, z);
+      if (!def) return false;
+      breakBlock({ x: x | 0, y: y | 0, z: z | 0, def });
+      return true;
+    },
     serialize, deserialize, spawnParticles,
     tickParticles(dt){ updateParticles(dt); }
   };

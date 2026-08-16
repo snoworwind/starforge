@@ -666,8 +666,8 @@ const Player = (() => {
     if (collides(np.x, np.y, np.z)){
       if (vel.y < 0){
         onGround = true;
-        // 坠落伤害
-        if (vel.y < -14){ damage(Math.floor((-vel.y - 12) / 4)); }
+        // 坠落伤害：阈值与公式基准一致（此前 -14 与公式 -12 不一致，-16<v≤-14 落入死区）
+        if (vel.y < -12){ damage(Math.floor((-vel.y - 12) / 4)); }
         if (!wasGround && vel.y < -6) Sound.play('land');
       }
       np.y = pos.y;

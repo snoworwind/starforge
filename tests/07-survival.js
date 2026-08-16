@@ -86,4 +86,24 @@ __SF_TEST__.suite('survival', function (t, api) {
     for (var i = 0; i < 10; i++) window.Player.debugDamageTick(1, 0.75);   // 0.75/s × 10s = 7.5 → 7 点
     A.eq(api.stats().hp, 33, 'accumulated 7 damage (修复前 5：余数每 tick 被归零, got ' + api.stats().hp + ')');
   });
+
+  // 坠落伤害契约：阈值与公式基准一致（-12）——v=-16 恰 1 点、v=-13 安全无伤。
+  // 修复本身是阈值/公式一致性（无行为变化），本用例锁定伤害曲线防未来漂移
+  t.test('fall damage contract: v=-16 deals 1, v=-13 deals 0', function () {
+    function dropWith(v){
+      var p = api.pos();
+      var gy = api.topAt(Math.floor(p[0]), Math.floor(p[2]));
+      api.setStat('hp', 20); api.setStat('shield', 0);
+      api.setPos(p[0], gy + 1.2, p[2]);
+      window.Player.vel.y = v;
+      var cam = new THREE.PerspectiveCamera(75, 1, 0.1, 100);
+      cam.position.set(99999, 99999, 99999);   // 远离场景：避免射线/幽灵预览干扰
+      window.Player.update(1 / 60, cam);   // 单帧受控坠落（重力后撞击速度 ≈ v - 0.33）
+      return api.stats().hp;
+    }
+    var hp1 = dropWith(-16);
+    A.eq(hp1, 19, 'v=-16 impact deals exactly 1 (got hp ' + hp1 + ')');
+    var hp2 = dropWith(-13);
+    A.eq(hp2, 20, 'v=-13 impact deals 0 (got hp ' + hp2 + ')');
+  });
 });

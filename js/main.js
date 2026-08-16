@@ -2689,8 +2689,10 @@ const Game = (() => {
   let saveBusy = false, saveAgain = false, saveChain = null, pendingKey = null, pendingName = null;
   function saveTo(key, name){
     if (state === 'menu' || state === 'loading') return Promise.resolve(false);
-    if (state === 'atmo' || state === 'atmoland'){
-      UI.bigMessage('飞行中无法存档', '请先降落', 1600);
+    // 飞行/跃迁等瞬时状态禁止存档：这些状态的快照自相矛盾（读档只恢复 planet/space），
+    // 此前 F5 在这些状态下照常落盘，读档后位置/飞船状态错乱
+    if (state === 'atmo' || state === 'atmoland' || state === 'seated' || state === 'launching' || state === 'warping'){
+      UI.bigMessage('当前状态无法存档', state === 'seated' ? '请先离开座位（E）' : '请先降落/结束跃迁', 1600);
       return Promise.resolve(false);
     }
     // 联机成员：世界与人物都由服务器持久化（本机存档只适用于单机/房主本地备份）
@@ -3581,12 +3583,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v144';
+    bd.textContent = 'build v145';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v144';
+  window.__V_MAIN = 'v145';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

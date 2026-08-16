@@ -90,4 +90,23 @@ __SF_TEST__.suite('saveload', function (t, api) {
     A.ok(typeof ne.planetName === 'string' && ne.planetName.length > 0, 'planetName present');
     await api.deleteSave(ne.key);   // 清理
   });
+
+  t.test('飞行/跃迁状态拒绝快速存档（不再产出不一致快照）', async function () {
+    var pd = api.defs.SYSTEM_PLANETS[1];
+    window.Game.tpTo(1, null, 'space', 'test');
+    var dir = [0.5, 0.6, 0.6];
+    var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    window.Space.shipState.pos.fromArray([
+      pd.pos[0] + dir[0] / len * (pd.radius + 40),
+      pd.pos[1] + dir[1] / len * (pd.radius + 40),
+      pd.pos[2] + dir[2] / len * (pd.radius + 40),
+    ]);
+    window.Space.shipState.speed = 0;
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    var before = (await api.listSaves()).length;
+    var ok = await api.save('飞行中快照');
+    A.eq(ok, false, 'save refused while flying');
+    A.eq((await api.listSaves()).length, before, 'no new save entry created');
+    await api.reboot('normal');   // 复位干净世界
+  });
 });

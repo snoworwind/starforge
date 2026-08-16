@@ -943,6 +943,7 @@ const World = (() => {
       g.computeBoundingSphere();
       g.boundingSphere.radius += 60;   // 曲率顶点位移的裁剪余量
       const m = new THREE.Mesh(g, solidMat);
+      m.renderOrder = 0;   // 实心先于水体绘制：湖床永远垫在水下（透明排序同深度时不再有顺序竞争）
       m.castShadow = shadowsOn;
       m.receiveShadow = shadowsOn;
       group.add(m);
@@ -959,6 +960,7 @@ const World = (() => {
       g.computeBoundingSphere();
       g.boundingSphere.radius += 60;
       const m = new THREE.Mesh(g, waterMat);
+      m.renderOrder = 1;   // 水体后于实心：先画湖床再叠水面，透视到地底的顺序竞争根除
       group.add(m);
       c.waterMesh = m;
       if (fresh) startFadeIn(m, waterMat, 0.72);
@@ -967,15 +969,24 @@ const World = (() => {
   }
 
   // ---------- 区块淡入（无缝再入：地形渐渐显现）----------
+  // 实心地形用「亮度淡入」（颜色从黑渐亮、alpha 恒 1）——透明度淡入会被 alphaTest
+  // 阈值整块丢弃：跨越区块时新地块凭空消失、远景模拟地形顶替（地形看似全变）；
+  // 且水面淡入先于湖床可见，液体底部直接透视到地底。水体保持透明度淡入：
+  // 湖床始终不透明垫底，水面淡入期间不再透视。
   const fadeIns = [];
   function startFadeIn(mesh, sharedMat, targetOpacity){
     const mat = sharedMat.clone();
     applyCurve(mat);               // clone 不携带 onBeforeCompile，需重新注入曲率
-    if (sharedMat === solidMat) applyGlow(mat);        // 发光注入同样需要重建
-    if (sharedMat === waterMat) applyWaterWaves(mat);  // 水面波浪注入同样需要重建
-    mat.opacity = 0;
+    const colorFade = sharedMat === solidMat;
+    if (colorFade){
+      applyGlow(mat);              // 发光注入同样需要重建
+      mat.color.setRGB(0, 0, 0);   // 从黑渐亮：保持不透明，alphaTest 恒通过
+    } else {
+      applyWaterWaves(mat);        // 水面波浪注入同样需要重建
+      mat.opacity = 0;
+    }
     mesh.material = mat;
-    fadeIns.push({ mesh, sharedMat, mat, targetOpacity, t: 0 });
+    fadeIns.push({ mesh, sharedMat, mat, targetOpacity, t: 0, colorFade });
   }
   function tickFade(dt){
     for (let i = fadeIns.length - 1; i >= 0; i--){
@@ -985,6 +996,8 @@ const World = (() => {
         if (f.mesh.material === f.mat) f.mesh.material = f.sharedMat;
         f.mat.dispose();
         fadeIns.splice(i, 1);
+      } else if (f.colorFade){
+        f.mat.color.setScalar(f.t);
       } else {
         f.mat.opacity = f.targetOpacity * f.t;
       }
@@ -1492,6 +1505,8 @@ const World = (() => {
     get debugLamps(){ return lampPool ? lampPool.map(l => ({ on: l.intensity > 0, color: l.color.getHex(), pos: [l.position.x, l.position.y, l.position.z] })) : []; },
     // 测试钩子：水面波浪计时（update 推进，用于断言水面动画运行）
     get debugWaterTime(){ return waterWaveU.t.value; },
+    // 测试钩子：区块淡入快照（实心=亮度淡入且不透明；水体=透明度淡入——透视回归断言用）
+    get debugFadeIns(){ return fadeIns.map(f => ({ solid: f.colorFade, opacity: f.mat.opacity, bright: f.mat.color ? f.mat.color.r : null, t: Math.round(f.t * 100) / 100 })); },
     // 测试钩子：区块数据是否在内存（不触发生成——数据剔除回归断言用）
     debugHasChunk(cx, cz){ return chunks.has(ckey(cx | 0, cz | 0)); },
     // 测试钩子：区块内部状态（剔除断言失败时的诊断）

@@ -2201,10 +2201,10 @@ const Space = (() => {
         disposeObject3D(v, { skipGeo: !!v.userData.isGlb, skipTex: true });
         scene.remove(v);
       }
-      // 弹幕与闪光（几何/材质独立；日冕贴图共享缓存）
-      for (const b of lasers){ disposeBolt(b); scene.remove(b); }
+      // 弹幕与闪光（几何/材质独立；日冕贴图共享缓存；大气弹挂星球场景，从其所属场景移除）
+      for (const b of lasers){ disposeBolt(b); (b.userData.scene || scene).remove(b); }
       for (const b of hostiles){ disposeBolt(b); scene.remove(b); }
-      for (const s of boltFx){ disposeObject3D(s, { skipTex: true }); scene.remove(s); }
+      for (const s of boltFx){ disposeObject3D(s, { skipTex: true }); s.parent && s.parent.remove(s); }
       // 空间站（材质每站独立；贴图共享 tileTexture 缓存；站内人员/环/穹顶为子件随遍历处置）
       if (station){ disposeObject3D(station, { skipTex: true }); scene.remove(station); }
       if (termTex){ termTex.dispose(); }   // 行情大屏独立 CanvasTexture
@@ -2454,12 +2454,12 @@ const Space = (() => {
     }
     return g;
   }
-  function spawnFlash(pos, color, size, life){
+  function spawnFlash(pos, color, size, life, targetScene){
     const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTextures().corona, color, transparent: true, depthWrite: false, opacity: 0.95 }));
     s.position.copy(pos);
     s.scale.set(size, size, 1);
     s.userData = { life, life0: life };
-    scene.add(s);
+    (targetScene || scene).add(s);
     boltFx.push(s);
   }
   function tickBoltFx(dt){
@@ -2469,20 +2469,22 @@ const Space = (() => {
       const k = Math.max(0, s.userData.life / s.userData.life0);
       s.material.opacity = k;
       s.scale.multiplyScalar(1 + dt * 6);
-      if (s.userData.life <= 0){ disposeObject3D(s, { skipTex: true }); scene.remove(s); boltFx.splice(i, 1); }
+      if (s.userData.life <= 0){ disposeObject3D(s, { skipTex: true }); s.parent && s.parent.remove(s); boltFx.splice(i, 1); }
     }
   }
-  function fireBolt(fromPos, dir, wpn, hostile){
+  // targetScene：大气内开火时挂星球场景（弹道随之渲染/推进），默认太空场景
+  function fireBolt(fromPos, dir, wpn, hostile, targetScene){
     const spec = BOLT_SPECS[wpn] || BOLT_SPECS.pulse;
     const bolt = makeBoltMesh(wpn);
     bolt.position.copy(fromPos);
     // 朝向：-Z 对齐飞行方向
     _ve.set(Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1)), Math.atan2(-dir.x, -dir.z), 0, 'YXZ');
     bolt.quaternion.setFromEuler(_ve);
-    bolt.userData = { dir: dir.clone(), life: 2.2, dmg: spec.dmg, speedMul: spec.spd, hostile: !!hostile, wpn };
-    scene.add(bolt);
+    const sc = targetScene || scene;
+    bolt.userData = { dir: dir.clone(), life: 2.2, dmg: spec.dmg, speedMul: spec.spd, hostile: !!hostile, wpn, scene: sc, space: !targetScene };
+    sc.add(bolt);
     (hostile ? hostiles : lasers).push(bolt);
-    spawnFlash(fromPos, spec.c, hostile ? 1.6 : 2.2, 0.12);   // 枪口闪光
+    spawnFlash(fromPos, spec.c, hostile ? 1.6 : 2.2, 0.12, sc);   // 枪口闪光
   }
   function shoot(camera){
     Sound.play('shoot');
@@ -2491,10 +2493,15 @@ const Space = (() => {
     // 弹道汇聚：所有弹向「准星视线 300u 处」收束——消除第三人称镜头与炮口的视差脱靶
     const aimPoint = camera.position.clone().addScaledVector(dir, 300);
     const wpn = shipState.weapon || 'pulse';
-    const muzzle = shipState.pos.clone().addScaledVector(dir, 8);
+    // 大气层内开火：枪口挂在体素飞船、弹道挂星球场景（太空态用 shipState.pos / Space.scene）
+    const G = window.Game;
+    const atmoMode = !!(G && G.state === 'atmo');
+    const origin = (atmoMode && G.shipMeshPos) ? G.shipMeshPos.clone() : shipState.pos.clone();
+    const boltScene = atmoMode ? G.planetScene : null;
+    const muzzle = origin.clone().addScaledVector(dir, 8);
     const fireAt = (from) => {
       const bdir = aimPoint.clone().sub(from).normalize();
-      fireBolt(from, bdir, wpn);
+      fireBolt(from, bdir, wpn, false, boltScene);
     };
     if (wpn === 'twin'){
       const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
@@ -2532,6 +2539,77 @@ const Space = (() => {
   const _camOff = new THREE.Vector3();
   const _pl0 = new THREE.Vector3(), _pl1 = new THREE.Vector3();             // 脉冲星流点对
   let visBank = 0;   // 鼠标转向侧倾（纯视觉，不改变航向姿态）
+  // 玩家激光弹推进（弹速/伤害随武器等级；全部扫掠判定防隧穿；命中优先级：飞船 > 小行星 > 站盾）。
+  // 太空弹只在太空态推进（太空场景不渲染时冻结）；大气弹挂在星球场景，任何星球态持续推进。
+  function tickLasers(dt){
+    const G = window.Game;
+    for (let i = lasers.length - 1; i >= 0; i--){
+      const b = lasers[i];
+      const spaceBolt = !!b.userData.space;
+      if (spaceBolt && !(G && G.state === 'space')) continue;   // 太空弹：非太空态冻结
+      const sc = b.userData.scene || scene;
+      b.userData.life -= dt;
+      _lp.copy(b.position);
+      b.position.addScaledVector(b.userData.dir, 500 * (b.userData.speedMul || 1) * dt);
+      if (b.userData.life <= 0){ disposeBolt(b); sc.remove(b); lasers.splice(i, 1); continue; }
+      if (!spaceBolt) continue;   // 大气弹直飞（大气内无访客/小行星/站盾目标）
+      // NMS 式辅助瞄准（软制导）：弹道锥内最近的访客船会吸附弹道——大幅提升命中率
+      {
+        let steer = null, bestDot = 0.96, bestD = 1e9;
+        for (const v of visitors){
+          if (!visAttackable(v)) continue;
+          _segC.copy(v.position).sub(b.position);
+          const d = _segC.length();
+          if (d < 2 || d > 520) continue;
+          _segC.multiplyScalar(1 / d);
+          const dp = _segC.dot(b.userData.dir);
+          if (dp > bestDot && d < bestD){ bestD = d; steer = v; }
+        }
+        if (steer){
+          _segC.copy(steer.position).sub(b.position).normalize();
+          b.userData.dir.lerp(_segC, Math.min(1, dt * 8)).normalize();
+          _ve.set(Math.asin(THREE.MathUtils.clamp(b.userData.dir.y, -1, 1)), Math.atan2(-b.userData.dir.x, -b.userData.dir.z), 0, 'YXZ');
+          b.quaternion.setFromEuler(_ve);
+        }
+      }
+      // 命中访客船（对方转入缠斗反击）——优先于站盾，站域内空战不受干扰
+      if (hitVisitorCheck(_lp, b)){ disposeBolt(b); sc.remove(b); lasers.splice(i, 1); continue; }
+      // 命中小行星（扫掠）
+      let consumed = false;
+      for (const a of asteroids){
+        if (!a.visible) continue;
+        if (segHit(_lp, b.position, a.position, 10)){
+          a.userData.hp -= (b.userData.dmg || 1);
+          Sound.play('laserHit');
+          disposeBolt(b); sc.remove(b); lasers.splice(i, 1);
+          consumed = true;
+          if (a.userData.hp <= 0){
+            a.visible = false;
+            Sound.play('explode');
+            const n = 4 + (Math.random() * 5) | 0;
+            // 战利品直入飞船货仓（背包满也不丢失；溢出自动转随身）
+            (window.Game && Game.addCargo) ? Game.addCargo('tritium', n) : Player.addItem('tritium', n);
+            if (Math.random() < 0.25){
+              const g = 1 + (Math.random() * 2 | 0);
+              (window.Game && Game.addCargo) ? Game.addCargo('gold_ore', g) : Player.addItem('gold_ore', g);
+            }
+          }
+          break;
+        }
+      }
+      if (consumed) continue;
+      // 命中空间站（未命中任何目标的弹着才会激活/刷新护盾）：
+      // 盾未开时按站体实域(150)判定，弹着贴着结构爆闪；盾开启时按气泡界(213)拦截
+      if (station){
+        stationShieldCenter(_shieldC);
+        if (segHit(_lp, b.position, _shieldC, stationDefT > 0 ? 213 : 150)){
+          raiseStationShield(b.position);
+          disposeBolt(b); sc.remove(b); lasers.splice(i, 1);
+          continue;
+        }
+      }
+    }
+  }
   function update(dt, camera, input){
     // 姿态：NMS 式——鼠标俯仰/偏航作用于机体本地轴，A/D 绕前进轴真实滚转（太空不自动回正）
     // A/D 滚转：绕前进轴正转 = 右翼上升 = 向左滚转（A=rollLeft 正、D=rollRight 负）
@@ -2653,69 +2731,7 @@ const Space = (() => {
       a.rotation.y += a.userData.spin.y * dt;
     }
     // 访客舰队在 tickStation 中推进（太空态与站内态都持续运转）
-    // 激光（弹速/伤害随武器等级；全部扫掠判定防隧穿；命中优先级：飞船 > 小行星 > 站盾）
-    for (let i = lasers.length - 1; i >= 0; i--){
-      const b = lasers[i];
-      b.userData.life -= dt;
-      _lp.copy(b.position);
-      b.position.addScaledVector(b.userData.dir, 500 * (b.userData.speedMul || 1) * dt);
-      if (b.userData.life <= 0){ disposeBolt(b); scene.remove(b); lasers.splice(i, 1); continue; }
-      // NMS 式辅助瞄准（软制导）：弹道锥内最近的访客船会吸附弹道——大幅提升命中率
-      {
-        let steer = null, bestDot = 0.96, bestD = 1e9;
-        for (const v of visitors){
-          if (!visAttackable(v)) continue;
-          _segC.copy(v.position).sub(b.position);
-          const d = _segC.length();
-          if (d < 2 || d > 520) continue;
-          _segC.multiplyScalar(1 / d);
-          const dp = _segC.dot(b.userData.dir);
-          if (dp > bestDot && d < bestD){ bestD = d; steer = v; }
-        }
-        if (steer){
-          _segC.copy(steer.position).sub(b.position).normalize();
-          b.userData.dir.lerp(_segC, Math.min(1, dt * 8)).normalize();
-          _ve.set(Math.asin(THREE.MathUtils.clamp(b.userData.dir.y, -1, 1)), Math.atan2(-b.userData.dir.x, -b.userData.dir.z), 0, 'YXZ');
-          b.quaternion.setFromEuler(_ve);
-        }
-      }
-      // 命中访客船（对方转入缠斗反击）——优先于站盾，站域内空战不受干扰
-      if (hitVisitorCheck(_lp, b)){ disposeBolt(b); scene.remove(b); lasers.splice(i, 1); continue; }
-      // 命中小行星（扫掠）
-      let consumed = false;
-      for (const a of asteroids){
-        if (!a.visible) continue;
-        if (segHit(_lp, b.position, a.position, 10)){
-          a.userData.hp -= (b.userData.dmg || 1);
-          Sound.play('laserHit');
-          disposeBolt(b); scene.remove(b); lasers.splice(i, 1);
-          consumed = true;
-          if (a.userData.hp <= 0){
-            a.visible = false;
-            Sound.play('explode');
-            const n = 4 + (Math.random() * 5) | 0;
-            // 战利品直入飞船货仓（背包满也不丢失；溢出自动转随身）
-            (window.Game && Game.addCargo) ? Game.addCargo('tritium', n) : Player.addItem('tritium', n);
-            if (Math.random() < 0.25){
-              const g = 1 + (Math.random() * 2 | 0);
-              (window.Game && Game.addCargo) ? Game.addCargo('gold_ore', g) : Player.addItem('gold_ore', g);
-            }
-          }
-          break;
-        }
-      }
-      if (consumed) continue;
-      // 命中空间站（未命中任何目标的弹着才会激活/刷新护盾）：
-      // 盾未开时按站体实域(150)判定，弹着贴着结构爆闪；盾开启时按气泡界(213)拦截
-      if (station){
-        stationShieldCenter(_shieldC);
-        if (segHit(_lp, b.position, _shieldC, stationDefT > 0 ? 213 : 150)){
-          raiseStationShield(b.position);
-          disposeBolt(b); scene.remove(b); lasers.splice(i, 1);
-          continue;
-        }
-      }
-    }
+    tickLasers(dt);   // 激光弹（太空弹在太空态推进；大气弹直飞——大气开火回归）
     // 脉冲速度线
     if (shipState.speed > 150){
       pulseLines.material.opacity = Math.min(0.8, (shipState.speed - 150) / 400);
@@ -2781,7 +2797,7 @@ const Space = (() => {
     Sound.loops.pulse.stop();
   }
 
-  return { init, enter, update, tickRotation, setAttitude, shoot, nearestTarget, aheadInfo, stopSounds,
+  return { init, enter, update, tickRotation, setAttitude, shoot, tickLasers, nearestTarget, aheadInfo, stopSounds,
     warpGalaxy, restoreGalaxy, spaceScan, getSpaceMarkers, clearSpaceMarkers, tickSpaceScan, getCurrentGalaxySeed,
     paintSurfaceRegion, setSurfaceHole, paintGlobe, displaceGlobe, updateLOD, restoreGlobe, clearLodTiles,
     debugLodHoleAmt(pid){ const p = planets.find(q => q.def.id === pid); if (!p) return null; return p.lodMatPair ? p.lodMatPair.holeU.amt.value : 0; },
@@ -2796,8 +2812,10 @@ const Space = (() => {
     _galaxySprites(){ return galSprites; },   // 跃迁动画内需读写贴图缩放/透明度
     _pulseLines(){ return pulseLines; },       // 跃迁星流线复用（速度 >150 自动生成）
     get scene(){ init(); return scene; }, shipState,
+    // 测试钩子：玩家激光弹快照（space=太空弹 / false=大气弹——大气开火回归断言用）
+    get debugLasers(){ return lasers.map(b => ({ pos: b.position.toArray(), space: !!b.userData.space, life: b.userData.life })); },
     get shipGroup(){ return shipGroup; },
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v186';
+window.__V_SPACE = 'v187';

@@ -984,7 +984,8 @@ const Game = (() => {
     if (state === 'planet'){
       if (e.button === 0) Player.mineHeld = true;
       if (e.button === 2) Player.tryPlace(camera);
-    } else if (state === 'space'){
+    } else if (state === 'space' || state === 'atmo'){
+      // 大气层内同样开火（弹道挂体素飞船与星球场景）——此前 atmo 不在分支内，点击完全无效
       if (e.button === 0) Space.shoot(camera);
     }
   });
@@ -1352,6 +1353,53 @@ const Game = (() => {
     UI.bigMessage('大气层飞行', 'W/S 油门 · 鼠标转向 · A/D 滚转 · E 就地降落 · 持续拉升冲出大气层');
     lockPointer();
   }
+  // 大气飞船方块碰撞：船体 AABB 与实心方块相交时沿最小穿透轴推出（机翼不参与，允许擦翼）。
+  // 液体/十字植物/树叶无碰撞；半高块按 lowbox 高度。触地时减速并轻抬头——高速俯冲贴地滑行，
+  // 不再像旧逻辑那样把船整体「吸」到所在列最高方块上方。
+  const SHIP_BOX = [1.6, 1.1, 1.9];   // 半宽/半高/半长
+  function collideShipVoxels(dt, fwd){
+    const p = shipMesh.position;
+    const x0 = Math.floor(p.x - SHIP_BOX[0]), x1 = Math.floor(p.x + SHIP_BOX[0]);
+    const y0 = Math.floor(p.y - SHIP_BOX[1]), y1 = Math.floor(p.y + SHIP_BOX[1]);
+    const z0 = Math.floor(p.z - SHIP_BOX[2]), z1 = Math.floor(p.z + SHIP_BOX[2]);
+    let best = null, hitBelow = false;
+    for (let by = y0; by <= y1; by++){
+      for (let bz = z0; bz <= z1; bz++){
+        for (let bx = x0; bx <= x1; bx++){
+          const d = World.getDef(bx, by, bz);
+          if (!d || !d.solid || d.liquid || d.cross || d.key === 'leaves') continue;
+          const top = (d.lowbox && typeof d.lowbox === 'number') ? by + d.lowbox : by + 1;
+          const penX = Math.min(p.x + SHIP_BOX[0], bx + 1) - Math.max(p.x - SHIP_BOX[0], bx);
+          if (penX <= 0) continue;
+          const penY = Math.min(p.y + SHIP_BOX[1], top) - Math.max(p.y - SHIP_BOX[1], by);
+          if (penY <= 0) continue;
+          const penZ = Math.min(p.z + SHIP_BOX[2], bz + 1) - Math.max(p.z - SHIP_BOX[2], bz);
+          if (penZ <= 0) continue;
+          let axis, amt, push;
+          if (penX <= penY && penX <= penZ){
+            axis = 0; amt = penX; push = (p.x < bx + 0.5) ? -penX : penX;
+          } else if (penY <= penZ){
+            axis = 1; amt = penY; push = (p.y < by + (top - by) * 0.5) ? -penY : penY;
+          } else {
+            axis = 2; amt = penZ; push = (p.z < bz + 0.5) ? -penZ : penZ;
+          }
+          if (!best || amt < best.amt){
+            best = { axis, amt, push };
+            if (axis === 1 && push > 0) hitBelow = true;
+          }
+        }
+      }
+    }
+    if (best){
+      if (best.axis === 0) p.x += best.push;
+      else if (best.axis === 1) p.y += best.push;
+      else p.z += best.push;
+      if (hitBelow && fwd.y < -0.15){
+        atmo.speed = Math.max(3, atmo.speed * (1 - Math.min(1, dt * 2.5)));
+        if (atmo.pitch < 0) atmo.pitch += dt * 1.6;
+      }
+    }
+  }
   function updateAtmo(dt){
     // 出大气缓冲区锁控：进入 EXIT_Y 前的缓冲区且交棒资源未就绪时，短暂锁定操控
     // （正常情况预加载在 y>145 就已分帧完成，锁控几乎不触发；低端机兜底防卡顿）
@@ -1406,13 +1454,10 @@ const Game = (() => {
       else if (shipMesh.position.z < -WRAP_Z / 2){ shipMesh.position.z += WRAP_Z; wrapped = true; }
       if (wrapped) World.stream(shipMesh.position.x, shipMesh.position.z);
     }
-    // 地形回避（自动拉起）；再入期间加高安全垫 + 更强拉起（入场绝不撞地）
+    // 地形碰撞：只对实际相交的方块推挤（可飞入悬空结构/洞穴下方）——
+    // 此前按列顶高度强制把船抬到方块上方，悬空平台/洞穴顶下永远进不去
     const gh = World.topAt(Math.floor(shipMesh.position.x), Math.floor(shipMesh.position.z));
-    const clr = reentryT > 0 ? 16 : 3;
-    if (shipMesh.position.y < gh + clr){
-      shipMesh.position.y += (gh + clr - shipMesh.position.y) * Math.min(1, dt * (reentryT > 0 ? 12 : 6));
-      if (atmo.pitch < 0) atmo.pitch += dt * (reentryT > 0 ? 2.6 : 1.2);
-    }
+    collideShipVoxels(dt, fwd);
     // 姿态与相机（机头朝 -Z，与运动方向一致）；换系继承的滚转微调整体携带、缓慢配平
     const shipQ = _atShipQ.setFromEuler(_atShipE.set(atmo.pitch, atmo.yaw, -atmo.roll, 'YXZ'));
     const camQ = _atCamQ.setFromEuler(_atShipE.set(atmo.pitch, atmo.yaw, 0, 'YXZ'));
@@ -1779,6 +1824,7 @@ const Game = (() => {
   let lodActivePid = -1;  // 正在生成 LOD 地形块的星球（越出范围时清除残留）
   let scenePrepQ = null;   // 后台场景预备队列（逐帧一步）
   const _pDir = new THREE.Vector3(), _pEast = new THREE.Vector3(), _pNorth = new THREE.Vector3();
+  const _holdDir = new THREE.Vector3();   // 入星交接期间的握手球面夹紧临时向量
   const _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bz = new THREE.Vector3();
   const _pM = new THREE.Matrix4(), _pAnchor = new THREE.Vector3();
   function voxelScale(planet){ return planet.def.radius * 0.004; }   // 体素→太空缩放
@@ -2037,7 +2083,20 @@ const Game = (() => {
     // 体素地形贴附在星球表面：先隐形挂载预编译，随后贴图形变为方块（无突兀切换）
     if (bestD < 600 && worldLoadedFor === best.def.id) updateSurfacePreview(best, bestD);
     else detachPreview();
-    if (bestD < handoffDist(best)) enterPlanetSeamless(best.def.id);
+    if (bestD < handoffDist(best)){
+      // 高速再入防穿透：入星交接（区块快照异步加载）完成前，逐帧把船夹在握手球面上——
+      // 脉冲极速下交棒期间飞船仍按帧推进，会整颗穿过星球从背面出大气
+      if (landingLock){
+        _holdDir.copy(Space.shipState.pos).sub(best.mesh.position);
+        const holdD = _holdDir.length();
+        if (holdD > 1e-4){
+          _holdDir.multiplyScalar(1 / holdD);
+          const holdR = best.def.radius + handoffDist(best);
+          if (Math.abs(holdD - holdR) > 0.5) Space.shipState.pos.copy(best.mesh.position).addScaledVector(_holdDir, holdR);
+        }
+      }
+      enterPlanetSeamless(best.def.id);
+    }
   }
   // ---------- 曲速跃迁 3.0：星系图锁定 → 太空准星对准星系 → 脉冲引擎冲刺 → 达到跃迁速度自动点火 ----------
   let warpAnim = null;
@@ -3637,7 +3696,7 @@ const Game = (() => {
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v186';
+  window.__V_MAIN = 'v187';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3704,6 +3763,7 @@ const Game = (() => {
       $('reentryFx').classList.remove('show');
     }
     tickAtmoScan(dt);         // 地表扫描波前动画（跨状态走完）
+    Space.tickLasers(dt);     // 玩家激光弹（大气弹在星球场景持续推进；太空弹仅在太空态推进）
     tickShipPreview(dt);      // 背包飞船页 3D 预览（打开时才渲染）
 
     if (state === 'planet'){
@@ -4813,6 +4873,13 @@ const Game = (() => {
     get planetScene(){ return planetScene; },
     joinGame,
     get shipPos(){ return shipPos; },
+    // 测试钩子：当前飞船网格位置（大气态为飞行中的体素飞船，地面态为停驻船）——大气开火回归断言用
+    get shipMeshPos(){ return shipMesh ? shipMesh.position : null; },
+    // 测试钩子：读/设入星交接锁（无缝入星异步区块加载期间为 true——高速再入夹紧回归断言用）
+    get debugLandingLock(){ return landingLock; },
+    debugSetLandingLock(v){ landingLock = !!v; },
+    // 测试钩子：点击开火路由是否允许当前状态（space/atmo 可开火——大气开火回归断言用）
+    debugShipFireAllowed(){ return state === 'space' || state === 'atmo'; },
     // 测试钩子：当前状态是否允许请求指针锁定（seated/atmoland 曾被漏掉）
     debugLockAllowed(){ return lockPointerAllowed(); },
     // 测试钩子：当前座驾档案（购船成交回归断言用）

@@ -186,7 +186,6 @@ const Space = (() => {
 
   // 设置目标星球的表皮溶解（amt 0~1，dirWorld 为世界坐标方向；pid=-1 清除所有）
   function setSurfaceHole(pid, amt, dirWorld){
-    let hit = false;
     for (const p of planets){
       if (!p.holeU) continue;
       if (p.def.id === pid && dirWorld){
@@ -195,15 +194,16 @@ const Space = (() => {
         const c = Math.cos(ry), s = Math.sin(ry);
         // 世界方向 → 网格局部（绕 Y 轴 -ry）
         p.holeU.dir.value.set(c * dirWorld.x - s * dirWorld.z, dirWorld.y, s * dirWorld.x + c * dirWorld.z);
-        // LOD 地形块同步下沉（与球面同一本地坐标系）
-        lodHoleU.amt.value = amt;
-        lodHoleU.dir.value.copy(p.holeU.dir.value);
-        hit = true;
+        // LOD 地形块同步下沉（与球面同一本地坐标系）——每颗星球独立的材质/统一量：
+        // 曾用模块级共享 lodHoleU，A 星球溶解会把 B 星球可见的 LOD 地形一起压沉
+        if (!p.lodMatPair) p.lodMatPair = makeLodMatPair();
+        p.lodMatPair.holeU.amt.value = amt;
+        p.lodMatPair.holeU.dir.value.copy(p.holeU.dir.value);
       } else {
         p.holeU.amt.value = 0;
+        if (p.lodMatPair) p.lodMatPair.holeU.amt.value = 0;
       }
     }
-    if (!hit) lodHoleU.amt.value = 0;
   }
 
   // ---------- 立方体球面 LOD（NMS 式：6 面各一棵四叉树，按相机距离递归细分）----------
@@ -238,16 +238,20 @@ const Space = (() => {
   // 体素皮肤覆盖区内 LOD 块沿径向下沉，避免模拟地形从方块地形中穿出
   // 下沉窗口（27°~33°）须完整收在皮肤全不透明区（~34°）内：
   // 皮肤边缘淡出圈下若还留着深坑，会形成一圈似透明的凹槽（东一块西一块）
-  const lodHoleU = { amt: { value: 0 }, dir: { value: new THREE.Vector3(0, 1, 0) } };
-  const lodMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
-  lodMat.onBeforeCompile = shader => {
-    shader.uniforms.uHoleAmt = lodHoleU.amt;
-    shader.uniforms.uHoleDir = lodHoleU.dir;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uHoleAmt;\nuniform vec3 uHoleDir;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed *= 1.0 - 0.15 * uHoleAmt * smoothstep(0.8387, 0.891, dot(normalize(position), uHoleDir));');
-  };
-  lodMat.customProgramCacheKey = () => 'lodhole';
+  // 每颗星球一对「材质 + 溶解 uniform」：溶解量按星球隔离，互不串扰
+  function makeLodMatPair(){
+    const holeU = { amt: { value: 0 }, dir: { value: new THREE.Vector3(0, 1, 0) } };
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    mat.onBeforeCompile = shader => {
+      shader.uniforms.uHoleAmt = holeU.amt;
+      shader.uniforms.uHoleDir = holeU.dir;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nuniform float uHoleAmt;\nuniform vec3 uHoleDir;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed *= 1.0 - 0.15 * uHoleAmt * smoothstep(0.8387, 0.891, dot(normalize(position), uHoleDir));');
+    };
+    mat.customProgramCacheKey = () => 'lodhole';
+    return { mat, holeU };
+  }
   const _ld = new THREE.Vector3(), _lc = new THREE.Vector3(), _lcam = new THREE.Vector3();
   function cubeDir(f, u, v, out){
     const F = CUBE_FACES[f];
@@ -300,7 +304,8 @@ const Space = (() => {
     geo.setIndex(ind);
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
-    return new THREE.Mesh(geo, lodMat);
+    if (!p.lodMatPair) p.lodMatPair = makeLodMatPair();
+    return new THREE.Mesh(geo, p.lodMatPair.mat);
   }
   function updateLOD(pid, hSampler, cSampler, seed, camPos){
     const p = planets.find(q => q.def.id === pid);
@@ -2155,8 +2160,8 @@ const Space = (() => {
     );
     scene.add(scanRing);
 
-    // LOD 地形块材质预热桩（随场景一并编译着色器）
-    const warmTile = new THREE.Mesh(new THREE.PlaneGeometry(0.01, 0.01), lodMat);
+    // LOD 地形块材质预热桩（随场景一并编译着色器；每星球独立材质，预热任意一份即可）
+    const warmTile = new THREE.Mesh(new THREE.PlaneGeometry(0.01, 0.01), makeLodMatPair().mat);
     warmTile.position.set(0, -99999, 0);
     scene.add(warmTile);
   }
@@ -2173,13 +2178,15 @@ const Space = (() => {
   }
   function disposeScene(){
     if (scene){
-      // 行星：独立球体几何与贴图；云壳贴图共享缓存（skipTex）；LOD 地形块几何独立、材质共享 lodMat（不 dispose）
+      // 行星：独立球体几何与贴图；云壳贴图共享缓存（skipTex）；LOD 地形块几何独立、
+      // 材质按星球独立（makeLodMatPair）——场景销毁时一并 dispose
       for (const p of planets){
         if (!p.mesh) continue;
         if (p.lodTiles){
           for (const t of p.lodTiles.values()){ p.mesh.remove(t.mesh); t.mesh.geometry.dispose(); }
           p.lodTiles = null;
         }
+        if (p.lodMatPair){ p.lodMatPair.mat.dispose(); p.lodMatPair = null; }
         if (p.tex) p.tex.dispose();   // 每颗星球独立 CanvasTexture
         disposeObject3D(p.mesh, { skipTex: true });   // 球体+云壳+大气+扫描罩随遍历处置（holoGeo 共享重复 dispose 无害）
         scene.remove(p.mesh);
@@ -2776,6 +2783,7 @@ const Space = (() => {
   return { init, enter, update, tickRotation, setAttitude, shoot, nearestTarget, aheadInfo, stopSounds,
     warpGalaxy, restoreGalaxy, spaceScan, getSpaceMarkers, clearSpaceMarkers, tickSpaceScan, getCurrentGalaxySeed,
     paintSurfaceRegion, setSurfaceHole, paintGlobe, displaceGlobe, updateLOD, restoreGlobe, clearLodTiles,
+    debugLodHoleAmt(pid){ const p = planets.find(q => q.def.id === pid); if (!p) return null; return p.lodMatPair ? p.lodMatPair.holeU.amt.value : 0; },
     SUN_POS, PLANET_DAY, SUN_R, sunTextures, setLodQuality, lodRange, setClouds, setRealAtmo,
     getDock, tickStation, bakeStationPortrait, removeVisitorShip, setShipModel, setVisitorCount, cloneStationModel,
     SHIP_CLASSES, SHIP_MODEL_NAMES,
@@ -2790,4 +2798,4 @@ const Space = (() => {
     get station(){ return station; }, get planets(){ return planets; } };
 })();
 window.Space = Space;
-window.__V_SPACE = 'v180';
+window.__V_SPACE = 'v181';

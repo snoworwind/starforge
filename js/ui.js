@@ -1753,7 +1753,7 @@ const UI = (() => {
   // mode: 'load'（选择人物×世界）| 'save'（游戏内存档）
   async function openSavePanel(mode, preselectChar){
     const el = $('savePanel');
-    ['invPanel','machinePanel','techPanel','tradePanel','helpPanel','creativePanel','pausePanel','settingsPanel'].forEach(id => $(id).classList.add('hidden'));
+    closeAll();   // 与其它面板互斥（此前手写隐藏列表漏掉星系图/地图/联机/玩家列表，星图会叠在存档面板后面）
     el.classList.remove('hidden');
     savePanelMode = mode || 'load';
     $('saveTitle').textContent = savePanelMode === 'save' ? '◈ 存档 — 人物与世界独立档案' : '◈ 继续 — 选择人物与世界';

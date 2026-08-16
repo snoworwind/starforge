@@ -198,4 +198,16 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM', bubbles: true, cancelable: true }));   // 关闭地图
     window.Game.mapMarks[pid] = saved;   // 还原世界状态
   });
+
+  // 回归：openSavePanel 手写隐藏列表漏掉星系图/地图/联机/玩家列表——太空里打开星系图再开
+  // 存档面板，星图叠在存档面板后面。修复：改用 closeAll 与所有面板互斥
+  t.test('save panel closes all other panels (incl galaxy map)', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);
+    window.UI.openGalaxyMap();
+    A.ok(!document.getElementById('galaxyPanel').classList.contains('hidden'), 'galaxy map open');
+    await window.UI.openSavePanel('save');
+    A.ok(document.getElementById('galaxyPanel').classList.contains('hidden'), 'galaxy map closed by save panel');
+    window.UI.closeAll();
+  });
 });

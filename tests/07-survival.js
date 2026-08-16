@@ -106,4 +106,36 @@ __SF_TEST__.suite('survival', function (t, api) {
     var hp2 = dropWith(-13);
     A.eq(hp2, 20, 'v=-13 impact deals 0 (got hp ' + hp2 + ')');
   });
+
+  // 回归：placeTarget 自挡只查单个 (floor(x), floor(z)) 列与头/脚两格——玩家跨两格站位
+  // （x=0.8 覆盖格 0 与 1）时，方块可放进身体内部卡住玩家。修复：AABB 全格拒绝
+  t.test('placeTarget rejects cells the player straddles (AABB self-block)', function () {
+    var sp = window.World.findSpawn();
+    var x = 0, z = 0, ok = false;
+    for (var r = 0; r < 64 && !ok; r++){
+      for (var dx = -r; dx <= r && !ok; dx++){
+        for (var dz = -r; dz <= r && !ok; dz++){
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          var bx = Math.floor(sp.x) + dx, bz = Math.floor(sp.z) + dz;
+          var y0 = window.World.topAt(bx, bz);
+          if (y0 === window.World.topAt(bx + 1, bz)){
+            var dd0 = window.World.getDef(bx, y0, bz);
+            if (dd0 && !dd0.liquid && dd0.key !== 'log' && dd0.key !== 'leaves'){ x = bx; z = bz; ok = true; }
+          }
+        }
+      }
+    }
+    A.ok(ok, 'flat column pair found near spawn');
+    var gy = window.World.topAt(x, z);
+    api.clearInv();
+    api.give('stone', 10);
+    window.Player.hotIdx = 0;
+    api.setPos(x + 0.8, gy + 1.2, z + 0.5);   // 跨格站位：身体占用格 x 与 x+1
+    var cam = new THREE.PerspectiveCamera(75, 1, 0.1, 100);
+    cam.position.set(x + 1.5, gy + 1.7, z + 0.5);   // 镜头在格 x+1 正上方，向下瞄准
+    cam.quaternion.setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, 'YXZ'));
+    cam.updateMatrixWorld(true);
+    window.Player.tryPlace(cam);
+    A.eq(window.World.getDef(x + 1, gy + 1, z).id, 0, 'straddled cell rejected (修复前方块放进身体)');
+  });
 });

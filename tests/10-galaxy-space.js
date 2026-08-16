@@ -55,6 +55,23 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     window.UI.closeAll();
   });
 
+  // 回归：大厅平台顶面 y=3 建模横贯 z≤6 的全宽（64×4×20 @ z=-4），
+  // 而 floorAt 只把 z≤4 当平台——侧翼走道 |x|≥10、4<z≤6 会把玩家塌到库底 y=0 卡进平台
+  t.test('station concourse floor spans z<=6 full width', async function () {
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.set(5000, 5000, 5000);   // 远离星球，防无缝入星抢状态
+    A.ok(window.Space.getDock(), 'dock available in space');
+    var f = window.Station.debugFloorAt;
+    A.eq(f(20, 5), 3, 'side walkway (x=20,z=5) stands on concourse top');
+    A.eq(f(-25, 6), 3, 'side walkway (x=-25,z=6) stands on concourse top');
+    A.eq(f(30, 4), 3, 'front edge of platform (x=30,z=4)');
+    A.eq(f(0, 7), 2, 'central second step (z=7)');
+    A.eq(f(0, 9), 1, 'central first step (z=9)');
+    A.eq(f(0, 11), 0, 'hangar floor beyond steps');
+    A.eq(f(20, 7), 0, 'side strip past platform edge (z=7) is hangar floor');
+    A.eq(f(20, 31), 2, 'landing pad area (20,31) height 2');
+  });
+
   // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
   // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
   t.test('seamless atmosphere entry loads target planet biome', async function () {

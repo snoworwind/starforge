@@ -899,8 +899,15 @@ const Game = (() => {
 
   // ---------- 指针锁定 ----------
   let skipMouseJump = false;   // 指针锁定瞬间光标回中会触发一次超大 movementX/Y，需要跳过
+  // 可锁定状态白名单：落地动画（atmoland）与座舱（seated）也被允许——降落完成时
+  // updateAtmoLand 调 lockPointer() 意图接管鼠标，此前这两个状态被漏掉导致请求被吞，
+  // 起飞进入 atmo 后鼠标无法转向，必须再点一次画面
+  function lockPointerAllowed(){
+    return state === 'planet' || state === 'space' || state === 'atmo' || state === 'station'
+      || state === 'seated' || state === 'atmoland';
+  }
   function lockPointer(){
-    if (state === 'planet' || state === 'space' || state === 'atmo' || state === 'station'){
+    if (lockPointerAllowed()){
       try {
         const p = renderer.domElement.requestPointerLock();
         if (p && p.catch) p.catch(() => {});
@@ -3589,12 +3596,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v157';
+    bd.textContent = 'build v158';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v157';
+  window.__V_MAIN = 'v158';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -4748,6 +4755,8 @@ const Game = (() => {
     get planetScene(){ return planetScene; },
     joinGame,
     get shipPos(){ return shipPos; },
+    // 测试钩子：当前状态是否允许请求指针锁定（seated/atmoland 曾被漏掉）
+    debugLockAllowed(){ return lockPointerAllowed(); },
     // 战利品入舱：优先飞船货仓（合并→空格，享受 ×5 大格），溢出转随身背包；返回实际入库数
     addCargo(id, n){
       let left = n;

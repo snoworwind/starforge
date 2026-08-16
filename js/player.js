@@ -183,7 +183,9 @@ const Player = (() => {
         d.baseY = p.y;
       } else {
         // 脚下被挖空 → 继续下落
-        if (!solidAt(p.x, d.baseY - 0.4, p.z)) d.vel.y = -0.01;
+        // 注意：速度必须足够大以进入上面的运动分支（lengthSq > 0.0001）。
+        // 此前 -0.01 的 lengthSq 恰好等于门限，永远留在悬浮分支 → 悬在半空不再坠落
+        if (!solidAt(p.x, d.baseY - 0.4, p.z)) d.vel.y = -0.5;
         p.y = d.baseY + Math.sin(d.age * 2.2) * 0.06 + 0.06;   // 悬浮呼吸
       }
       d.mesh.rotation.y += dt * 1.6;
@@ -1059,6 +1061,8 @@ const Player = (() => {
     chargeStat, canCharge, CHARGE_DEFS, cycleRot,
     addItem, removeItem, countItem, hasItems, payItems, throwHeld, spawnDrop, sortInventory,
     get dropCount(){ return worldDrops.length; },   // 测试用：地上掉落物数量
+    // 测试钩子：最后一个掉落物的高度（新掉落实体追加在队尾，避免旧掉落干扰）
+    debugLastDropY(){ return worldDrops.length ? worldDrops[worldDrops.length - 1].mesh.position.y : null; },
     // 测试钩子：按真实挖掘路径拆除 (x,y,z) 处方块（含机器退款与掉落逻辑）
     debugBreakBlock(x, y, z){
       const def = World.getDef(x, y, z);

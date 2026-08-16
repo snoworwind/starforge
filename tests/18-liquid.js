@@ -79,4 +79,22 @@ __SF_TEST__.suite('liquid', function (t, api) {
     document.getElementById('pausePanel').classList.add('hidden');
     clearPool(X, Z, pool[3]);
   });
+
+  t.test('掉落物脚下被挖空后继续坠落', function () {
+    // 平台悬在真实地面上方：掉落物落在平台上 → 拆除平台 → 应继续坠到地面
+    var X = 100, Z = 100;
+    var gy = api.topAt(X, Z);
+    api.setBlock(X, gy + 1, Z, 'dirt');   // 平台
+    document.getElementById('pausePanel').classList.remove('hidden');   // 冻结世界，避免主循环拾取/干扰
+    window.Player.spawnDrop(X + 0.5, gy + 2.5, Z + 0.5, 'stone', 1, null, 999);
+    var i;
+    for (i = 0; i < 40; i++) window.Player.update(1 / 30, CAM);   // 落地（悬浮在平台上方）
+    var y0 = window.Player.debugLastDropY();
+    A.ok(y0 !== null && y0 > gy + 1.5, 'drop resting on platform (y=' + (y0 === null ? 'null' : y0.toFixed(2)) + ')');
+    api.setBlock(X, gy + 1, Z, 'air');   // 挖掉平台
+    for (i = 0; i < 40; i++) window.Player.update(1 / 30, CAM);
+    var y1 = window.Player.debugLastDropY();
+    A.ok(y1 !== null && y1 < y0 - 0.5, 'drop fell after ground mined (y0=' + y0.toFixed(2) + ' → y1=' + (y1 === null ? 'null' : y1.toFixed(2)) + ')');
+    document.getElementById('pausePanel').classList.add('hidden');
+  });
 });

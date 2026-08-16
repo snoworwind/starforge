@@ -175,4 +175,14 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     window.UI.closeAll();
     api.removeMachine(60, y, 60);
   });
+
+  t.test('切窗失焦清除全部按键（keyup 被吞不残留）', function () {
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', bubbles: true, cancelable: true }));
+    A.eq(window.Player.keys.KeyW, true, 'W held after keydown');
+    window.dispatchEvent(new Event('blur'));
+    A.eq(window.Player.keys.KeyW, false, 'W released on blur');
+    var allClear = true;
+    for (var k in window.Player.keys){ if (window.Player.keys[k]) allClear = false; }
+    A.ok(allClear, 'all player keys cleared on blur');
+  });
 });

@@ -1042,6 +1042,15 @@ const Game = (() => {
     if (e.code === 'KeyA') spaceInput.rollLeft = false;
     if (e.code === 'KeyD') spaceInput.rollRight = false;
   });
+  // 切窗/Alt-Tab 时浏览器吞掉 keyup：失焦即清空全部按键与飞行输入，
+  // 否则 W/Shift 等键位永久卡住，回到游戏后人物/飞船持续自动移动
+  window.addEventListener('blur', () => {
+    for (const k in Player.keys) Player.keys[k] = false;
+    spaceInput.thrust = false; spaceInput.brake = false; spaceInput.boost = false;
+    spaceInput.pulse = false; spaceInput.rollLeft = false; spaceInput.rollRight = false;
+    spaceInput.mouseDX = 0; spaceInput.mouseDY = 0;
+    Player.mineHeld = false;
+  });
 
   // ---------- 交互 ----------
   // RPG 对话系统：打字机逐字显示 · E/点击推进（未显完先补完）· 走远自动结束
@@ -3559,12 +3568,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v137';
+    bd.textContent = 'build v138';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v137';
+  window.__V_MAIN = 'v138';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }

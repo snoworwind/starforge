@@ -1686,7 +1686,10 @@ const UI = (() => {
     $('worldCreate').classList.remove('hidden');
     $('worldNameInput').value = '';
     $('worldSeedInput').value = '';
-    setWcMode('normal');
+    // 初始高亮回显上一屏的选择（新档流程来自 diffSelect/modeSelect 的 cc.creative/cc.mult；
+    // 读档面板新建世界为普通），不再无条件重置为「普通」误导玩家
+    const m = cc && cc.creative ? 'creative' : cc && cc.mult === 7 ? 'easy' : cc && cc.mult === 1 ? 'hard' : 'normal';
+    setWcMode(m);
   }
   function openWorldCreate(charOpts, fromSave){
     $('boot').classList.remove('hidden');
@@ -1715,8 +1718,9 @@ const UI = (() => {
     $('worldCreate').classList.add('hidden');
     if (!cc) return;
     const charOpts = cc.char || { name: '旅行者', appearance: randomAppearance() };
-    const creative = cc.worldFromSave ? wcState.creative : cc.creative;
-    const mult = cc.worldFromSave ? wcState.mult : cc.mult;
+    // 统一以世界创建页的选择为准：此前新档流程忽略页内按钮（点击只改高亮不改实际难度）
+    const creative = wcState.creative;
+    const mult = wcState.mult;
     cc = null;
     Game.newGame(creative, mult, { char: charOpts, world: { name, seed } });
   };

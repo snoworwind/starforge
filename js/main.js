@@ -3583,12 +3583,12 @@ const Game = (() => {
   // 构建水印：右下角常驻小字（station 态升级为实时仪表：阶段/相机/朝向逐帧显示）
   {
     const bd = document.createElement('div');
-    bd.textContent = 'build v153';
+    bd.textContent = 'build v154';
     bd.style.cssText = 'position:fixed;right:6px;bottom:4px;font-size:11px;color:rgba(160,210,230,0.85);z-index:9999;pointer-events:none;font-family:monospace;text-shadow:0 1px 2px #000';
     document.body.appendChild(bd);
     window.__stDbg = bd;
   }
-  window.__V_MAIN = 'v153';
+  window.__V_MAIN = 'v154';
   // ================ 运行时诊断面板（F8 / Ctrl+Esc 开关）================
   let errPanelEl = null, errCache = [];
   function logErr(msg){ errCache.push(new Date().toLocaleTimeString() + ' ' + msg); if (errCache.length > 40) errCache.shift(); }
@@ -3687,7 +3687,8 @@ const Game = (() => {
       World.stream(shipPos.x, shipPos.z);
       World.update(dt, shipPos.x, shipPos.z);
       Factory.update(dt, day);
-      Creatures.tick(dt, shipPos);
+      // 座舱密封：生物 AI 在座舱内暂停——此前守卫无人机隔着机身把玩家打死，
+      // 死亡复活点/相机/状态机在 seated 态下互相矛盾（复活到出生点但相机仍锁舱内）
       UI.updateResearch(dt);
       // 驾驶舱视角：机尾后上方轻微悬浮感
       const camQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.12, boardYaw, 0, 'YXZ'));

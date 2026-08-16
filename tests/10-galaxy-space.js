@@ -121,6 +121,31 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     A.ok(!fx(), 'reentry fx cleared after landing (E path)');
   });
 
+  // 回归：座舱（seated）内生物 AI 继续运行，守卫无人机隔机身攻击玩家并致死——
+  // 死亡复活把 Player.pos 送回出生点，而状态/相机仍锁在座舱：状态机互相矛盾
+  t.test('seated cockpit is safe from sentinel (creature AI paused in cockpit)', async function () {
+    var pd = api.defs.SYSTEM_PLANETS[0];
+    var dir = [0.5, 0.6, 0.6];
+    var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.fromArray([
+      pd.pos[0] + dir[0] / len * (pd.radius + 40),
+      pd.pos[1] + dir[1] / len * (pd.radius + 40),
+      pd.pos[2] + dir[2] / len * (pd.radius + 40),
+    ]);
+    window.Space.shipState.speed = 0;
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
+    await api.waitUntil(function () { return window.Game.state === 'seated'; }, 20000, 50);
+    // 在攻击半径内生成守卫（落点：Player.pos 在降落时被置为 shipPos+2.2，就在机舱旁）
+    var s = window.Creatures.debugSpawnSentinel(window.Player.pos.x + 2, window.Player.pos.z);
+    api.setStat('shield', 0);
+    api.setStat('hp', 40);
+    await api.sleep(4000);
+    A.eq(api.stats().hp, 40, 'seated player untouched by sentinel (hp=' + api.stats().hp + ')');
+    window.Creatures.kill(s);
+  });
+
   // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
   // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
   t.test('seamless atmosphere entry loads target planet biome', async function () {

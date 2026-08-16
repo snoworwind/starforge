@@ -344,4 +344,20 @@ __SF_TEST__.suite('charworld', function (t, api) {
     A.ok(restoredCount > 0, 'non-killed herds reloaded after restore (' + restoredCount + ')');
     A.ok(!afterIds[victimNid], 'killed herd stays dead after save/load roundtrip');
   });
+
+  // 回归：saveBeaconState 写入星球记录时漏掉 creatures 字段——放/改名信标后，
+  // 下次读回的兽群/击杀记录丢失（农场动物重生、已杀动物复活）
+  t.test('saveBeaconState 保留兽群记录', async function () {
+    var sp = window.World.findSpawn();
+    var cx = Math.floor(sp.x / 24) + 5, cz = Math.floor(sp.z / 24);
+    window.Creatures.restore({
+      herds: [[cx, cz, 0, Math.round(sp.x * 10), Math.round(sp.z * 10), 4, Math.round(sp.x * 10), Math.round(sp.z * 10)]],
+      removed: [[cx + ',' + cz, 1]],
+    });
+    A.ok(window.Creatures.debugHerds() > 0, 'herd record present');
+    window.Game.saveBeaconState(0);   // 信标建档路径（此前丢 creatures）
+    await window.Game.tpTo(1, null, 'planet', 'test');   // 换星球重建世界
+    await window.Game.tpTo(0, null, 'planet', 'test');   // 回星球 0：从 visitedPlanets[0] 恢复
+    A.ok(window.Creatures.debugHerds() > 0, 'herds restored after beacon save (修复前 0)');
+  });
 });

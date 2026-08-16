@@ -94,16 +94,16 @@ __SF_TEST__.suite('uipolish', function (t, api) {
 
   t.test('单机系统面板打开 → 世界真正冻结，关闭后恢复', async function () {
     A.eq(window.Game.worldPaused(), false, 'not paused at baseline');
-    // 打开暂停菜单，等主循环感知后取基准
+    // 打开暂停菜单，轮询等待主循环感知（固定短 sleep 在高负载下偶发抖动）
     document.getElementById('pausePanel').classList.remove('hidden');
-    await api.sleep(250);
+    await api.waitUntil(function () { return window.Game.worldPaused(); }, 5000, 50);
     A.ok(window.Game.worldPaused(), 'worldPaused() true while pause menu open');
     var t0 = window.Game.playTime;
     await api.sleep(350);
     A.eq(window.Game.playTime, t0, 'playTime frozen while paused (got +' + (window.Game.playTime - t0).toFixed(3) + 's)');
     document.getElementById('pausePanel').classList.add('hidden');
     A.eq(window.Game.worldPaused(), false, 'worldPaused() false after closing');
-    await api.sleep(350);
+    await api.waitUntil(function () { return window.Game.playTime > t0; }, 5000, 50);
     A.ok(window.Game.playTime > t0, 'world resumes after closing pause menu');
   });
 
@@ -126,5 +126,23 @@ __SF_TEST__.suite('uipolish', function (t, api) {
     A.ok(grid3 !== grid, 'DOM rebuilt after inventory change');
     window.UI.closeAll();
     api.removeMachine(60, y, 60);
+  });
+
+  t.test('世界创建页难度按钮生效且高亮回显上一屏选择', async function () {
+    // 真实新档流程：diffSelect 选困难 → 捏人 → 世界页应回显困难；
+    // 页内改选简单 → 最终进入的难度必须是简单（修复前页内按钮只改高亮、实际仍按困难进入）
+    document.getElementById('btnDiffHard').onclick();
+    A.eq(document.getElementById('charCreate').classList.contains('hidden'), false, 'char create shown');
+    document.getElementById('charNameInput').value = '难度测试员';
+    document.getElementById('btnCharConfirm').onclick();
+    A.ok(document.getElementById('btnWcHard').classList.contains('on'), 'world panel echoes hard from diffSelect');
+    document.getElementById('btnWcEasy').onclick();
+    A.ok(document.getElementById('btnWcEasy').classList.contains('on'), 'easy button highlights');
+    document.getElementById('worldNameInput').value = '难度测试世界';
+    document.getElementById('btnWorldConfirm').onclick();
+    await api.waitUntil(function () { return window.Game.state === 'planet'; }, 90000, 30);
+    A.eq(window.Game.creative, false, 'not creative');
+    A.eq(window.Game.dropMult, 7, 'world panel easy choice honored (dropMult=7)');
+    await api.reboot('normal');   // 复位干净世界
   });
 });

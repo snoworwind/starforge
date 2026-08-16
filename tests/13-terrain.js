@@ -95,4 +95,22 @@ __SF_TEST__.suite('terrain', function (t, api) {
     A.eq(window.World.SEA, 32, 'SEA = 32');
     A.eq(window.World.SEA_Y, 28, 'SEA_Y = 28（海平面下 4 格）');
   });
+
+  // 回归：冰锥把氚晶放底部、冰放尖端（与注释「晶块尖+冰座」相反）——
+  // 可采集的氚晶被埋在冰座下面；修复后顶部晶块、底部冰座
+  t.test('冰锥结构：晶块尖在上、冰座在下（顶部氚晶可采集）', function () {
+    window.World.init('frozen', 424242, null, null);
+    var found = false, checked = 0;
+    for (var z = -96; z <= 96 && !found; z++){
+      for (var x = -96; x <= 96 && !found; x++){
+        // 冰锥自身就是该列的最高块：晶块顶(gy)压在冰座(gy-1)上
+        var gy = window.World.topAt(x, z);
+        var top = window.World.getDef(x, gy, z);
+        var below = window.World.getDef(x, gy - 1, z);
+        if (top && top.key === 'crystal' && below && below.key === 'ice') found = true;
+        checked++;
+      }
+    }
+    A.ok(found, 'found crystal-tip over ice-base spike (checked ' + checked + ' columns)');
+  });
 });

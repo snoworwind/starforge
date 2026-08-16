@@ -146,6 +146,26 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     window.Creatures.kill(s);
   });
 
+  // 回归：lockPointer 白名单漏掉 seated/atmoland——降落完成时的 lockPointer() 请求被吞，
+  // 起飞进入 atmo 后指针未锁定，鼠标转向失效直到再点一次画面
+  t.test('pointer lock allowed in cockpit (seated) state', async function () {
+    var pd = api.defs.SYSTEM_PLANETS[0];
+    var dir = [0.5, 0.6, 0.6];
+    var len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    await window.Game.tpTo(0, null, 'space', 'test');
+    window.Space.shipState.pos.fromArray([
+      pd.pos[0] + dir[0] / len * (pd.radius + 40),
+      pd.pos[1] + dir[1] / len * (pd.radius + 40),
+      pd.pos[2] + dir[2] / len * (pd.radius + 40),
+    ]);
+    window.Space.shipState.speed = 0;
+    await api.waitUntil(function () { return window.Game.state === 'atmo'; }, 30000, 50);
+    A.eq(window.Game.debugLockAllowed(), true, 'atmo allows pointer lock');
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
+    await api.waitUntil(function () { return window.Game.state === 'seated'; }, 20000, 50);
+    A.eq(window.Game.debugLockAllowed(), true, 'seated allows pointer lock (fix: 起飞后鼠标可转向)');
+  });
+
   // 回归：无缝入星必须初始化目标星球的生态世界（此前区块快照缓存永不落 {map}，
   // prepPlanet 永远跳过 World.init → 所有星球进入大气后都沿用上一颗星球的世界）
   t.test('seamless atmosphere entry loads target planet biome', async function () {

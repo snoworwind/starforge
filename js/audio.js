@@ -172,10 +172,21 @@ const Sound = (() => {
     osc('square', 990, t + 0.05, 0.09, 0.18 * v);
   };
 
+  // 首声入队：AudioContext.resume() 是异步的，suspended 态下发声必须等 running 后
+  // 再真正调度（此前 resume() 后同步判 state 仍是 suspended，直接 return——解锁手势
+  // 的这一声永远被吞，页面注释「首声防吞」形同虚设；且难度/设置按钮连 begin() 都不调，
+  // ctx 都未创建，第一屏全部静音）
+  const pendingFirst = [];
   function play(name, ...args){
-    if (!ctx) return;
-    // 首声防吞：上下文仍处于 suspended（未解锁）时先请求恢复
-    if (ctx.state === 'suspended') resume();
+    if (!ensure()) return;
+    if (ctx.state === 'suspended'){
+      pendingFirst.push({ name, args });
+      ctx.resume().then(() => {
+        const f = pendingFirst.shift();
+        if (f && S[f.name]){ try { S[f.name](...f.args); } catch(e){} }
+      }).catch(() => { pendingFirst.shift(); });
+      return;
+    }
     if (ctx.state !== 'running') return;
     try { if (S[name]) S[name](...args); } catch(e){}
   }
@@ -311,5 +322,6 @@ const Sound = (() => {
     Music.start();
   }
 
-  return { play, loops, begin, resume, setVolume, getVolume, Music, get ctx(){ return ctx; } };
+  return { play, loops, begin, resume, setVolume, getVolume, Music, get ctx(){ return ctx; },
+    get pendingFirstCount(){ return pendingFirst.length; } };   // 测试钩子：suspended 首声入队数
 })();

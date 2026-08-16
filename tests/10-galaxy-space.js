@@ -21,6 +21,26 @@ __SF_TEST__.suite('galaxy-space', function (t, api) {
     }
   });
 
+  // 回归：LOD 溶解 uniform 按星球隔离——A 星球开表皮溶解，不得把 B 星球可见的
+  // LOD 地形块沿同一方向压沉（此前模块级共享 lodHoleU，溶解波及所有星球）
+  t.test('surface hole uniforms isolated per planet', function () {
+    api.enterSpace();
+    var ps = window.Space.planets;
+    A.ok(ps.length >= 2, 'two planets for isolation check');
+    var idA = ps[0].def.id, idB = ps[1].def.id;
+    var dir = new THREE.Vector3(0, 1, 0);
+    window.Space.setSurfaceHole(idA, 1, dir);
+    A.eq(window.Space.debugLodHoleAmt(idA), 1, 'planet A lod hole amt 1');
+    A.eq(window.Space.debugLodHoleAmt(idB), 0, 'planet B lod hole unaffected');
+    // 换目标星球：其余星球被清除（与皮肤侧 holeU 同语义），各自 uniform 独立互不串扰
+    window.Space.setSurfaceHole(idB, 0.5, dir);
+    A.eq(window.Space.debugLodHoleAmt(idA), 0, 'A cleared when B becomes target');
+    A.eq(window.Space.debugLodHoleAmt(idB), 0.5, 'B own dissolve applied');
+    window.Space.setSurfaceHole(-1);
+    A.eq(window.Space.debugLodHoleAmt(idA), 0, 'clear-all resets A lod hole');
+    A.eq(window.Space.debugLodHoleAmt(idB), 0, 'clear-all resets B lod hole');
+  });
+
   t.test('planet textures: nearest-mip sampling (no far moire)', function () {
     api.enterSpace();
     var ps = window.Space.planets;

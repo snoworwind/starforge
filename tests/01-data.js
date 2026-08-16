@@ -83,6 +83,22 @@ __SF_TEST__.suite('data', function (t, api) {
     A.ok(a.market && Object.keys(a.market).length > 0, 'market populated');
   });
 
+  // 回归：空间站不得生成在星球包络内（站体碰撞域 150、护盾 213）——此前无分离校验，
+  // 某些种子下站心距星球表面仅几十米、甚至落在星球内部（如 seed 98）
+  t.test('station spawns clear of every planet', function () {
+    var bad = [];
+    for (var s = 1; s <= 400; s++){
+      var g = window.generateGalaxy(s);   // 需要完整 planets 数组（api.generateGalaxy 只返回数量）
+      for (var i = 0; i < g.planets.length; i++){
+        var p = g.planets[i];
+        var dx = g.station[0] - p.pos[0], dy = g.station[1] - p.pos[1], dz = g.station[2] - p.pos[2];
+        var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < p.radius + 213) bad.push('seed ' + s + ' planet ' + i + ' gap ' + (d - p.radius).toFixed(0));
+      }
+    }
+    A.eq(bad.length, 0, 'no station inside planet envelope' + (bad.length ? ': ' + bad.slice(0, 3).join(' | ') : ''));
+  });
+
   t.test('biome sky 是天空色数组（不被浮翼配色覆盖），浮翼配色在 skywings', function () {
     var B = api.defs.BIOMES;
     var bad = [], noWing = [];

@@ -402,8 +402,22 @@ function generateGalaxy(seed){
   if (!planets.some(p => ['lush','ocean','fungal','alien'].includes(p.biome))){
     planets[0].biome = ['lush','ocean','fungal'][(rnd() * 3) | 0];
   }
-  // 空间站
-  const stat = [1200 * (rnd() - 0.5), 300 + rnd() * 400, 1200 * (rnd() - 0.5)];
+  // 空间站：位置与所有星球保持安全分离（站体碰撞域半径 150 / 护盾 213，再加余量），
+  // 否则站体可生成在星球包络内——玩家靠近时直接撞进星球地表
+  let stat;
+  {
+    const STAT_CLEAR = 230;   // 星球半径 + 站体域 213 + 余量
+    for (let tries = 0; tries < 200; tries++){
+      const cand = [1200 * (rnd() - 0.5), 300 + rnd() * 400, 1200 * (rnd() - 0.5)];
+      let ok = true;
+      for (const p of planets){
+        const dx = cand[0] - p.pos[0], dy = cand[1] - p.pos[1], dz = cand[2] - p.pos[2];
+        if (dx * dx + dy * dy + dz * dz < (p.radius + STAT_CLEAR) * (p.radius + STAT_CLEAR)){ ok = false; break; }
+      }
+      if (ok){ stat = cand; break; }
+    }
+    if (!stat) stat = [0, 900, 0];   // 兜底：远高于所有星球（最高星球面 ≈525），任何星距都安全
+  }
   // 市场波动
   const market = {};
   for (const g of TRADE_GOODS) market[g] = 0.75 + rnd() * 0.5;

@@ -239,7 +239,12 @@
       if (r.tech && !window.Game.techDone(r.tech)) break;
       if (!window.Player.hasItems(r.in)) break;
       window.Player.payItems(r.in);
-      for (const k in r.out) window.Player.addItem(k, r.out[k] * window.Game.dropMult, true);
+      // 与 UI.tryCraft 保持一致：背包已满时溢出部分掉落在玩家身旁（不凭空消失）
+      for (const k in r.out){
+        const want = r.out[k] * window.Game.dropMult;
+        const added = window.Player.addItem(k, want, true);
+        if (added < want) window.Player.spawnDrop(window.Player.pos.x, window.Player.pos.y + 0.6, window.Player.pos.z, k, want - added);
+      }
       made++;
     }
     return made;

@@ -306,7 +306,12 @@ const UI = (() => {
     if (!Player.hasItems(r.in)) return false;
     Player.payItems(r.in);
     // 难度产出倍率：合成产物整体按倍率放大
-    for (const k in r.out) Player.addItem(k, r.out[k] * Game.dropMult, true);
+    // 背包已满：放不下的部分掉落在玩家身旁（此前整体凭空消失且原料照扣）
+    for (const k in r.out){
+      const want = r.out[k] * Game.dropMult;
+      const added = Player.addItem(k, want, true);
+      if (added < want) Player.spawnDrop(Player.pos.x, Player.pos.y + 0.6, Player.pos.z, k, want - added);
+    }
     const outItem = Object.keys(r.out)[0];
     pickupToast(outItem, r.out[outItem] * Game.dropMult);
     return true;
@@ -2000,7 +2005,7 @@ const UI = (() => {
   return {
     anyPanelOpen, closeAll, toggle, buildHotbar, refreshHotbar, refreshInv, refreshAll, showItemName,
     openMachinePanel, openTrade, refreshTrade, refreshTech, updateResearch, tickMachinePanel,
-    toggleCreative, openSavePanel, openGalaxyMap, openCharCreate, openWorldCreate,
+    toggleCreative, openSavePanel, openGalaxyMap, openCharCreate, openWorldCreate, tryCraft,
     pickupToast, bigMessage, refreshQuests, refreshHUD, setInteractHint,
     get openMachine(){ return openMachine; },
     get researching(){ return researching; },

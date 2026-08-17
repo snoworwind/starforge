@@ -262,7 +262,37 @@ fn safe_name(name: &str) -> String {
     while out.ends_with('.') || out.ends_with(' ') {
         out.pop();
     }
-    if out.is_empty() || out == "." || out == ".." {
+    let device_name = out
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved_device = matches!(
+        device_name.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if out.is_empty() || out == "." || out == ".." || reserved_device {
         "unnamed".into()
     } else {
         out.chars().take(80).collect()

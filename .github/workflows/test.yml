@@ -19,6 +19,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Linux audio and device dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+
       - name: Check formatting
         run: cargo fmt --all -- --check
         working-directory: starforge-bevy

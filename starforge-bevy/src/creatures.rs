@@ -57,6 +57,9 @@ impl Default for CreatureSpawner {
 }
 
 /// Spawn a creature at a ground position（CC0 GLB 模型：crab/blob/strider）。
+/// 缩放按模型实测包围盒（strider 135.4 / crab 19.4 / blob 0.03 单位高）换算，
+/// 目标尺寸对照原版：strider 高 1.1、crab 高 0.4、blob 高 0.5 格；
+/// y 偏移把模型脚底对齐地面（这些模型原点不在脚底）。
 pub fn spawn_creature(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -68,10 +71,11 @@ pub fn spawn_creature(
     kind: &'static str,
 ) {
     let _ = (body, legs, eye);
-    let (model, scale) = match kind {
-        "crab" => ("models/creatures/crab.glb", 0.5),
-        "blob" => ("models/creatures/blob.glb", 0.85),
-        _ => ("models/creatures/strider.glb", 0.8),
+    // (model, scale, y_offset 脚底对齐)
+    let (model, scale, y_off) = match kind {
+        "crab" => ("models/creatures/crab.glb", 0.4 / 19.42, 8.64 * (0.4 / 19.42)),
+        "blob" => ("models/creatures/blob.glb", 0.5 / 0.03, 0.02 * (0.5 / 0.03)),
+        _ => ("models/creatures/strider.glb", 1.1 / 135.37, 67.52 * (1.1 / 135.37)),
     };
     let (w, h, d) = match kind {
         "crab" => (0.55, 0.4, 0.7),
@@ -80,7 +84,7 @@ pub fn spawn_creature(
     };
     commands.spawn((
         WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(model))),
-        Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
+        Transform::from_translation(pos + Vec3::Y * y_off).with_scale(Vec3::splat(scale)),
         Visibility::default(),
         Creature {
             hp: 3.0,
@@ -334,12 +338,13 @@ pub fn sentinel_system(
                     WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(
                         "models/creatures/sentinel.glb",
                     ))),
+                    // 骷髅实测高 2.17，目标 1.9 格（脚底即模型原点，无需偏移）
                     Transform::from_translation(Vec3::new(
                         x as f32 + 0.5,
                         top as f32 + 1.0,
                         z as f32 + 0.5,
                     ))
-                    .with_scale(Vec3::splat(0.9)),
+                    .with_scale(Vec3::splat(1.9 / 2.17)),
                     Creature {
                         hp: 10.0,
                         radius: 0.6,

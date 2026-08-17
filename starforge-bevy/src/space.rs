@@ -24,6 +24,8 @@ pub const SUN_POS: Vec3 = Vec3::new(6000.0, 2400.0, 1800.0);
 pub const SUN_R: f32 = 450.0;
 pub const EXIT_Y: f32 = 220.0;
 pub const HANDOFF_Y: f32 = 150.0;
+/// 相机远平面：需覆盖远景地形（±1536 格）与太空天体（行星 1500~2600u、星光 9000u）
+pub const CAM_FAR: f32 = 12000.0;
 pub const WRAP_X: f32 = std::f32::consts::PI * 2.0 / 0.004; // ≈1570.8
 pub const WRAP_Z: f32 = 2.3 / 0.004; // =575
 pub const SHIP_BOX: [f32; 3] = [1.6, 1.1, 1.9];
@@ -101,6 +103,8 @@ pub struct ShipState {
     pub pitch: f32,
     pub roll: f32,
     pub cam_roll: f32,
+    /// NMS 式转向侧倾（太空：鼠标横向转向时的视觉银行，模型/相机整体携带）
+    pub vis_bank: f32,
     pub speed: f32,
     pub pulse_charge: f32,
     pub pulsing: bool,
@@ -122,6 +126,7 @@ impl Default for ShipState {
             pitch: 0.0,
             roll: 0.0,
             cam_roll: 0.0,
+            vis_bank: 0.0,
             speed: 0.0,
             pulse_charge: 0.0,
             pulsing: false,
@@ -919,6 +924,7 @@ pub fn start_atmo(from_space: bool, ship: &mut ShipState, game: &SpaceGame, worl
     }
     ship.roll = 0.0;
     ship.cam_roll = 0.0;
+    ship.vis_bank = 0.0;
     ship.warmed = false;
     ship.presaved = false;
     ship.pitch_lim = 1.2;
@@ -997,11 +1003,46 @@ fn ship_voxel_collision(ship: &mut ShipState, world: &VoxelWorld, dt: f32) {
 }
 
 pub fn ship_forward(yaw: f32, pitch: f32) -> Vec3 {
-    Quat::from_euler(EulerRot::YXZ, pitch, yaw, 0.0) * Vec3::NEG_Z
+    Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0) * Vec3::NEG_Z
 }
 
+/// 机体姿态四元数。注意：glam 的 `from_euler(YXZ, a, b, c)` = Ry(a)·Rx(b)·Rz(c)，
+/// 第一个参数绕 Y（偏航）、第二个绕 X（俯仰）——与 three.js Euler(pitch,yaw,roll,'YXZ')
+/// 的参数含义相反，因此这里必须传 (yaw, pitch, roll) 才能得到 Ry(yaw)·Rx(pitch)·Rz(roll)。
 pub fn ship_quat(yaw: f32, pitch: f32, roll: f32) -> Quat {
-    Quat::from_euler(EulerRot::YXZ, pitch, yaw, roll)
+    Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll)
+}
+
+/// NMS 式姿态积分（与 JS `Space.update` / `updateAtmo` 同口径）：
+/// 鼠标俯仰/偏航与 A/D 滚转合成到机体本地轴（`q * dq`，delta 作用于机体局部坐标）。
+/// 输入当前 (yaw, pitch, roll) 与增量 (d_yaw, d_pitch, d_roll)，返回新的 (pitch, yaw, roll)。
+pub fn integrate_attitude(
+    yaw: f32,
+    pitch: f32,
+    roll: f32,
+    d_yaw: f32,
+    d_pitch: f32,
+    d_roll: f32,
+) -> (f32, f32, f32) {
+    let q = ship_quat(yaw, pitch, roll);
+    let dq = Quat::from_euler(EulerRot::YXZ, d_yaw, d_pitch, d_roll);
+    let nq = (q * dq).normalize();
+    // to_euler(YXZ) 返回 (yaw, pitch, roll)（与 from_euler 参数顺序一致）
+    let (ny, np, nr) = nq.to_euler(EulerRot::YXZ);
+    (np, ny, nr)
+}
+
+/// A/D 滚转微调缓慢自动回正（JS `updateAtmo` / `Space.update` 的 camRoll 配平）。
+/// `steer` 为本帧鼠标移动量（|dx|+|dy|），转向时加速配平以掩盖回正动作。
+fn decay_cam_roll(cam_roll: &mut f32, dt: f32, steer: f32, strong: bool) {
+    let mut k = 0.08 + (steer * 0.02).min(0.7);
+    if strong && cam_roll.abs() > 0.5 {
+        k += 1.2;
+    }
+    *cam_roll -= *cam_roll * (dt * k).min(1.0);
+    if cam_roll.abs() < 0.0008 {
+        *cam_roll = 0.0;
+    }
 }
 
 /// E 键触发就地降落。
@@ -1060,17 +1101,17 @@ pub fn atmo_system(
     let dt = time.delta_secs();
     let Some(world) = world else { return };
     let sens = settings.mouse_sens * 0.0022;
-    // 转向
+    // 转向：NMS 式——鼠标俯仰/偏航 + A/D 绕前进轴滚转，均作用于机体本地轴
+    // （JS updateAtmo 同口径：滚转存入 camRoll，模型/相机整体携带、缓慢自动回正）
     let d_roll = (if input.roll_left { 1.7 } else if input.roll_right { -1.7 } else { 0.0 }) * dt;
-    let q = ship_quat(ship.yaw, ship.pitch, ship.cam_roll);
-    let dq = Quat::from_euler(
-        EulerRot::YXZ,
-        input.mouse_dy * -sens,
+    let (np, ny, nr) = integrate_attitude(
+        ship.yaw,
+        ship.pitch,
+        ship.cam_roll,
         input.mouse_dx * -sens,
+        input.mouse_dy * -sens,
         d_roll,
     );
-    let nq = (q * dq).normalize();
-    let (ny, np, nr) = nq.to_euler(EulerRot::YXZ);
     ship.pitch_lim = (ship.pitch_lim - dt * 0.45).clamp(1.2, 1.55);
     ship.pitch = np.clamp(-ship.pitch_lim, ship.pitch_lim);
     ship.yaw = ny;
@@ -1082,8 +1123,12 @@ pub fn atmo_system(
             ship.pitch_floor = None;
         }
     }
+    // 鼠标侧倾（视觉银行）存入真实 roll —— 模型反向携带（JS：Euler z = -atmo.roll）
     let target_roll = input.mouse_dx * -0.04 * settings.mouse_sens;
     ship.roll += (target_roll - ship.roll) * (dt * 5.0).min(1.0);
+    // A/D 滚转微调缓慢自动回正（转向时加速配平）
+    let steer = input.mouse_dx.abs() + input.mouse_dy.abs();
+    decay_cam_roll(&mut ship.cam_roll, dt, steer, true);
     input.mouse_dx = 0.0;
     input.mouse_dy = 0.0;
     // 速度
@@ -1112,8 +1157,8 @@ pub fn atmo_system(
         ship.pos.z += WRAP_Z;
     }
     ship_voxel_collision(&mut ship, &world, dt);
-    // 相机
-    let cam_q = ship_quat(ship.yaw, ship.pitch, 0.0);
+    // 相机：携带 A/D 滚转微调（模型与镜头整体横滚，缓慢自动回正——JS camQ * trim 同口径）
+    let cam_q = ship_quat(ship.yaw, ship.pitch, 0.0) * Quat::from_rotation_z(ship.cam_roll);
     let off = cam_q * Vec3::new(0.0, 3.2, 11.0);
     let mut cam_pos = ship.pos + off;
     if ship.reentry_t > 0.0 {
@@ -1151,6 +1196,11 @@ fn exit_to_space(
     ship.speed = (ship.speed / s).max(12.0);
     ship.warmed = false;
     ship.presaved = false;
+    // 换系：A/D 滚转（camRoll）延续为太空真实滚转；鼠标侧倾（roll）不携带
+    // （JS finishLaunch 把 Euler(pitch,yaw,camRoll) 映射进太空姿态，bank 被 setAttitude 覆盖）
+    ship.roll = ship.cam_roll;
+    ship.cam_roll = 0.0;
+    ship.vis_bank = 0.0;
     *mode = FlightMode::Space;
     crate::audio::play(commands, sfx.laser_hit.clone(), 0.5, None);
 }
@@ -1185,20 +1235,23 @@ pub fn space_system(mut p: SpaceSysParams) {
     }
     let dt = p.time.delta_secs();
     let sens = p.settings.mouse_sens * 0.0022;
-    // 姿态
+    // 姿态：NMS 式——鼠标俯仰/偏航 + A/D 绕前进轴滚转，均作用于机体本地轴
     let d_roll = (if p.input.roll_left { 1.7 } else if p.input.roll_right { -1.7 } else { 0.0 }) * dt;
-    let q = ship_quat(p.ship.yaw, p.ship.pitch, p.ship.roll);
-    let dq = Quat::from_euler(
-        EulerRot::YXZ,
-        p.input.mouse_dy * -sens,
+    let (np, ny, nr) = integrate_attitude(
+        p.ship.yaw,
+        p.ship.pitch,
+        p.ship.roll,
         p.input.mouse_dx * -sens,
+        p.input.mouse_dy * -sens,
         d_roll,
     );
-    let nq = (q * dq).normalize();
-    let (ny, np, nr) = nq.to_euler(EulerRot::YXZ);
     p.ship.pitch = np.clamp(-1.55, 1.55);
     p.ship.yaw = ny;
     p.ship.roll = nr;
+    // 视觉侧倾（NMS 式转向银行）与换系滚转微调 —— 模型/相机整体携带（JS Space.update 同口径）
+    p.ship.vis_bank += (p.input.mouse_dx * -0.045 * p.settings.mouse_sens - p.ship.vis_bank) * (dt * 5.0).min(1.0);
+    let steer = p.input.mouse_dx.abs() + p.input.mouse_dy.abs();
+    decay_cam_roll(&mut p.ship.cam_roll, dt, steer, false);
     p.input.mouse_dx = 0.0;
     p.input.mouse_dy = 0.0;
     // 速度
@@ -1275,8 +1328,9 @@ pub fn space_system(mut p: SpaceSysParams) {
             p.ship.sun_heat_t = 0.0;
         }
     }
-    // 相机
-    let ship_q = ship_quat(p.ship.yaw, p.ship.pitch, p.ship.roll);
+    // 相机（真实滚转 + 转向银行 + 换系滚转微调整体携带，与 JS Space.update 一致）
+    let ship_q = ship_quat(p.ship.yaw, p.ship.pitch, p.ship.roll)
+        * Quat::from_rotation_z(p.ship.cam_roll + p.ship.vis_bank);
     let cam_off = ship_q * Vec3::new(0.0, 3.2, 11.0);
     let target_fov = 75.0 - 5.0 + (p.ship.speed / PULSE_SPEED) * 40.0 + if p.input.boost { 6.0 } else { 0.0 };
     *p.flight_cam = FlightCamera::set(p.ship.pos + cam_off, ship_q, target_fov);
@@ -1453,6 +1507,8 @@ pub fn warp_system(
         ship.speed = 4800.0;
     }
     ship.roll = 0.0;
+    ship.cam_roll = 0.0;
+    ship.vis_bank = 0.0;
     let q = ship_quat(ship.yaw, ship.pitch, ship.roll);
     let fwd = ship_forward(ship.yaw, ship.pitch);
     let sp = ship.speed;
@@ -1501,6 +1557,8 @@ fn finish_warp(
     ship.yaw = 0.0;
     ship.pitch = 0.0;
     ship.roll = 0.0;
+    ship.cam_roll = 0.0;
+    ship.vis_bank = 0.0;
     ship.pulsing = false;
     ship.pulse_charge = 0.0;
     flag_ev.write(FlagEvent { flag: "warpedOut".into() });
@@ -1553,7 +1611,10 @@ fn enter_planet(
     ship.pitch_lim = ship.pitch.abs().clamp(1.2, 1.55);
     ship.pitch_floor = Some(-0.4);
     ship.speed = (ship.speed / s).min(110.0);
+    // 换系：太空滚转延续为大气滚转微调（JS 再入把 Space 姿态映射进 atmo.camRoll，缓慢回正）
+    ship.cam_roll = ship.roll;
     ship.roll = 0.0;
+    ship.vis_bank = 0.0;
     ship.warmed = false;
     ship.presaved = false;
     ship.pulsing = false;
@@ -1642,6 +1703,7 @@ pub fn flight_camera_system(
         tf.rotation = flight_cam.rot;
         *proj = Projection::Perspective(PerspectiveProjection {
             fov: flight_cam.fov.to_radians(),
+            far: CAM_FAR,
             ..default()
         });
     }
@@ -1706,7 +1768,19 @@ pub fn ship_sync_system(
     let Some(e) = ship_asset.entity else { return };
     let Ok(mut tf) = q.get_mut(e) else { return };
     tf.translation = ship.pos;
-    tf.rotation = ship_quat(ship.yaw, ship.pitch, ship.roll);
+    // 模型姿态与相机同源（JS shipGroup.quaternion 口径）：
+    // 大气层：Euler(pitch, yaw, -roll)（鼠标侧倾反向展示）+ A/D 滚转微调整体携带；
+    // 太空：真实滚转 + 转向银行 + 换系滚转微调。
+    tf.rotation = match *mode {
+        FlightMode::Atmo | FlightMode::AtmoLand => {
+            ship_quat(ship.yaw, ship.pitch, -ship.roll) * Quat::from_rotation_z(ship.cam_roll)
+        }
+        FlightMode::Space | FlightMode::Warping => {
+            ship_quat(ship.yaw, ship.pitch, ship.roll)
+                * Quat::from_rotation_z(ship.cam_roll + ship.vis_bank)
+        }
+        _ => ship_quat(ship.yaw, ship.pitch, ship.roll),
+    };
     let flame_scale = 0.4 + ship.speed / MAX_SPEED * 0.8 + if ship.pulsing { 2.0 } else { 0.0 };
     for f in &ship_asset.flames {
         if let Ok(mut ftf) = q.get_mut(*f) {
@@ -1850,5 +1924,67 @@ mod tests {
         let z2 = lat2 / 0.004;
         assert!((x2 - vx).abs() < 0.01, "x {x2} vs {vx}");
         assert!((z2 - vz).abs() < 0.01, "z {z2} vs {vz}");
+    }
+
+    #[test]
+    fn attitude_roll_is_pure_roll() {
+        // A/D 滚转：水平姿态下是纯 roll，不污染俯仰/偏航
+        let (np, ny, nr) = integrate_attitude(0.0, 0.0, 0.0, 0.0, 0.0, 0.1);
+        assert!(np.abs() < 1e-5 && ny.abs() < 1e-5 && (nr - 0.1).abs() < 1e-4, "{np} {ny} {nr}");
+        // 已有横滚/俯仰时继续滚转仍是纯 roll
+        let (np, ny, nr) = integrate_attitude(0.5, 0.3, 0.7, 0.0, 0.0, 0.1);
+        assert!(
+            (np - 0.3).abs() < 1e-4 && (ny - 0.5).abs() < 1e-4 && (nr - 0.8).abs() < 1e-3,
+            "{np} {ny} {nr}"
+        );
+    }
+
+    #[test]
+    fn attitude_mouse_acts_on_local_axes() {
+        // 鼠标俯仰作用于机体本地轴：水平姿态下保持正交
+        let (np, ny, nr) = integrate_attitude(0.0, 0.0, 0.0, 0.05, 0.1, 0.0);
+        assert!((np - 0.1).abs() < 1e-4 && (ny - 0.05).abs() < 1e-4 && nr.abs() < 1e-4, "{np} {ny} {nr}");
+        // 横滚 90° 后（左滚），本地俯仰增量在欧拉分解中表现为偏航（机头向左）——而非污染 roll
+        let (np, ny, nr) = integrate_attitude(0.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0, 0.05, 0.0);
+        assert!((ny - 0.05).abs() < 2e-3, "yaw {ny}");
+        assert!(np.abs() < 2e-3, "pitch {np}");
+        assert!((nr - std::f32::consts::FRAC_PI_2).abs() < 2e-3, "roll {nr}");
+    }
+
+    #[test]
+    fn quat_convention_probe() {
+        // 回归：glam `from_euler(YXZ, a, b, c)` = Ry(a)·Rx(b)·Rz(c) ——
+        // ship_quat 必须传 (yaw, pitch, roll) 才能与 three.js Euler(pitch,yaw,roll,'YXZ') 一致。
+        // （此前传 (pitch, yaw, roll) 导致鼠标俯仰/偏航轴互换、飞行操控错乱）
+        let q = Quat::from_euler(EulerRot::YXZ, 0.05, 0.0, 0.0);
+        let (axis, ang) = q.to_axis_angle();
+        assert!(axis.distance(Vec3::Y) < 1e-4 && (ang - 0.05).abs() < 1e-4, "{axis:?} {ang}");
+        let q2 = Quat::from_euler(EulerRot::YXZ, 0.0, 0.05, 0.0);
+        let (axis2, ang2) = q2.to_axis_angle();
+        assert!(axis2.distance(Vec3::X) < 1e-4 && (ang2 - 0.05).abs() < 1e-4, "{axis2:?} {ang2}");
+        let q3 = Quat::from_euler(EulerRot::YXZ, 0.0, 0.0, 0.05);
+        let (axis3, ang3) = q3.to_axis_angle();
+        assert!(axis3.distance(Vec3::Z) < 1e-4 && (ang3 - 0.05).abs() < 1e-4, "{axis3:?} {ang3}");
+        // ship_quat：机头方向与地面 look_dir 公式一致（yaw 绕世界 Y、pitch 绕本地 X）
+        let fwd = ship_quat(0.3, 0.2, 0.0) * Vec3::NEG_Z;
+        let expect = Vec3::new(
+            -0.3f32.sin() * 0.2f32.cos(),
+            0.2f32.sin(),
+            -0.3f32.cos() * 0.2f32.cos(),
+        );
+        assert!(fwd.distance(expect) < 1e-4, "{fwd:?} vs {expect:?}");
+    }
+
+    #[test]
+    fn attitude_mouse_delta_signs() {
+        // 鼠标右移 → 偏航减小（与地面 look_system 方向一致）；鼠标上移 → 俯仰增大
+        let (_, ny, _) = integrate_attitude(0.0, 0.0, 0.0, -0.01, 0.0, 0.0);
+        assert!(ny < 0.0, "right mouse should decrease yaw, got {ny}");
+        let (np, _, _) = integrate_attitude(0.0, 0.0, 0.0, 0.0, 0.01, 0.0);
+        assert!(np > 0.0, "mouse up should increase pitch, got {np}");
+        // A（rollLeft）正 → 向左滚转；D（rollRight）负 → 向右滚转
+        let (_, _, nr_a) = integrate_attitude(0.0, 0.0, 0.0, 0.0, 0.0, 0.01);
+        let (_, _, nr_d) = integrate_attitude(0.0, 0.0, 0.0, 0.0, 0.0, -0.01);
+        assert!(nr_a > 0.0 && nr_d < 0.0, "A positive roll, D negative roll: {nr_a} {nr_d}");
     }
 }

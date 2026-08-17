@@ -20,9 +20,10 @@ mod world;
 
 use bevy::prelude::*;
 use bevy::camera::primitives::Aabb;
-use bevy::camera::visibility::NoAutoAabb;
+use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::window::{CursorOptions, PresentMode};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use materials::{TerrainMat, TerrainMaterials};
@@ -343,6 +344,10 @@ fn main() {
         .add_systems(
             Update,
             space::ship_parked_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            far_mesh_system.run_if(in_state(GameState::Playing)),
         );
     if smoke {
         // self-test mode: auto-start a world and exit after a few seconds
@@ -431,9 +436,20 @@ fn startup(
             Msaa::Off,
             Projection::Perspective(PerspectiveProjection {
                 fov: 75f32.to_radians(),
+                far: space::CAM_FAR,
                 ..default()
             }),
             Transform::from_xyz(96.0, 90.0, 96.0),
+            // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘与曲率变形
+            DistanceFog {
+                color: Color::srgb(0.7, 0.85, 1.0),
+                directional_light_color: Color::WHITE,
+                directional_light_exponent: 1.0,
+                falloff: FogFalloff::Linear {
+                    start: 90.0,
+                    end: 1050.0,
+                },
+            },
         ))
         .id();
     // 像素风低分辨率渲染：3D 相机渲染到 640×360 目标，UI 相机全屏最近邻放大
@@ -1366,11 +1382,16 @@ fn stream_world_step(
                 if let Some(e) = c.water_mesh {
                     commands.entity(e).despawn();
                 }
+                // AABB 需覆盖曲率顶点位移（着色器按 0.002·r² 下压，视距外缘可达上百格），
+                // 否则高空时远景区块被视锥剔除、边缘地形闪烁
+                let y_min = -160.0
+                    - 0.002 * ((world.view_dist + 2) as f32 * crate::data::CHUNK as f32 + 16.0).powi(2)
+                    - 8.0;
                 let c = world.chunks.get_mut(&key).unwrap();
                 c.mesh =
-                    solid_m.map(|m| spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.solid.clone(), false));
+                    solid_m.map(|m| spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.solid.clone(), false, y_min));
                 c.water_mesh =
-                    water_m.map(|m| spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.water.clone(), true));
+                    water_m.map(|m| spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.water.clone(), true, y_min));
                 c.dirty = false;
                 mesh_left -= 1;
                 if mesh_left == 0 {
@@ -1431,6 +1452,7 @@ fn spawn_chunk_mesh(
     vm: VoxelMesh,
     mat: Handle<TerrainMat>,
     water: bool,
+    y_min: f32,
 ) -> Entity {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -1443,7 +1465,7 @@ fn spawn_chunk_mesh(
     mesh.insert_indices(Indices::U32(vm.indices));
     let handle = meshes.add(mesh);
     let aabb = Aabb::from_min_max(
-        Vec3::new(cx as f32 * 16.0, -160.0, cz as f32 * 16.0),
+        Vec3::new(cx as f32 * 16.0, y_min, cz as f32 * 16.0),
         Vec3::new(cx as f32 * 16.0 + 16.0, 130.0, cz as f32 * 16.0 + 16.0),
     );
     commands
@@ -1497,7 +1519,135 @@ fn stream_system(
     );
     world.last_pcx = pcx;
     world.last_pcz = pcz;
-    world.stream_dirty = world.chunks.values().any(|c| c.dirty);
+    world.stream_dirty = world
+        .chunks
+        .values()
+        .any(|c| c.dirty && World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 3);
+}
+
+// ---------- 远景模拟地形（JS farMesh 移植） ----------
+
+/// 远景地形状态：±1536 格低细节高度场，跟随玩家分帧重建；
+/// 缺失时高空/远望的地表在视距边缘戛然而止，曲率变形与区块流式边缘完全暴露（巨大闪动/残影）。
+#[derive(Component)]
+struct FarMesh {
+    /// 已完成的网格中心（世界坐标，按 FAR_SNAP 对齐）
+    cx: f32,
+    cz: f32,
+    seed: u32,
+    /// 待填充的下一行（< FAR_N 表示正在重建）
+    row: usize,
+    target_cx: f32,
+    target_cz: f32,
+    mesh: Handle<Mesh>,
+}
+
+/// 远景挖空环（JS farHoleU 同口径）：玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
+fn far_hole_radii(view_dist: i32) -> (f32, f32) {
+    let r1 = view_dist as f32 * 16.0 - 8.0;
+    let r0 = (r1 - 90.0).max(56.0);
+    (r0, r1)
+}
+
+fn far_mesh_system(
+    mut commands: Commands,
+    world: Res<World>,
+    player: Query<&Player>,
+    ship: Res<ShipState>,
+    mode: Res<FlightMode>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mats: Res<TerrainMaterials>,
+    atlas: Res<AtlasRes>,
+    mut far_q: Query<(Entity, &mut FarMesh, &mut Visibility, &mut MeshMaterial3d<TerrainMat>)>,
+) {
+    let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
+        (ship.pos.x, ship.pos.z)
+    } else {
+        match player.single() {
+            Ok(p) => (p.pos.x, p.pos.z),
+            Err(_) => return,
+        }
+    };
+    let show = mode.ground_scene();
+    let tcx = (px / world::FAR_SNAP).round() * world::FAR_SNAP;
+    let tcz = (pz / world::FAR_SNAP).round() * world::FAR_SNAP;
+    if let Ok((e, mut fm, mut vis, mut mmat)) = far_q.single_mut() {
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        // 换球/读档：世界种子变化 → 整体重刷
+        if fm.seed != world.seed {
+            fm.seed = world.seed;
+            fm.target_cx = tcx;
+            fm.target_cz = tcz;
+            fm.row = 0;
+        }
+        if fm.row >= world::FAR_N && (tcx != fm.cx || tcz != fm.cz) {
+            fm.target_cx = tcx;
+            fm.target_cz = tcz;
+            fm.row = 0;
+        }
+        if fm.row < world::FAR_N {
+            let from = fm.row;
+            let to = (fm.row + world::FAR_ROWS_PER_FRAME).min(world::FAR_N);
+            if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
+                world::fill_far_rows(&world, &atlas.atlas, fm.target_cx, fm.target_cz, from, to, &mut mesh);
+            }
+            fm.row = to;
+            if fm.row >= world::FAR_N {
+                fm.cx = fm.target_cx;
+                fm.cz = fm.target_cz;
+            }
+        }
+        // 挖空环：以玩家为中心逐帧更新顶点 alpha（远景在视距内淡出，不遮挡真实区块/玩家挖掘）
+        if show {
+            let (r0, r1) = far_hole_radii(world.view_dist);
+            let r0_2 = r0 * r0;
+            let r1_2 = r1 * r1;
+            let span = (r1_2 - r0_2).max(1e-4);
+            if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
+                use bevy::mesh::VertexAttributeValues;
+                if let Some(VertexAttributeValues::Float32x4(colors)) =
+                    mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
+                {
+                    for (i, c) in colors.iter_mut().enumerate() {
+                        let ix = (i % world::FAR_N) as f32;
+                        let iz = (i / world::FAR_N) as f32;
+                        let wx = fm.cx - (world::FAR_N as f32 - 1.0) / 2.0 * world::FAR_STEP + ix * world::FAR_STEP;
+                        let wz = fm.cz - (world::FAR_N as f32 - 1.0) / 2.0 * world::FAR_STEP + iz * world::FAR_STEP;
+                        let d2 = (wx - px) * (wx - px) + (wz - pz) * (wz - pz);
+                        let t = ((d2 - r0_2) / span).clamp(0.0, 1.0);
+                        c[3] = t * t * (3.0 - 2.0 * t);
+                    }
+                }
+            }
+        }
+        if mmat.0 != mats.far {
+            mmat.0 = mats.far.clone();
+        }
+        let _ = e;
+    } else if show {
+        let handle = meshes.add(world::build_far_mesh(&world, &atlas.atlas, tcx, tcz));
+        commands.spawn((
+            Mesh3d(handle.clone()),
+            MeshMaterial3d(mats.far.clone()),
+            Transform::default(),
+            Visibility::Visible,
+            FarMesh {
+                cx: tcx,
+                cz: tcz,
+                seed: world.seed,
+                row: world::FAR_N,
+                target_cx: tcx,
+                target_cz: tcz,
+                mesh: handle,
+            },
+            NoFrustumCulling,
+            InGame,
+        ));
+    }
 }
 
 // ---------- 星球切换（无缝再入） ----------

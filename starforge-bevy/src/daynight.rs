@@ -1,9 +1,11 @@
 //! Day/night cycle, sky color, sun light, stars & space preview.
 
 use crate::player::Player;
+use crate::space::FlightMode;
 use crate::world::World;
-use bevy::prelude::*;
 use bevy::light::GlobalAmbientLight;
+use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::prelude::*;
 
 /// Day time in [0,1): 0.25 = noon, 0.75 = midnight.
 #[derive(Resource)]
@@ -46,6 +48,8 @@ pub fn daynight_system(
     world: Option<Res<World>>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut space: ResMut<SpaceFactor>,
+    mode: Res<FlightMode>,
+    mut fog_q: Query<&mut DistanceFog, (With<Camera3d>, Without<Player>)>,
 ) {
     day.0 = (day.0 + time.delta_secs() / 600.0) % 1.0; // 10 min full cycle
     let f = day_factor(day.0);
@@ -90,6 +94,22 @@ pub fn daynight_system(
     sky = lerp_color(sky, space_black, sf);
     clear.0 = sky;
 
+    // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘与曲率变形；
+    // 太空/空间站模式关闭（太空场景自带黑背景与星光）
+    let alt_f = ((cam_y - 80.0) / 170.0).clamp(0.0, 1.0);
+    let fog_color = lerp_color(sky, Color::WHITE, 0.15 * f * (1.0 - sf));
+    for mut fog in &mut fog_q {
+        if mode.space_scene() {
+            fog.falloff = FogFalloff::Linear { start: 1e9, end: 1e9 };
+        } else {
+            fog.falloff = FogFalloff::Linear {
+                start: 90.0 + alt_f * 260.0,
+                end: 1050.0 + alt_f * 650.0,
+            };
+            fog.color = fog_color;
+        }
+    }
+
     let day_amb = Color::srgb(0.75, 0.8, 0.9);
     let night_amb = Color::srgb(0.16, 0.17, 0.26);
     ambient.color = lerp_color(day_amb, night_amb, 1.0 - f);
@@ -119,6 +139,7 @@ pub fn spawn_sky(
             base_color: Color::srgb(2.0, 1.7, 1.2),
             emissive: LinearRgba::new(1.0, 0.85, 0.6, 1.0) * 2.0,
             unlit: true,
+            fog_enabled: false,
             ..default()
         })),
         Transform::from_xyz(0.0, 850.0, 0.0),
@@ -130,6 +151,7 @@ pub fn spawn_sky(
         base_color: Color::WHITE,
         emissive: LinearRgba::WHITE * 1.5,
         unlit: true,
+        fog_enabled: false,
         ..default()
     });
     let quad = meshes.add(Plane3d::default().mesh().size(3.0, 3.0));

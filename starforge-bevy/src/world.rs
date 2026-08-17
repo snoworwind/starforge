@@ -4,6 +4,7 @@
 use crate::data::{self, ids, Biome, CHUNK, SEA, WORLD_H};
 use crate::rng::{hash2, vnoise3, Noise2, Rng};
 use bevy::math::Vec3;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use std::collections::HashMap;
 
@@ -1247,6 +1248,153 @@ fn emit_quad_col(
     m.indices.push(base + 2);
     m.indices.push(base + 1);
     m.indices.push(base + 3);
+}
+
+// ---------- 远景模拟地形（JS ensureFarMesh / tickFar 移植） ----------
+// 流式区块视距之外的地表被一张低细节高度场网格覆盖（纯噪声高度 + 地表瓦片平均色），
+// 否则高空视角下地形在视距边缘戛然而止，曲率变形与区块流式边缘完全暴露（巨大闪动/残影）。
+
+pub const FAR_N: usize = 129; // 129×129 顶点
+pub const FAR_STEP: f32 = 24.0; // 格/单元 → ±1536 格视距
+pub const FAR_SNAP: f32 = 64.0; // 中心对齐（格，跨格才重建）
+pub const FAR_ROWS_PER_FRAME: usize = 12; // 每帧填充行数（分帧重建避免卡顿）
+pub const FAR_SINK: f32 = 2.2; // 下沉偏置：近处由真实区块覆盖
+
+/// 地表瓦片平均色（与 JS `tileAvgColor` 同口径；瓦片缺失时给中性绿）。
+fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
+    let Some(&idx) = atlas.index.get(tile) else {
+        return [0.5, 0.6, 0.4];
+    };
+    let t = &atlas.tiles[idx];
+    let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+    for p in t.iter() {
+        r += p[0] as u32;
+        g += p[1] as u32;
+        b += p[2] as u32;
+    }
+    let n = t.len() as f32 * 255.0;
+    [r as f32 / n, g as f32 / n, b as f32 / n]
+}
+
+/// 填充远景地形网格的行 `[from, to)`（原地修改，其余行保留原值）。
+/// 高度/地表色与 JS `mapHeightAt` / `mapColorRGB` 同口径（纯噪声高度、海平面抬升、地表瓦片平均色）。
+/// 顶点 alpha 留给挖空环（由 far_mesh_system 按玩家位置逐帧更新），这里恒为 1。
+pub fn fill_far_rows(
+    world: &World,
+    atlas: &crate::textures::Atlas,
+    cx: f32,
+    cz: f32,
+    from: usize,
+    to: usize,
+    mesh: &mut Mesh,
+) {
+    use bevy::mesh::VertexAttributeValues;
+    let n = FAR_N * FAR_N;
+    let mut positions: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(VertexAttributeValues::Float32x3(v)) => v.clone(),
+        _ => vec![[0.0; 3]; n],
+    };
+    let mut colors: Vec<[f32; 4]> = match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+        Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
+        _ => vec![[1.0; 4]; n],
+    };
+    let g = &world.g;
+    let b = g.biome;
+    let seab = g.sea() as f32;
+    let wt = b.water_tint;
+    let water_rgb = [
+        ((wt >> 16) & 0xFF) as f32 / 255.0,
+        ((wt >> 8) & 0xFF) as f32 / 255.0,
+        (wt & 0xFF) as f32 / 255.0,
+    ];
+    let no_beach = matches!(
+        b.grass,
+        "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
+    );
+    let land_tile = match b.grass {
+        "grass" => "grass_top",
+        "snow" => "snow_top",
+        "alien" => "alien_top",
+        "murk" => "murk_top",
+        k => k,
+    };
+    let land_avg = far_tile_avg(atlas, land_tile);
+    let sand_avg = far_tile_avg(atlas, "sand");
+    let half = (FAR_N as f32 - 1.0) / 2.0 * FAR_STEP;
+    let to = to.min(FAR_N);
+    for iz in from..to {
+        let wz = cz - half + iz as f32 * FAR_STEP;
+        for ix in 0..FAR_N {
+            let wx = cx - half + ix as f32 * FAR_STEP;
+            let h = g.height_at(wx.floor(), wz.floor()) as f32;
+            let (y, col) = if h < seab && (!b.dry || b.lava) {
+                let depth = (seab - h).max(0.0);
+                let sh = (0.78 - depth * 0.008).clamp(0.0, 1.0);
+                (seab, [water_rgb[0] * sh, water_rgb[1] * sh, water_rgb[2] * sh, 1.0])
+            } else {
+                let avg = if h < seab + 1.0 && !no_beach { sand_avg } else { land_avg };
+                let sh = (0.72 + (h - 14.0) * 0.012).clamp(0.0, 1.35);
+                (
+                    h,
+                    [
+                        (avg[0] * sh).min(1.0),
+                        (avg[1] * sh).min(1.0),
+                        (avg[2] * sh).min(1.0),
+                        1.0,
+                    ],
+                )
+            };
+            let i = iz * FAR_N + ix;
+            positions[i] = [wx, y - FAR_SINK, wz];
+            colors[i] = col;
+        }
+    }
+    // 法线：从高度场重算（边界行取自身差分，避免越界）
+    let mut normals: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+        Some(VertexAttributeValues::Float32x3(v)) => v.clone(),
+        _ => vec![[0.0, 1.0, 0.0]; n],
+    };
+    let y_at = |ix: usize, iz: usize| positions[iz * FAR_N + ix][1];
+    for iz in 0..FAR_N {
+        for ix in 0..FAR_N {
+            let h_l = if ix > 0 { y_at(ix - 1, iz) } else { y_at(ix, iz) };
+            let h_r = if ix + 1 < FAR_N { y_at(ix + 1, iz) } else { y_at(ix, iz) };
+            let h_d = if iz > 0 { y_at(ix, iz - 1) } else { y_at(ix, iz) };
+            let h_u = if iz + 1 < FAR_N { y_at(ix, iz + 1) } else { y_at(ix, iz) };
+            let norm = Vec3::new(h_l - h_r, 2.0 * FAR_STEP, h_d - h_u).normalize();
+            normals[iz * FAR_N + ix] = [norm.x, norm.y, norm.z];
+        }
+    }
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+}
+
+/// 创建远景地形网格（129×129 高度场，±1536 格视距，顶点色为地表色）。
+/// 使用默认 RenderAssetUsages（含 MAIN_WORLD），以便渲染后仍可原地更新顶点。
+pub fn build_far_mesh(world: &World, atlas: &crate::textures::Atlas, cx: f32, cz: f32) -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    let mut indices: Vec<u32> = Vec::with_capacity((FAR_N - 1) * (FAR_N - 1) * 6);
+    for iz in 0..(FAR_N as u32 - 1) {
+        for ix in 0..(FAR_N as u32 - 1) {
+            let a = iz * FAR_N as u32 + ix;
+            let b = a + 1;
+            let c = a + FAR_N as u32;
+            let d = c + 1;
+            indices.push(a);
+            indices.push(c);
+            indices.push(b);
+            indices.push(b);
+            indices.push(c);
+            indices.push(d);
+        }
+    }
+    mesh.insert_indices(Indices::U32(indices));
+    fill_far_rows(world, atlas, cx, cz, 0, FAR_N, &mut mesh);
+    mesh
 }
 
 #[cfg(test)]

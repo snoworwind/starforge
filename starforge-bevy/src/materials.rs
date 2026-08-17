@@ -189,7 +189,7 @@ pub struct LampPool {
 pub fn lamp_pool_system(
     time: Res<Time>,
     mut pool: ResMut<LampPool>,
-    mut lights: Query<&mut PointLight>,
+    mut lights: Query<(&mut PointLight, &mut Transform)>,
     world: Res<crate::world::World>,
     player: Query<&crate::player::Player>,
 ) {
@@ -235,16 +235,14 @@ pub fn lamp_pool_system(
         _ => (0xff as f32, 0xd9 as f32, 0xa0 as f32),
     };
     for (i, e) in pool.entities.iter().enumerate() {
-        let Ok(mut l) = lights.get_mut(*e) else { continue };
+        let Ok((mut l, mut tf)) = lights.get_mut(*e) else { continue };
         if let Some((_, cell, id)) = found.get(i) {
+            // JS: l.position.set(x+0.5, y+0.9, z+0.5) —— 光必须跟随灯块
+            tf.translation = Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.9, cell[2] as f32 + 0.5);
             let (r, g, b) = glow_color(crate::data::block_by_id(*id).key);
             l.color = Color::srgb(r / 255.0, g / 255.0, b / 255.0);
             l.intensity = 220.0;
             l.range = 11.0;
-            if let Some(t) = pool.entities.first() {
-                let _ = t;
-            }
-            let _ = cell;
         } else {
             l.intensity = 0.0;
         }

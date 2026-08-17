@@ -206,16 +206,16 @@ pub fn quest_tick_system(
         }
         quests.tick_announce(dt, &p);
     }
-    // 主线对话框打字机
+    // 主线对话框打字机（JS 26 字符/秒）
     if let Some(d) = quests.dialog.as_mut() {
-        d.chars += (dt * 90.0) as usize;
+        d.chars += (dt * 26.0) as usize;
         let cur = &d.lines[d.idx];
         if d.chars > cur.chars().count() + 8 {
             d.chars = cur.chars().count();
         }
     }
     if let Some(d) = quests.side_dialog.as_mut() {
-        d.chars += (dt * 90.0) as usize;
+        d.chars += (dt * 26.0) as usize;
         let cur = &d.lines[d.idx];
         if d.chars > cur.chars().count() + 8 {
             d.chars = cur.chars().count();
@@ -309,9 +309,8 @@ pub fn village_side_quest_system(
     player: Query<&Player>,
     world: Option<Res<crate::world::World>>,
     ui: Res<crate::ui::UiState>,
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     if *mode != crate::space::FlightMode::Planet {
         return;
@@ -344,12 +343,10 @@ pub fn village_side_quest_system(
         let app = crate::save::Appearance::random((vx as u32) ^ (vz as u32));
         let human = crate::char::spawn_humanoid(
             &mut commands,
-            &mut meshes,
-            &mut mats,
+            &asset_server,
             &app,
             villager_pos,
             std::f32::consts::PI,
-            |_, _, _, _| {},
         );
         quests.villager = Some(human.root);
         quests.villager_pos = Some(villager_pos);

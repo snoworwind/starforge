@@ -51,7 +51,7 @@ pub fn daynight_system(
     mode: Res<FlightMode>,
     mut fog_q: Query<&mut DistanceFog, (With<Camera3d>, Without<Player>)>,
 ) {
-    day.0 = (day.0 + time.delta_secs() / 600.0) % 1.0; // 10 min full cycle
+    day.0 = (day.0 + time.delta_secs() / 480.0) % 1.0; // JS DAY_LEN=480s 全周期
     let f = day_factor(day.0);
 
     for (mut tf, mut light) in &mut sun_q {

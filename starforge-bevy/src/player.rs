@@ -88,6 +88,10 @@ pub struct Player {
     pub toasts: Vec<(String, f32)>,
     pub play_time: f32,
     pub appearance: crate::save::Appearance,
+    /// 危险低值警报计时（JS hazBeepT）
+    pub haz_beep_t: f32,
+    /// 「需要采矿激光」提示计时（JS noLaserHintT）
+    pub no_laser_t: f32,
 }
 
 impl Player {
@@ -114,6 +118,8 @@ impl Player {
             toasts: Vec::new(),
             play_time: 0.0,
             appearance: crate::save::Appearance::default(),
+            haz_beep_t: 0.0,
+            no_laser_t: 0.0,
         }
     }
 
@@ -266,10 +272,16 @@ pub fn movement_system(
     mut q: Query<&mut Player>,
     ui: Res<UiState>,
     world: Res<World>,
+    mut commands: Commands,
+    sfx: Res<audio::Sfx>,
 ) {
     let dt = time.delta_secs();
     for mut p in &mut q {
         if p.dead || ui.locked() {
+            // 面板/死亡时停喷气音
+            if let Some(e) = p.jet_entity.take() {
+                commands.entity(e).despawn();
+            }
             continue;
         }
         let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -325,9 +337,20 @@ pub fn movement_system(
             if space && p.on_ground {
                 p.vel.y = 7.4;
                 p.on_ground = false;
+                audio::play(&mut commands, sfx.jump.clone(), 0.5, None);
             } else if space && !p.on_ground && p.stats.jet > 0.0 {
                 p.vel.y = (p.vel.y + 33.0 * dt).min(8.5);
                 p.stats.jet = (p.stats.jet - 28.0 * dt).max(0.0);
+            }
+        }
+        // 喷气背包循环音（JS Sound.loops.jet 启停）
+        let jetting = keys.pressed(KeyCode::Space) && !p.on_ground && p.stats.jet > 0.0;
+        if jetting && p.jet_entity.is_none() {
+            let e = audio::play_loop(&mut commands, sfx.jet.clone(), 0.35);
+            p.jet_entity = Some(e);
+        } else if !jetting {
+            if let Some(e) = p.jet_entity.take() {
+                commands.entity(e).despawn();
             }
         }
         if p.on_ground {
@@ -418,6 +441,7 @@ pub fn survival_system(
     world: Res<World>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
+    ui: Res<crate::ui::UiState>,
 ) {
     let dt = time.delta_secs();
     for mut p in &mut q {
@@ -433,13 +457,35 @@ pub fn survival_system(
             }
             continue;
         }
+        // 面板打开时冻结生存消耗（JS: Player.update(dt*0)）
+        if ui.locked() {
+            continue;
+        }
         let biome = world.biome();
-        if p.in_liquid && !p.creative() {
+        // O₂ 无条件消耗（JS player.js:700）——与是否在水中无关
+        if !p.creative() {
             p.stats.o2 = (p.stats.o2 - 0.35 * dt).max(0.0);
+            if p.stats.o2 <= 0.0 {
+                p.dmg_acc += dt * 0.5;
+            }
+            // 危险低值警报（JS: haz<25 每 3s 提示）
+            if p.stats.haz < 25.0 {
+                p.haz_beep_t += dt;
+                if p.haz_beep_t > 3.0 {
+                    p.haz_beep_t = 0.0;
+                    audio::play(&mut commands, sfx.error.clone(), 0.35, None);
+                    p.toast("⚠ 危险防护不足");
+                }
+            } else {
+                p.haz_beep_t = 0.0;
+            }
         }
         if p.creative() {
             p.stats.haz = 100.0;
             p.stats.o2 = 100.0;
+            p.stats.shield = 6.0;
+            p.stats.hp = 8.0;
+            p.stats.laser = 100.0;
         } else if biome.haz.is_some() {
             p.stats.haz = (p.stats.haz - biome.haz_rate * dt).max(0.0);
         } else {
@@ -447,9 +493,6 @@ pub fn survival_system(
         }
         if p.stats.o2 > 20.0 && p.stats.haz > 10.0 {
             p.stats.shield = (p.stats.shield + 0.15 * dt).min(6.0);
-        }
-        if p.stats.o2 <= 0.0 && p.in_liquid {
-            p.dmg_acc += dt * 0.5;
         }
         if p.stats.haz <= 0.0 && biome.haz.is_some() {
             p.dmg_acc += dt * 0.4;
@@ -517,8 +560,33 @@ pub fn mining_system(
             p.mining = None;
             continue;
         }
-        let firing = p.hot_idx == -1 && mouse.pressed(MouseButton::Left);
+        let laser_selected = p.hot_idx == -1;
+        let firing = laser_selected && mouse.pressed(MouseButton::Left);
         if !firing {
+            // JS：非激光选中 + 左键对准可挖掘方块 → 「需要采矿激光」提示（1s 间隔）
+            if mouse.pressed(MouseButton::Left) && !laser_selected {
+                let origin = p.eye();
+                let dir = p.look_dir();
+                let mineable = world
+                    .raycast(origin, dir, 6.0)
+                    .map(|(cell, _, _)| {
+                        let def = data::block_by_id(world.get(cell[0], cell[1], cell[2]));
+                        def.hard.is_finite() && def.hard > 0.0
+                    })
+                    .unwrap_or(false);
+                if mineable {
+                    p.no_laser_t += dt;
+                    if p.no_laser_t > 1.0 {
+                        p.no_laser_t = -1.5;
+                        audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+                        p.toast("需要采矿激光：按 0 或滚轮切换到激光枪");
+                    }
+                } else {
+                    p.no_laser_t = 0.0;
+                }
+            } else {
+                p.no_laser_t = 0.0;
+            }
             p.mining = None;
             continue;
         }
@@ -790,6 +858,7 @@ pub fn break_system(
     mut queue: ResMut<BreakQueue>,
     mut world: ResMut<World>,
     mut q: Query<&mut Player>,
+    machines: Query<(Entity, &crate::factory::Machine, &crate::factory::MachineState)>,
     mut commands: Commands,
     icons: Res<crate::ui::IconMaterials>,
 ) {
@@ -799,9 +868,44 @@ pub fn break_system(
                 ^ (cell[2] as u32).wrapping_mul(19349663)
                 ^ (cell[1] as u32),
         );
+        // 拆机内容返还（JS Factory.remove 退款），实体由 machine_sync_system 兜底清理
+        if let Some((e, _m, st)) = machines.iter().find(|(_, m, _)| m.pos == cell) {
+            for (item, n) in crate::factory::machine_refund(st) {
+                spawn_drop(
+                    &mut commands,
+                    &world,
+                    &icons,
+                    Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5),
+                    Vec3::new((rng.next() - 0.5) * 2.2, 2.6, (rng.next() - 0.5) * 2.2),
+                    item,
+                    n,
+                    0.4,
+                );
+            }
+            commands.entity(e).despawn();
+        }
         world.set(cell[0], cell[1], cell[2], ids::AIR);
         let above = world.get(cell[0], cell[1] + 1, cell[2]);
         if data::block_by_id(above).cross {
+            // 上方十字植物一并掉落（JS player.js:968-972）
+            let plant = data::block_by_id(above);
+            for d in plant.drops {
+                if rng.next() <= d.chance {
+                    let n = (d.n as f32 * mult).round() as i32;
+                    if n > 0 {
+                        spawn_drop(
+                            &mut commands,
+                            &world,
+                            &icons,
+                            Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 1.5, cell[2] as f32 + 0.5),
+                            Vec3::new((rng.next() - 0.5) * 2.2, 2.6, (rng.next() - 0.5) * 2.2),
+                            d.item.to_string(),
+                            n,
+                            0.4,
+                        );
+                    }
+                }
+            }
             world.set(cell[0], cell[1] + 1, cell[2], ids::AIR);
         }
         for d in drops {
@@ -843,6 +947,7 @@ pub fn cursor_system(
         if opts.grab_mode != mode {
             opts.grab_mode = mode;
             opts.visible = !want_lock;
+            println!("CURSOR locked={} visible={}", want_lock, !want_lock);
         }
     }
 }

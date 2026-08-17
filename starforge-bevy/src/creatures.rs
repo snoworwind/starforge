@@ -6,7 +6,9 @@ use crate::player::Player;
 use crate::rng::Rng;
 use crate::ui::IconMaterials;
 use crate::world::World;
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy_world_serialization::prelude::WorldAssetRoot;
 
 // ---------- Creatures ----------
 
@@ -54,11 +56,10 @@ impl Default for CreatureSpawner {
     }
 }
 
-/// Spawn a creature at a ground position.
+/// Spawn a creature at a ground position（CC0 GLB 模型：crab/blob/strider）。
 pub fn spawn_creature(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     world: &World,
     pos: Vec3,
     body: u32,
@@ -66,81 +67,35 @@ pub fn spawn_creature(
     eye: u32,
     kind: &'static str,
 ) {
-    let body_c = |c: u32| {
-        Color::srgb(
-            ((c >> 16) & 0xFF) as f32 / 255.0,
-            ((c >> 8) & 0xFF) as f32 / 255.0,
-            (c & 0xFF) as f32 / 255.0,
-        )
+    let _ = (body, legs, eye);
+    let (model, scale) = match kind {
+        "crab" => ("models/creatures/crab.glb", 0.5),
+        "blob" => ("models/creatures/blob.glb", 0.85),
+        _ => ("models/creatures/strider.glb", 0.8),
     };
-    let body_mat = materials.add(StandardMaterial {
-        base_color: body_c(body),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    let legs_mat = materials.add(StandardMaterial {
-        base_color: body_c(legs),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    let eye_mat = materials.add(StandardMaterial {
-        base_color: body_c(eye),
-        emissive: LinearRgba::new(
-            ((eye >> 16) & 0xFF) as f32 / 255.0,
-            ((eye >> 8) & 0xFF) as f32 / 255.0,
-            (eye & 0xFF) as f32 / 255.0,
-            1.0,
-        ) * 0.6,
-        perceptual_roughness: 1.0,
-        ..default()
-    });
     let (w, h, d) = match kind {
         "crab" => (0.55, 0.4, 0.7),
         "blob" => (0.7, 0.5, 0.7),
         _ => (0.35, 1.1, 0.35),
     };
-    let body_mesh = meshes.add(Cuboid::new(w, h, d));
-    let head_mesh = meshes.add(Cuboid::new(w * 0.6, h * 0.28, d * 0.6));
-    let eye_mesh = meshes.add(Cuboid::new(w * 0.12, h * 0.08, 0.03));
-    let body_e = commands
-        .spawn((
-            Mesh3d(body_mesh),
-            MeshMaterial3d(body_mat.clone()),
-            Transform::from_translation(pos),
-            Visibility::default(),
-            Creature {
-                hp: 3.0,
-                radius: 0.5,
-                height: h + 0.3,
-                shoot_t: 0.0,
-                ai_t: 0.0,
-                dir: Vec3::X,
-                vel: Vec3::ZERO,
-                grounded: false,
-                home: pos,
-                jump_t: 0.0,
-                kind,
-            },
-        ))
-        .id();
-    commands.entity(body_e).with_children(|parent| {
-        parent.spawn((
-            Mesh3d(head_mesh),
-            MeshMaterial3d(body_mat),
-            Transform::from_translation(Vec3::Y * (h * 0.5 + h * 0.14)),
-        ));
-        parent.spawn((
-            Mesh3d(eye_mesh.clone()),
-            MeshMaterial3d(eye_mat.clone()),
-            Transform::from_translation(Vec3::new(w * 0.25, h * 0.5 + h * 0.14, d * 0.31)),
-        ));
-        parent.spawn((
-            Mesh3d(eye_mesh),
-            MeshMaterial3d(eye_mat),
-            Transform::from_translation(Vec3::new(-w * 0.25, h * 0.5 + h * 0.14, d * 0.31)),
-        ));
-    });
-    let _ = legs_mat;
+    commands.spawn((
+        WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(model))),
+        Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
+        Visibility::default(),
+        Creature {
+            hp: 3.0,
+            radius: 0.5,
+            height: h + 0.3,
+            shoot_t: 0.0,
+            ai_t: 0.0,
+            dir: Vec3::X,
+            vel: Vec3::ZERO,
+            grounded: false,
+            home: pos,
+            jump_t: 0.0,
+            kind,
+        },
+    ));
 }
 
 /// Maintain the biome's animal population around the player.
@@ -149,8 +104,7 @@ pub fn creature_spawn_system(
     time: Res<Time>,
     mut spawner: ResMut<CreatureSpawner>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
     creatures: Query<&Creature>,
     world: Res<World>,
     player: Query<&Player>,
@@ -184,14 +138,12 @@ pub fn creature_spawn_system(
         if top <= data::SEA {
             continue;
         }
-        let kind = if count % 3 == 0 {
-            "crab"
-        } else if count % 3 == 1 {
-            "blob"
-        } else {
-            "strider"
-        };
-        spawn_creature(&mut commands, &mut meshes, &mut materials, &*world,
+        // 生态动物类型（JS BIOMES[].animal.type），不再按 count%3 轮换
+        let kind = data::biome_animal_kind(world.biome().key);
+        spawn_creature(
+            &mut commands,
+            &asset_server,
+            &*world,
             Vec3::new(x as f32 + 0.5, top as f32 + 1.2, z as f32 + 0.5),
             animal.1,
             animal.2,
@@ -213,6 +165,10 @@ pub fn creature_system(
     let Ok(p) = player.single() else { return };
     for (mut c, mut tf) in &mut q {
         if c.hp <= 0.0 {
+            continue;
+        }
+        // 守卫由 sentinel_system 单独驱动
+        if c.kind == "sentinel" {
             continue;
         }
         // death marker handled by despawn system
@@ -268,14 +224,161 @@ pub fn creature_system(
     }
 }
 
-/// Despawn dead creatures.
+/// Despawn dead creatures (+ 掉落：默认碳 1-2；守卫掉电路板+装甲板)。
 pub fn creature_despawn_system(
     creatures: Query<(Entity, &Creature, &Transform)>,
     mut commands: Commands,
+    world: Res<World>,
+    icons: Res<crate::ui::IconMaterials>,
+    sfx: Res<crate::audio::Sfx>,
 ) {
-    for (e, c, _) in &creatures {
+    for (e, c, tf) in &creatures {
         if c.hp <= 0.0 {
+            let mut rng = crate::rng::Rng::new(
+                (tf.translation.x as u32).wrapping_mul(31)
+                    ^ (tf.translation.z as u32).wrapping_mul(57),
+            );
+            if c.kind == "sentinel" {
+                // 遗迹守卫（JS）：电路板×1 + 装甲板×1(50%)
+                spawn_drop(
+                    &mut commands,
+                    &world,
+                    &icons,
+                    tf.translation + Vec3::Y * 0.4,
+                    Vec3::new(0.0, 2.2, 0.0),
+                    "circuit".into(),
+                    1,
+                    0.4,
+                );
+                if rng.next() < 0.5 {
+                    spawn_drop(
+                        &mut commands,
+                        &world,
+                        &icons,
+                        tf.translation + Vec3::Y * 0.8,
+                        Vec3::new(0.0, 2.2, 0.0),
+                        "plate".into(),
+                        1,
+                        0.4,
+                    );
+                }
+                crate::audio::play(&mut commands, sfx.break_block.clone(), 0.7, None);
+            } else {
+                let n = 1 + (rng.next() * 2.0) as i32;
+                spawn_drop(
+                    &mut commands,
+                    &world,
+                    &icons,
+                    tf.translation + Vec3::Y * 0.4,
+                    Vec3::new(0.0, 2.2, 0.0),
+                    "carbon".into(),
+                    n,
+                    0.4,
+                );
+                crate::audio::play(&mut commands, sfx.break_block.clone(), 0.5, None);
+            }
             commands.entity(e).despawn();
+        }
+    }
+}
+
+/// 遗迹守卫生成计时。
+#[derive(Resource, Default)]
+pub struct SentinelSpawner {
+    pub timer: f32,
+}
+
+/// 遗迹守卫（JS sentinel）：遗迹附近生成；16 格内追击玩家、接触伤害 2（1.15s CD）；
+/// 远离 40 格后消失。生成在 world.g.structures 的 Ruin 处。
+#[allow(clippy::too_many_arguments)]
+pub fn sentinel_system(
+    time: Res<Time>,
+    mut spawner: ResMut<SentinelSpawner>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    world: Res<World>,
+    mut player: Query<&mut Player>,
+    mut creatures: Query<(Entity, &mut Creature, &mut Transform)>,
+    mut dmg_cd: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    let ppos = player.single().map(|p| p.pos).unwrap_or(Vec3::ZERO);
+    // 生成
+    spawner.timer -= dt;
+    if spawner.timer <= 0.0 {
+        spawner.timer = 2.0;
+        let mut nearest: Option<([i32; 3], f32)> = None;
+        for s in &world.g.structures {
+            if let crate::world::Structure::Ruin { x, z, .. } = s {
+                let dx = ppos.x - *x as f32;
+                let dz = ppos.z - *z as f32;
+                let d = (dx * dx + dz * dz).sqrt();
+                if d < 40.0 && nearest.map(|(_, bd)| d < bd).unwrap_or(true) {
+                    nearest = Some(([*x, 0, *z], d));
+                }
+            }
+        }
+        if let Some((cell, _)) = nearest {
+            let has = creatures.iter().any(|(_, c, tf)| {
+                c.kind == "sentinel"
+                    && tf
+                        .translation
+                        .distance(Vec3::new(cell[0] as f32, 0.0, cell[2] as f32))
+                        < 30.0
+            });
+            if !has {
+                let x = cell[0];
+                let z = cell[2];
+                let top = world.top_at(x, z);
+                commands.spawn((
+                    WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(
+                        "models/creatures/sentinel.glb",
+                    ))),
+                    Transform::from_translation(Vec3::new(
+                        x as f32 + 0.5,
+                        top as f32 + 1.0,
+                        z as f32 + 0.5,
+                    ))
+                    .with_scale(Vec3::splat(0.9)),
+                    Creature {
+                        hp: 10.0,
+                        radius: 0.6,
+                        height: 1.8,
+                        shoot_t: 0.0,
+                        ai_t: 0.0,
+                        dir: Vec3::X,
+                        vel: Vec3::ZERO,
+                        grounded: true,
+                        home: Vec3::new(x as f32 + 0.5, top as f32 + 1.0, z as f32 + 0.5),
+                        jump_t: 0.0,
+                        kind: "sentinel",
+                    },
+                    crate::InGame,
+                ));
+            }
+        }
+    }
+    // 守卫 AI：追击 + 接触伤害 + 远离消失
+    for (_e, mut c, mut tf) in &mut creatures {
+        if c.kind != "sentinel" {
+            continue;
+        }
+        let dist = tf.translation.distance(ppos);
+        if dist < 16.0 {
+            let dir = (ppos - tf.translation).normalize_or_zero();
+            tf.translation += dir * 4.7 * dt; // speed 1.8 × 2.6 追击
+            let yaw = dir.x.atan2(dir.z);
+            tf.rotation = Quat::from_rotation_y(yaw);
+            if dist < 1.9 {
+                *dmg_cd -= dt;
+                if *dmg_cd <= 0.0 {
+                    *dmg_cd = 1.15;
+                    if let Ok(mut pp) = player.single_mut() {
+                        pp.damage(2.0);
+                    }
+                }
+            }        } else if dist > 40.0 {
+            c.hp = -1.0; // 标记消失
         }
     }
 }
@@ -331,7 +434,7 @@ pub fn spawn_drop(
     ));
 }
 
-/// Drop physics: gravity, landing, magnet pickup, despawn.
+/// Drop physics: gravity, landing, magnet pickup, despawn, merge & cap.
 pub fn drops_system(
     time: Res<Time>,
     mut commands: Commands,
@@ -344,6 +447,78 @@ pub fn drops_system(
     let Ok(mut p) = player.single_mut() else { return };
     let player_chest = p.pos - Vec3::Y * 1.0;
     let mut pickup_sound = false;
+    let all: Vec<Entity> = drops.iter().map(|(e, _, _)| e).collect();
+    let mut snap: Vec<(Entity, DropItem, Vec3)> = Vec::new();
+    for e in &all {
+        if let Ok((_, d, tf)) = drops.get(*e) {
+            snap.push((
+                *e,
+                DropItem {
+                    item: d.item.clone(),
+                    n: d.n,
+                    age: d.age,
+                    vel: d.vel,
+                    pick_delay: d.pick_delay,
+                    base_y: d.base_y,
+                    resting: d.resting,
+                    no_space_t: d.no_space_t,
+                },
+                tf.translation,
+            ));
+        }
+    }
+    // 同类合并（JS: dist²<1.2 合并，n 相加、age 重置）
+    let mut merged: Vec<usize> = Vec::new();
+    for i in 0..snap.len() {
+        if merged.contains(&i) {
+            continue;
+        }
+        for j in (i + 1)..snap.len() {
+            if merged.contains(&j) {
+                continue;
+            }
+            let (_, di, pi) = &snap[i];
+            let (_, dj, pj) = &snap[j];
+            if di.item == dj.item && di.pick_delay <= 0.0 && dj.pick_delay <= 0.0 {
+                let d2 = (pi.x - pj.x).powi(2) + (pi.y - pj.y).powi(2) + (pi.z - pj.z).powi(2);
+                if d2 < 1.44 {
+                    snap[i].1.n += dj.n;
+                    snap[i].1.age = 0.0;
+                    commands.entity(snap[j].0).despawn();
+                    merged.push(j);
+                }
+            }
+        }
+    }
+    // 掉落上限（JS DROP_CAP 90：超限最旧入包）
+    if snap.len() > DROP_CAP {
+        let mut order: Vec<usize> = (0..snap.len()).collect();
+        order.sort_by(|a, b| {
+            snap[*b]
+                .1
+                .age
+                .partial_cmp(&snap[*a].1.age)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in order.iter().take(snap.len() - DROP_CAP) {
+            let (e, d, _) = &snap[idx];
+            let added = p.inv.add_item(&d.item, d.n);
+            if added >= d.n {
+                commands.entity(*e).despawn();
+            } else if added > 0 {
+                if let Ok((_, mut dd, _)) = drops.get_mut(*e) {
+                    dd.n -= added;
+                }
+            }
+        }
+    }
+    // 合并结果写回实体（幸存者数量/年龄）
+    for (e, d, _) in &snap {
+        if let Ok((_, mut dd, _)) = drops.get_mut(*e) {
+            dd.n = d.n;
+            dd.age = d.age;
+        }
+    }
     for (e, mut d, mut tf) in &mut drops {
         d.age += dt;
         if d.age > 240.0 {

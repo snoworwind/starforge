@@ -482,14 +482,24 @@ pub const ITEMS: &[Item] = &[
     item!(mach "launchpad_b", "发射平台", "launchpad", 10, 1500, "飞船停泊于此免耗燃料起飞。"),
     item!(mach "wind_b", "风力涡轮机", "wind", 50, 420, "全天候发电 2~16kW，海拔越高风越大。"),
     item!(mach "burner_b", "火力发电机", "burner", 50, 260, "烧煤/碳发电 25kW，工业的第一缕黑烟。"),
-    item!(mach "beacon_b", "标记方块", "beacon", 20, 120, "放置后显示定位标记，按 E 设置名称与全星系显示。"),
-    item!(mach "lumberbot_b", "伐木机器人", "lumberbot", 10, 320, "放置充电桩后自动巡林伐木，采满碳后送往收集点。"),
-    item!(mach "collector_b", "收集点", "collector", 20, 110, "伐木机器人卸货站（12格），自动输出到面前传送带/机器。"),
-    item!(mach "medbay_b", "医疗站", "medbay", 50, 900, "站旁边自动治疗：每消耗 1 钠 + 1 氧气回复 3 点生命。"),
+    item!(mach "beacon_b", "标记方块", "beacon", 20, 120, "放置后在屏幕上显示定位标记，按 E 设置名称与全星系显示。永不迷路。"),
+    item!(mach "lumberbot_b", "伐木机器人", "lumberbot", 10, 320, "放置充电桩后悬浮机器人自动巡林伐木，采集碳装满后自动送往附近的收集点。"),
+    item!(mach "collector_b", "收集点", "collector", 20, 110, "伐木机器人的卸货站（12格），库存自动输出到面前的传送带/机器，可直通装配机。"),
+    item!(mach "medbay_b", "医疗站", "medbay", 50, 900, "站在旁边自动治疗：每消耗 1 钠 + 1 氧气回复 3 点生命。需电力。"),
 ];
 
 pub fn item_by_key(key: &str) -> Option<&'static Item> {
     ITEMS.iter().find(|i| i.key == key)
+}
+
+/// 生态动物体型类型（JS BIOMES[].animal.type：strider/crab/blob）。
+pub fn biome_animal_kind(biome_key: &str) -> &'static str {
+    match biome_key {
+        "lush" | "alien" | "fungal" | "salt" | "redmoss" | "hive" => "strider",
+        "desert" | "volcanic" | "crystal" | "ashen" | "amber" | "ferrous" | "obsidian" => "crab",
+        "frozen" | "ocean" | "murk" => "blob",
+        _ => "strider",
+    }
 }
 
 /// Fuel value in furnace burn-seconds per item.
@@ -591,8 +601,8 @@ pub struct Tech {
 
 pub const TECHS: &[Tech] = &[
     Tech { id: "survival", name: "生存本能", icon: "carbon", cost: &[], time: 0.0, pos: (60.0, 380.0), req: &[], desc: "基础采集与合成。", unlocked: true },
-    Tech { id: "scan1", name: "扫描增幅 I", icon: "data", cost: &[("data", 4)], time: 10.0, pos: (230.0, 200.0), req: &["survival"], desc: "矿物扫描范围 24→48 格。", unlocked: false },
-    Tech { id: "scan2", name: "扫描增幅 II", icon: "circuit", cost: &[("data", 15), ("circuit", 4)], time: 20.0, pos: (400.0, 120.0), req: &["scan1"], desc: "矿物扫描范围 48→80 格。", unlocked: false },
+    Tech { id: "scan1", name: "扫描增幅 I", icon: "data", cost: &[("data", 4)], time: 10.0, pos: (230.0, 200.0), req: &["survival"], desc: "矿物扫描范围 24→48 格（按 C 扫描）。", unlocked: false },
+    Tech { id: "scan2", name: "扫描增幅 II", icon: "circuit", cost: &[("data", 15), ("circuit", 4)], time: 20.0, pos: (400.0, 120.0), req: &["scan1"], desc: "矿物扫描范围 48→80 格（按 C 扫描）。", unlocked: false },
     Tech { id: "metallurgy", name: "冶金学", icon: "furnace_b", cost: &[("data", 2)], time: 8.0, pos: (230.0, 380.0), req: &["survival"], desc: "解锁熔炉高效冶炼。", unlocked: false },
     Tech { id: "automation", name: "自动化", icon: "miner_b", cost: &[("data", 5)], time: 15.0, pos: (400.0, 260.0), req: &["metallurgy"], desc: "解锁自动采矿机、传送带与火力发电机。", unlocked: false },
     Tech { id: "logistics", name: "物流学", icon: "chest_b", cost: &[("data", 4)], time: 12.0, pos: (400.0, 500.0), req: &["metallurgy"], desc: "解锁储物箱与物品分流。", unlocked: false },
@@ -653,19 +663,19 @@ pub const BIOMES: &[Biome] = &[
         0.012, 0.02, 1.0, 0x7cc44f, "continental", None, 0x3e6bd6, false, false, 0, 0.0, false,
         &[("", 1.0, 1.0), ("", 0.25, 2.2), ("murk", 0.6, 1.2)],
         Some(("草原跳羚", 0x8a9e56, 0x5e7038, 0x2a2a2a, 10))),
-    biome!("desert", "灼热荒漠", "sand", "sand", "stone", (0.95, 0.75, 0.5), (0.98, 0.85, 0.65), Some("heat"), "🔥", 1.6,
+    biome!("desert", "灼热荒漠", "sand", "sand", "stone", (0.95, 0.75, 0.5), (0.98, 0.85, 0.65), Some("heat"), "☀ 极端高温", 1.6,
         0.001, 0.008, 1.3, 0xe0d29a, "dunes", None, 0x6db8c8, false, false, 0, 0.0, false,
         &[("", 1.0, 1.0), ("stone", 0.05, 1.6)],
         Some(("沙壳甲虫", 0xd8b878, 0xa8895a, 0x442200, 7))),
-    biome!("frozen", "冰封世界", "snow", "dirt", "ice", (0.7, 0.8, 0.95), (0.85, 0.9, 1.0), Some("cold"), "❄", 1.4,
+    biome!("frozen", "冰封世界", "snow", "dirt", "ice", (0.7, 0.8, 0.95), (0.85, 0.9, 1.0), Some("cold"), "❄ 酷寒", 1.4,
         0.004, 0.006, 1.2, 0xf2f6fa, "glacial", Some("ice"), 0x9fd4e8, false, false, 0, 0.0, false,
         &[("", 1.0, 1.0), ("ice", 0.1, 0.5)],
         Some(("霜绒兽", 0xdce8f0, 0xb8c8d4, 0x3399ff, 6))),
-    biome!("volcanic", "熔火之地", "basalt", "basalt", "basalt", (0.5, 0.28, 0.2), (0.6, 0.4, 0.3), Some("heat"), "🔥", 2.2,
+    biome!("volcanic", "熔火之地", "basalt", "basalt", "basalt", (0.5, 0.28, 0.2), (0.6, 0.4, 0.3), Some("heat"), "🌋 炽热大气", 2.2,
         0.0, 0.004, 2.0, 0x3a3a42, "volcanic", Some("lava_tubes"), 0xff6a1a, true, true, 0, 0.0, false,
         &[("", 0.0, 1.0), ("basalt", 0.0, 0.3)],
         Some(("熔壳蟹", 0x5a4038, 0xc94f1e, 0xff6600, 5))),
-    biome!("alien", "异星菌境", "alien", "dirt", "stone", (0.45, 0.3, 0.6), (0.6, 0.45, 0.75), Some("toxic"), "☣", 1.8,
+    biome!("alien", "异星菌境", "alien", "dirt", "stone", (0.45, 0.3, 0.6), (0.6, 0.45, 0.75), Some("toxic"), "☣ 剧毒孢子", 1.8,
         0.008, 0.03, 1.5, 0x9a5fd0, "alien", None, 0x7a4ad8, false, false, 0, 0.0, false,
         &[("", 1.0, 1.0), ("alien", 0.15, 2.5)],
         Some(("孢子爬行者", 0x9a6fd8, 0x7c4fba, 0xffd14d, 8))),
@@ -673,27 +683,27 @@ pub const BIOMES: &[Biome] = &[
         0.007, 0.014, 0.9, 0x3e8ed6, "archipelago", None, 0x2b62c8, false, false, 7, 0.0, false,
         &[("", 1.0, 1.0), ("sand", 0.8, 1.5)],
         Some(("碧波滑行兽", 0x4da6c8, 0x2e7893, 0xffffff, 8))),
-    biome!("crystal", "晶簇冻土", "snow", "dirt", "ice", (0.55, 0.75, 0.85), (0.75, 0.9, 0.95), Some("cold"), "❄", 1.7,
+    biome!("crystal", "晶簇冻土", "snow", "dirt", "ice", (0.55, 0.75, 0.85), (0.75, 0.9, 0.95), Some("cold"), "❄ 晶界酷寒", 1.7,
         0.0, 0.004, 1.4, 0x7fe8e0, "glacial", Some("geodes"), 0x8fd8e8, false, false, 0, 0.02, false,
         &[("", 0.0, 1.0), ("ice", 0.0, 0.5)],
         Some(("晶背蟹", 0xaef0ea, 0x5ec8c0, 0x0a4f6e, 5))),
-    biome!("fungal", "巨菌之森", "alien", "dirt", "stone", (0.5, 0.38, 0.55), (0.68, 0.55, 0.72), Some("toxic"), "☣", 1.3,
+    biome!("fungal", "巨菌之森", "alien", "dirt", "stone", (0.5, 0.38, 0.55), (0.68, 0.55, 0.72), Some("toxic"), "☣ 菌孢瘴气", 1.3,
         0.010, 0.02, 1.2, 0xc06fd8, "continental", None, 0x6a4a8a, false, false, 0, 0.0, true,
         &[("", 1.0, 1.0), ("murk", 0.5, 1.8)],
         Some(("菌帽跳虫", 0xd8a8e8, 0x9a5fd0, 0xff5a4e, 9))),
-    biome!("ashen", "灰烬荒原", "ash", "ash", "basalt", (0.45, 0.42, 0.4), (0.6, 0.58, 0.55), Some("rad"), "☢", 2.0,
+    biome!("ashen", "灰烬荒原", "ash", "ash", "basalt", (0.45, 0.42, 0.4), (0.6, 0.58, 0.55), Some("rad"), "☢ 辐射尘暴", 2.0,
         0.0, 0.003, 1.8, 0x8a8a8a, "flats", None, 0x9a7a5a, false, false, 0, 0.0, false,
         &[("", 0.0, 1.0), ("basalt", 0.0, 0.2)],
         Some(("灰烬潜行者", 0x6e6a66, 0x3a3a3a, 0x7dff56, 4))),
-    biome!("amber", "金珀沙海", "amber", "sand", "stone", (0.92, 0.72, 0.42), (0.98, 0.85, 0.6), Some("heat"), "🔥", 1.2,
+    biome!("amber", "金珀沙海", "amber", "sand", "stone", (0.92, 0.72, 0.42), (0.98, 0.85, 0.6), Some("heat"), "☀ 灼金热浪", 1.2,
         0.001, 0.006, 1.1, 0xe0a63a, "dunes", None, 0xd8b048, false, false, 0, 0.0, false,
         &[("", 1.0, 1.0), ("amber", 0.3, 1.2)],
         Some(("珀壳掘虫", 0xe8c060, 0xa87828, 0x5e3808, 6))),
-    biome!("ferrous", "磁暴铁原", "rust", "rust", "basalt", (0.55, 0.4, 0.32), (0.7, 0.55, 0.45), Some("storm"), "⚡", 1.5,
+    biome!("ferrous", "磁暴铁原", "rust", "rust", "basalt", (0.55, 0.4, 0.32), (0.7, 0.55, 0.45), Some("storm"), "⚡ 磁暴侵蚀", 1.5,
         0.0, 0.004, 1.6, 0xa86a4a, "shatter", None, 0x8a5a3a, false, false, 0, 0.0, false,
         &[("", 0.0, 1.0), ("rust", 0.0, 0.4)],
         Some(("磁尘甲兽", 0x8a5a3a, 0x4a4a52, 0x35e0e8, 5))),
-    biome!("murk", "荧光沼泽", "murk", "dirt", "stone", (0.16, 0.3, 0.28), (0.25, 0.42, 0.38), Some("toxic"), "☣", 1.1,
+    biome!("murk", "荧光沼泽", "murk", "dirt", "stone", (0.16, 0.3, 0.28), (0.25, 0.42, 0.38), Some("toxic"), "☣ 沼气瘴雾", 1.1,
         0.004, 0.035, 1.0, 0x2e8a72, "swamp", Some("swamp_caves"), 0x2f7a5a, false, false, 4, 0.0, true,
         &[("", 1.0, 1.0), ("murk", 0.3, 2.2)],
         Some(("沼灯浮蜓", 0x2e8a72, 0x1a5244, 0x4ee8b8, 9))),
@@ -701,15 +711,15 @@ pub const BIOMES: &[Biome] = &[
         0.0, 0.008, 1.0, 0xe8ecf0, "flats", None, 0xcfe8f0, false, false, 0, 0.0, false,
         &[("", 0.0, 1.0), ("sand", 0.0, 0.5)],
         Some(("盐羽鹬", 0xf0f2f4, 0xc2c9ce, 0x222222, 7))),
-    biome!("obsidian", "黑曜熔壁", "obsidian", "obsidian", "basalt", (0.28, 0.22, 0.35), (0.4, 0.32, 0.48), Some("heat"), "🔥", 1.9,
+    biome!("obsidian", "黑曜熔壁", "obsidian", "obsidian", "basalt", (0.28, 0.22, 0.35), (0.4, 0.32, 0.48), Some("heat"), "☀ 曜岩余温", 1.9,
         0.0, 0.002, 1.7, 0x2a2a35, "shatter", None, 0x4a3a6a, true, false, 0, 0.0, false,
         &[("", 0.0, 1.0), ("basalt", 0.0, 0.2)],
         Some(("曜甲蟹", 0x2a2a35, 0x6a5a9a, 0xff6600, 4))),
-    biome!("redmoss", "红藓高原", "redmoss", "dirt", "stone", (0.75, 0.5, 0.42), (0.88, 0.68, 0.58), Some("cold"), "❄", 1.1,
+    biome!("redmoss", "红藓高原", "redmoss", "dirt", "stone", (0.75, 0.5, 0.42), (0.88, 0.68, 0.58), Some("cold"), "❄ 稀薄冷风", 1.1,
         0.003, 0.012, 1.15, 0xc25a48, "mesa", None, 0xb06050, false, false, 0, 0.0, false,
         &[("", 1.0, 1.0), ("redmoss", 0.4, 1.6)],
         Some(("藓原掠行者", 0xc25a48, 0x8a3a2c, 0xffe8a0, 8))),
-    biome!("hive", "蜂窝穹丘", "hive", "hive", "stone", (0.85, 0.6, 0.3), (0.95, 0.75, 0.45), Some("toxic"), "☣", 1.5,
+    biome!("hive", "蜂窝穹丘", "hive", "hive", "stone", (0.85, 0.6, 0.3), (0.95, 0.75, 0.45), Some("toxic"), "☣ 信息素迷雾", 1.5,
         0.0, 0.01, 1.3, 0xd8862a, "hive", None, 0xd89830, false, false, 0, 0.0, false,
         &[("", 0.0, 1.0), ("hive", 0.0, 0.5)],
         Some(("蜂窝守卫", 0xd8862a, 0x8a5210, 0x1a1a1a, 10))),
@@ -1037,16 +1047,16 @@ pub const PILOT_NAMES: &[&str] = &[
     "游商·卡洛", "飞手·薇拉", "老练的走私客", "星途旅人·顿", "佣兵·赤羽", "货运队长·穆",
 ];
 
-/// 交易计算：买 = round(price*mod*1.25*discount)，卖 = round(price*mod*0.8)，discount=0.85 有 trade_ai。
+/// 交易计算：买 = max(1, round(price*mod*1.25*discount))，卖 = max(1, round(price*mod*0.8))，discount=0.85 有 trade_ai。
 pub fn trade_buy_price(item: &str, market: &std::collections::HashMap<String, f32>, has_trade_ai: bool) -> i32 {
     let base = item_by_key(item).map(|i| i.price).unwrap_or(1) as f32;
     let mult = market.get(item).copied().unwrap_or(1.0);
     let discount = if has_trade_ai { 0.85 } else { 1.0 };
-    (base * mult * 1.25 * discount).round() as i32
+    ((base * mult * 1.25 * discount).round() as i32).max(1)
 }
 
 pub fn trade_sell_price(item: &str, market: &std::collections::HashMap<String, f32>) -> i32 {
     let base = item_by_key(item).map(|i| i.price).unwrap_or(1) as f32;
     let mult = market.get(item).copied().unwrap_or(1.0);
-    (base * mult * 0.8).round() as i32
+    ((base * mult * 0.8).round() as i32).max(1)
 }

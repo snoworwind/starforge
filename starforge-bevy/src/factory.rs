@@ -200,11 +200,32 @@ impl Default for BeaconState {
     }
 }
 
+/// 伐木机器人相位（JS factory.js 状态机：scan/move/chop/deliver/wait）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BotPhase {
+    #[default]
+    Scan,
+    Move,
+    Chop,
+    Deliver,
+    Wait,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LumberbotState {
     pub cargo: i32,
+    /// 兼容旧存档字段
     pub mine_prog: f32,
     pub deliver_t: f32,
+    pub phase: BotPhase,
+    /// 机器人当前位置（世界坐标）
+    pub pos: [f32; 3],
+    /// 当前目标（原木段 / 收集点）
+    pub target: Option<[i32; 3]>,
+    /// 扫描列游标
+    pub scan_off: usize,
+    pub chop_t: f32,
+    pub wait_t: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -297,6 +318,81 @@ pub fn machine_drop(block_key: &str) -> &'static str {
     }
 }
 
+/// 拆机内容返还（JS Factory.remove 退款：in/fuel/out/槽位/皮带/碳 cargo/铀/进行中配方原料）。
+pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
+    let mut out: Vec<(String, i32)> = Vec::new();
+    let mut push = |out: &mut Vec<(String, i32)>, item: &str, n: i32| {
+        if n > 0 {
+            out.push((item.to_string(), n));
+        }
+    };
+    match state {
+        MachineState::Furnace(f) => {
+            if let Some(s) = &f.input {
+                push(&mut out, &s.item, s.n);
+            }
+            if let Some(s) = &f.fuel {
+                push(&mut out, &s.item, s.n);
+            }
+            if let Some(s) = &f.output {
+                push(&mut out, &s.item, s.n);
+            }
+        }
+        MachineState::Miner(m) => {
+            if let Some(s) = &m.output {
+                push(&mut out, &s.item, s.n);
+            }
+        }
+        MachineState::Belt(b) => {
+            for it in &b.items {
+                push(&mut out, &it.item, 1);
+            }
+        }
+        MachineState::Crafter(c) => {
+            for (k, v) in &c.input {
+                push(&mut out, k, *v);
+            }
+            if let Some(s) = &c.output {
+                push(&mut out, &s.item, s.n);
+            }
+            // 进行中配方：退还一组原料（JS: prog>0 && recipe）
+            if c.prog > 0.0 {
+                if let Some(r) = c
+                    .recipe
+                    .and_then(|rid| data::RECIPES.iter().find(|r| r.id == rid))
+                {
+                    for (i, n) in r.inputs {
+                        push(&mut out, i, *n);
+                    }
+                }
+            }
+        }
+        MachineState::Chest(c) => {
+            for s in c.slots.iter().flatten() {
+                push(&mut out, &s.item, s.n);
+            }
+        }
+        MachineState::Collector(c) => {
+            for s in c.slots.iter().flatten() {
+                push(&mut out, &s.item, s.n);
+            }
+        }
+        MachineState::Reactor(r) => {
+            push(&mut out, "uranium", (r.fuel / 60.0).round() as i32);
+        }
+        MachineState::Burner(b) => {
+            if let Some(s) = &b.fuel {
+                push(&mut out, &s.item, s.n);
+            }
+        }
+        MachineState::Lumberbot(l) => {
+            push(&mut out, "carbon", l.cargo);
+        }
+        _ => {}
+    }
+    out
+}
+
 pub const MACHINE_BLOCK_IDS: [u8; 15] = [
     ids::FURNACE,
     ids::MINER,
@@ -351,6 +447,9 @@ pub struct MachineDataSave {
     pub recipe: Option<String>,
     #[serde(default)]
     pub slots: Vec<Option<Slot>>,
+    /// crafter 原料表（装配机/精炼厂）
+    #[serde(default)]
+    pub input_map: HashMap<String, i32>,
     /// belt items
     #[serde(default)]
     pub items: Vec<(String, f32)>,
@@ -364,6 +463,9 @@ pub struct MachineDataSave {
     pub label: Option<String>,
     #[serde(default)]
     pub gal: bool,
+    /// 伐木机器人位置
+    #[serde(default)]
+    pub bot_pos: Option<[f32; 3]>,
 }
 
 impl MachineState {
@@ -393,6 +495,7 @@ impl MachineState {
                 output: c.output.clone(),
                 prog: c.prog,
                 recipe: c.recipe.map(|s| s.to_string()),
+                input_map: c.input.clone(),
                 ..default()
             },
             Self::Chest(c) => MachineDataSave { slots: c.slots.clone(), ..default() },
@@ -404,7 +507,7 @@ impl MachineState {
                 ..default()
             },
             Self::Beacon(b) => MachineDataSave { label: Some(b.label.clone()), gal: b.gal, ..default() },
-            Self::Lumberbot(l) => MachineDataSave { cargo: l.cargo, ..default() },
+            Self::Lumberbot(l) => MachineDataSave { cargo: l.cargo, bot_pos: Some(l.pos), ..default() },
             Self::Collector(c) => MachineDataSave { slots: c.slots.clone(), ..default() },
             Self::Medbay(m) => MachineDataSave { heal_acc: m.heal_acc, ..default() },
             Self::Plain => MachineDataSave::default(),
@@ -432,9 +535,12 @@ impl MachineState {
                 items: d.items.iter().map(|(i, t)| BeltItem { item: i.clone(), t: *t }).collect(),
             }),
             MachineKind::Assembler | MachineKind::Refinery => Self::Crafter(CrafterState {
-                // 配方在切换/选择时重新设置（存档中不持久化 &'static 引用）
-                recipe: None,
-                input: HashMap::new(),
+                // 配方 id 以字符串存档，读档时解析回 &'static str
+                recipe: d
+                    .recipe
+                    .as_deref()
+                    .and_then(|rid| data::RECIPES.iter().find(|r| r.id == rid).map(|r| r.id)),
+                input: d.input_map.clone(),
                 output: d.output.clone(),
                 prog: d.prog,
             }),
@@ -451,7 +557,11 @@ impl MachineState {
                 label: d.label.clone().unwrap_or_else(|| "标记点".into()),
                 gal: d.gal,
             }),
-            MachineKind::Lumberbot => Self::Lumberbot(LumberbotState { cargo: d.cargo, ..default() }),
+            MachineKind::Lumberbot => Self::Lumberbot(LumberbotState {
+                cargo: d.cargo,
+                pos: d.bot_pos.unwrap_or_default(),
+                ..default()
+            }),
             MachineKind::Collector => Self::Collector(CollectorState {
                 slots: if d.slots.is_empty() { vec![None; 12] } else { d.slots.clone() },
             }),
@@ -829,10 +939,13 @@ fn crafter_tick(
     drops: &mut Vec<(String, i32)>,
 ) {    m.active = false;
     let Some(rid) = c.recipe else { return };
-    let Some(r) = data::RECIPES
-        .iter()
-        .find(|r| r.id == rid && (r.station == where_ || r.station == "both"))
-    else {
+    // 装配机可制作 station=="hand" 的便携配方（JS where:'both' 语义）
+    let Some(r) = data::RECIPES.iter().find(|r| {
+        r.id == rid
+            && (r.station == where_
+                || r.station == "both"
+                || (where_ == "assembler" && r.station == "hand"))
+    }) else {
         return;
     };
     let has_all = r.inputs.iter().all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n);
@@ -901,9 +1014,10 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
                         }
                     }
                 } else {
-                    // 禁止向正面输入侧的装配/精炼推入（belt→machine 回流防护）
+                    // 禁止向正面输入侧的装配/精炼推入（belt→machine 回流防护，
+                    // JS: isInputFaceForBelt = (beltDir+2)%4 === next.dir）
                     let blocked = matches!(tm.kind, MachineKind::Assembler | MachineKind::Refinery)
-                        && tm.dir == m.dir
+                        && (m.dir + 2) % 4 == tm.dir
                         && (m.pos[0] + dx == tm.pos[0] && m.pos[2] + dz == tm.pos[2]);
                     if !blocked && can_machine_accept(&tm, &item, ts) && machine_insert(&tm, ts, &item) {
                         moved = true;
@@ -933,6 +1047,260 @@ fn collector_tick(m: &mut Machine, c: &mut CollectorState, snap: &mut Snapshot) 
             }
         }
         break; // 每 tick 最多输出 1
+    }
+}
+
+/// 伐木机器人（JS factory.js 状态机：扫描→移动→伐木→满载送货→等待）。
+/// 常量：BOT_RANGE=32、BOT_CARGO_FULL=40、chop 1.1s、每段碳+4、整树+6、树叶 50% +1。
+fn lumberbot_tick(
+    m: &mut Machine,
+    lb: &mut LumberbotState,
+    world: &GameWorld,
+    snap: &mut Snapshot,
+    world_writes: &mut Vec<([i32; 3], u8)>,
+) {
+    const BOT_RANGE: i32 = 32;
+    const BOT_CARGO_FULL: i32 = 40;
+    m.active = true;
+    let home = [m.pos[0] as f32 + 0.5, m.pos[1] as f32 + 0.5, m.pos[2] as f32 + 0.5];
+    if lb.pos == [0.0, 0.0, 0.0] {
+        lb.pos = home;
+    }
+    if lb.wait_t > 0.0 {
+        lb.wait_t -= TICK;
+        if lb.wait_t <= 0.0 {
+            lb.phase = BotPhase::Scan;
+        }
+        return;
+    }
+    // 满载优先送货
+    if lb.cargo >= BOT_CARGO_FULL && lb.phase != BotPhase::Deliver {
+        lb.phase = BotPhase::Deliver;
+        lb.target = None;
+    }
+    match lb.phase {
+        BotPhase::Scan => {
+            // 33×33（步长 2）列扫描，每 tick 6 列
+            for _ in 0..6 {
+                let n = 17;
+                let off = lb.scan_off;
+                lb.scan_off = (lb.scan_off + 1) % (n * n);
+                let dx = ((off % n) as i32 - 8) * 2;
+                let dz = ((off / n) as i32 - 8) * 2;
+                let x = m.pos[0] + dx;
+                let z = m.pos[2] + dz;
+                if dx * dx + dz * dz > BOT_RANGE * BOT_RANGE {
+                    continue;
+                }
+                if let Some(seg) = find_log_segment(world, x, z) {
+                    lb.target = Some(seg);
+                    lb.phase = BotPhase::Move;
+                    return;
+                }
+            }
+            if lb.scan_off == 0 {
+                // 扫完一圈没树
+                lb.phase = BotPhase::Wait;
+                lb.wait_t = 5.0;
+            }
+        }
+        BotPhase::Move => {
+            let Some(t) = lb.target else {
+                lb.phase = BotPhase::Scan;
+                return;
+            };
+            let tp = [t[0] as f32 + 0.5, t[1] as f32 + 0.5, t[2] as f32 + 0.5];
+            let d = ((tp[0] - lb.pos[0]).powi(2) + (tp[2] - lb.pos[2]).powi(2)).sqrt();
+            if d < 1.5 {
+                lb.phase = BotPhase::Chop;
+                lb.chop_t = 0.0;
+            } else {
+                let step = 4.2 * TICK / d.max(1e-4);
+                lb.pos[0] += (tp[0] - lb.pos[0]) * step;
+                lb.pos[2] += (tp[2] - lb.pos[2]) * step;
+            }
+        }
+        BotPhase::Chop => {
+            let Some(t) = lb.target else {
+                lb.phase = BotPhase::Scan;
+                return;
+            };
+            // 目标已被挖走 → 重新找
+            if world.get(t[0], t[1], t[2]) != ids::LOG {
+                lb.target = find_log_segment(world, t[0], t[2]).or(lb.target);
+                if lb.target.map(|tg| world.get(tg[0], tg[1], tg[2])) != Some(ids::LOG) {
+                    lb.phase = BotPhase::Scan;
+                    return;
+                }
+            }
+            lb.chop_t += TICK;
+            if lb.chop_t >= 1.1 {
+                lb.chop_t = 0.0;
+                // 砍一段：碳 +4
+                world_writes.push((t, ids::AIR));
+                lb.cargo += 4;
+                // 树干剩余？
+                if let Some(next) = find_log_segment(world, t[0], t[2]) {
+                    lb.target = Some(next);
+                } else {
+                    // 整树砍完：碳 +6，清理 5×5×5 树叶（50% 各 +1）
+                    lb.cargo += 6;
+                    for dy in -1..=3 {
+                        for ox in -2..=2 {
+                            for oz in -2..=2 {
+                                let lx = t[0] + ox;
+                                let ly = t[1] + dy;
+                                let lz = t[2] + oz;
+                                if world.get(lx, ly, lz) == ids::LEAVES {
+                                    world_writes.push(([lx, ly, lz], ids::AIR));
+                                    if crate::rng::Rng::new(
+                                        (lx as u32).wrapping_mul(31) ^ (lz as u32).wrapping_mul(57),
+                                    )
+                                    .next()
+                                        < 0.5
+                                    {
+                                        lb.cargo += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    lb.target = None;
+                    if lb.cargo >= BOT_CARGO_FULL {
+                        lb.phase = BotPhase::Deliver;
+                    } else {
+                        lb.phase = BotPhase::Scan;
+                    }
+                }
+            }
+        }
+        BotPhase::Deliver => {
+            // 找最近收集点
+            let mut best: Option<([i32; 3], Entity)> = None;
+            let mut best_d = f32::MAX;
+            for (e, mm) in &snap.machines {
+                if mm.kind != MachineKind::Collector {
+                    continue;
+                }
+                let d = ((mm.pos[0] as f32 + 0.5 - lb.pos[0]).powi(2)
+                    + (mm.pos[2] as f32 + 0.5 - lb.pos[2]).powi(2))
+                .sqrt();
+                if d < best_d {
+                    best_d = d;
+                    best = Some((mm.pos, *e));
+                }
+            }
+            match best {
+                Some((cpos, ce)) => {
+                    let cp = [cpos[0] as f32 + 0.5, cpos[1] as f32 + 0.5, cpos[2] as f32 + 0.5];
+                    let d = ((cp[0] - lb.pos[0]).powi(2) + (cp[2] - lb.pos[2]).powi(2)).sqrt();
+                    if d < 1.6 {
+                        // 卸货（CollectorState 临时包装调用 machine_insert）
+                        if let Some(ts) = snap.states.get_mut(&ce) {
+                            if let MachineState::Collector(cs) = ts {
+                                let mut wrap = MachineState::Collector(cs.clone());
+                                while lb.cargo > 0 {
+                                    if !machine_insert(m, &mut wrap, "carbon") {
+                                        break;
+                                    }
+                                    lb.cargo -= 1;
+                                }
+                                if let MachineState::Collector(nc) = &wrap {
+                                    *cs = nc.clone();
+                                }
+                            }
+                        }
+                        if lb.cargo <= 0 {
+                            lb.phase = BotPhase::Scan;
+                            lb.pos = home;
+                        } else {
+                            lb.phase = BotPhase::Wait;
+                            lb.wait_t = 2.5;
+                        }
+                    } else {
+                        let step = 4.2 * TICK / d.max(1e-4);
+                        lb.pos[0] += (cp[0] - lb.pos[0]) * step;
+                        lb.pos[2] += (cp[2] - lb.pos[2]) * step;
+                    }
+                }
+                None => {
+                    // 无收集点
+                    lb.phase = BotPhase::Wait;
+                    lb.wait_t = 3.0;
+                }
+            }
+        }
+        BotPhase::Wait => {}
+    }
+}
+
+/// 在 (x,z) 列从地表向下最多 12 格找原木段（返回最上方的 log）。
+fn find_log_segment(world: &GameWorld, x: i32, z: i32) -> Option<[i32; 3]> {
+    let top = world.top_at(x, z);
+    for dy in 0..12 {
+        let y = top - dy;
+        if y < 1 {
+            break;
+        }
+        if world.get(x, y, z) == ids::LOG {
+            return Some([x, y, z]);
+        }
+    }
+    None
+}
+
+/// 伐木机器人悬浮视觉（挂在机器实体上，跟随 lb.pos）。
+#[derive(Component)]
+pub struct BotVis;
+
+pub fn lumberbot_visual_system(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut mesh_h: Local<Option<Handle<Mesh>>>,
+    mut mat_h: Local<Option<Handle<StandardMaterial>>>,
+    q: Query<(Entity, &Machine, &MachineState), Without<BotVis>>,
+    mut vis: Query<
+        (&mut Transform, &mut Visibility, &Machine, &MachineState),
+        (With<BotVis>, With<Machine>),
+    >,
+    time: Res<Time>,
+) {
+    let mesh = mesh_h
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.42, 0.42, 0.42)))
+        .clone();
+    let mat = mat_h
+        .get_or_insert_with(|| {
+            mats.add(StandardMaterial {
+                base_color: Color::srgb(0.62, 0.76, 0.82),
+                emissive: LinearRgba::new(0.05, 0.3, 0.35, 1.0) * 0.8,
+                ..default()
+            })
+        })
+        .clone();
+    for (e, _m, st) in &q {
+        if let MachineState::Lumberbot(lb) = st {
+            if lb.cargo > 0 || lb.phase != BotPhase::Scan {
+                commands.entity(e).try_insert((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    BotVis,
+                ));
+            }
+        }
+    }
+    let t = time.elapsed_secs();
+    for (mut tf, mut v, _m, st) in &mut vis {
+        if let MachineState::Lumberbot(lb) = st {
+            tf.translation = Vec3::new(
+                lb.pos[0],
+                lb.pos[1] + 0.8 + (t * 2.4).sin() * 0.08,
+                lb.pos[2],
+            );
+            *v = Visibility::Visible;
+        } else {
+            *v = Visibility::Hidden;
+        }
     }
 }
 
@@ -1083,6 +1451,9 @@ pub fn factory_system(
                 crafter_tick(&mut m, cs, sat, where_, &mut snap, &mut drops);
             }
             MachineState::Collector(cs) => collector_tick(&mut m, cs, &mut snap),
+            MachineState::Lumberbot(lb) => {
+                lumberbot_tick(&mut m, lb, &world, &mut snap, &mut world_writes)
+            }
             MachineState::Medbay(ms) => {
                 m.active = false;
                 if let Some(pq) = player.as_mut() {

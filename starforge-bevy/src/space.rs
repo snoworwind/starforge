@@ -3,6 +3,8 @@
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
+use bevy::gltf::GltfAssetLabel;
+use bevy_world_serialization::prelude::WorldAssetRoot;
 use std::collections::HashMap;
 
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
@@ -94,6 +96,20 @@ pub struct SpaceInput {
     pub mouse_dy: f32,
 }
 
+impl SpaceInput {
+    /// 失焦清空全部输入（JS window.blur 移植，防 Alt-Tab 卡键）。
+    pub fn clear(&mut self) {
+        self.thrust = false;
+        self.brake = false;
+        self.boost = false;
+        self.roll_left = false;
+        self.roll_right = false;
+        self.pulse = false;
+        self.mouse_dx = 0.0;
+        self.mouse_dy = 0.0;
+    }
+}
+
 // ---------- 飞船状态 ----------
 
 #[derive(Resource, Clone, Debug)]
@@ -111,6 +127,13 @@ pub struct ShipState {
     pub tritium_drain: f32,
     pub board_yaw: f32,
     pub presaved: bool,
+    /// 船体生命（JS VIS_HP：C20/B34/A52/S80）
+    pub hp: f32,
+    pub hp_max: f32,
+    /// 开火冷却
+    pub fire_cd: f32,
+    /// 引擎循环音实体（飞行时播放）
+    pub engine_snd: Option<Entity>,
     pub warmed: bool,
     pub pitch_lim: f32,
     pub pitch_floor: Option<f32>,
@@ -133,6 +156,10 @@ impl Default for ShipState {
             tritium_drain: 0.0,
             board_yaw: 0.0,
             presaved: false,
+            hp: 20.0,
+            hp_max: 20.0,
+            fire_cd: 0.0,
+            engine_snd: None,
             warmed: false,
             pitch_lim: 1.2,
             pitch_floor: None,
@@ -177,6 +204,9 @@ pub struct PlanetArchive {
     /// 已修改区块 RLE（星球离开时归档，返回时恢复）
     #[serde(default)]
     pub mods: std::collections::HashMap<String, Vec<u16>>,
+    /// 该星球地图标记
+    #[serde(default)]
+    pub marks: Vec<Mark>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -194,7 +224,7 @@ pub struct GalaxyArchive {
     pub marks: HashMap<usize, Vec<Mark>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WarpLock {
     pub seed: u32,
     pub name: String,
@@ -217,6 +247,8 @@ pub struct SpaceGame {
     pub ship_inv: Vec<Option<Slot>>,
     /// 机库飞船
     pub garage: Vec<save::ShipSave>,
+    /// 当前星球地图标记（JS mapMarks[pid]）
+    pub marks: Vec<Mark>,
 }
 
 impl SpaceGame {
@@ -234,6 +266,7 @@ impl SpaceGame {
             play_time: 0.0,
             ship_inv: Vec::new(),
             garage: Vec::new(),
+            marks: Vec::new(),
         }
     }
 
@@ -271,12 +304,380 @@ pub struct Asteroid {
     pub spin: Vec3,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct LaserBolt {
     pub dir: Vec3,
     pub life: f32,
     pub origin: Vec3,
     pub speed: f32,
+    pub dmg: f32,
+}
+
+/// 访客飞船（JS 舰队简化版：巡航 + 可击毁 + 战利品）。
+#[derive(Component)]
+pub struct VisitorShip {
+    pub cls: &'static str,
+    pub hp: f32,
+    pub hp_max: f32,
+    pub target: Vec3,
+    pub speed: f32,
+}
+
+/// 太空掉落物（击碎小行星 / 击毁访客船）。
+#[derive(Component)]
+pub struct SpaceDrop {
+    pub item: String,
+    pub n: i32,
+    pub vel: Vec3,
+    pub age: f32,
+}
+
+/// 访客船补员计时。
+#[derive(Resource, Default)]
+pub struct VisitorRespawn {
+    pub t: f32,
+}
+
+/// 武器参数（JS BOLT_SPECS 简化：(dmg, speedMul)）。
+fn weapon_spec(cls_key: &str) -> (f32, f32) {
+    match cls_key {
+        "B" => (1.0, 1.15),
+        "A" => (2.0, 1.9),
+        "S" => (4.0, 1.05),
+        _ => (1.0, 1.0),
+    }
+}
+
+/// 访客船体强度（JS VIS_HP）。
+pub fn vis_hp(cls_key: &str) -> f32 {
+    match cls_key {
+        "B" => 34.0,
+        "A" => 52.0,
+        "S" => 80.0,
+        _ => 20.0,
+    }
+}
+
+/// 击毁战利品（JS PIRATE_LOOT：(item, min, max)）。
+fn pirate_loot(cls_key: &str) -> (i32, &'static [(&'static str, i32, i32)]) {
+    match cls_key {
+        "B" => (2500, &[("tritium", 8, 14), ("circuit", 2, 4)]),
+        "A" => (6000, &[("tritium", 10, 16), ("data", 3, 5), ("gold_ore", 2, 3)]),
+        "S" => (15000, &[("data", 5, 8), ("gold_ore", 3, 5), ("warpcell", 1, 1)]),
+        _ => (800, &[("tritium", 6, 10)]),
+    }
+}
+
+/// 太空战斗：左键开火 + 弹道更新 + 命中（访客船/小行星）。
+#[allow(clippy::too_many_arguments)]
+pub fn bolt_system(
+    time: Res<Time>,
+    mode: Res<FlightMode>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut ship: ResMut<ShipState>,
+    ship_asset: Res<ShipAsset>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut bolt_assets: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>, Handle<StandardMaterial>)>>,
+    mut bolts: Query<
+        (Entity, &mut LaserBolt, &mut Transform),
+        (Without<VisitorShip>, Without<Asteroid>),
+    >,
+    mut visitors: Query<
+        (Entity, &mut VisitorShip, &Transform),
+        (Without<LaserBolt>, Without<Asteroid>),
+    >,
+    asteroids: Query<
+        (Entity, &Transform),
+        (With<Asteroid>, Without<LaserBolt>, Without<VisitorShip>),
+    >,
+    mut player: Query<&mut Player>,
+    mut big_ev: MessageWriter<BigMessageEvent>,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    if *mode != FlightMode::Space {
+        return;
+    }
+    let dt = time.delta_secs();
+    ship.fire_cd = (ship.fire_cd - dt).max(0.0);
+    if bolt_assets.is_none() {
+        let mesh = meshes.add(Cuboid::new(0.16, 0.16, 1.6));
+        let mat = mats.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.55, 0.25),
+            emissive: LinearRgba::new(1.0, 0.4, 0.15, 1.0) * 2.5,
+            unlit: true,
+            ..default()
+        });
+        let drop_mat = mats.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 1.0, 0.85),
+            emissive: LinearRgba::new(0.2, 0.9, 0.7, 1.0) * 1.8,
+            unlit: true,
+            ..default()
+        });
+        *bolt_assets = Some((mesh, mat, drop_mat));
+    }
+    let (bolt_mesh, bolt_mat, drop_mat) = bolt_assets.clone().unwrap();
+    // 开火（JS shoot：双发 ±0.9 偏移，聚向准星）
+    if mouse.pressed(MouseButton::Left) && ship.fire_cd <= 0.0 {
+        ship.fire_cd = 0.22;
+        let (dmg, smul) = weapon_spec(&ship_asset.data.cls);
+        let q = ship_quat(ship.yaw, ship.pitch, ship.roll);
+        let fwd = ship_forward(ship.yaw, ship.pitch);
+        let right = q * Vec3::X;
+        for off in [-0.9f32, 0.9] {
+            let origin = ship.pos + right * off + Vec3::Y * 0.4;
+            commands.spawn((
+                Mesh3d(bolt_mesh.clone()),
+                MeshMaterial3d(bolt_mat.clone()),
+                Transform::from_translation(origin),
+                LaserBolt {
+                    dir: fwd,
+                    life: 1.6,
+                    origin,
+                    speed: 500.0 * smul,
+                    dmg,
+                },
+                crate::InGame,
+            ));
+        }
+        crate::audio::play(&mut commands, sfx.laser_hit.clone(), 0.35, None);
+    }
+    // 弹道更新 + 命中（快照迭代避免嵌套可变借用）
+    let snap: Vec<(Entity, LaserBolt, Vec3)> = bolts
+        .iter()
+        .map(|(e, b, tf)| (e, b.clone(), tf.translation))
+        .collect();
+    for (e, b, pos) in snap {
+        let np = pos + b.dir * b.speed * dt;
+        let mut alive = b.life - dt > 0.0;
+        // 访客船命中
+        let mut hit_vis: Option<Entity> = None;
+        for (ve, v, vt) in &visitors {
+            if v.hp <= 0.0 {
+                continue;
+            }
+            if np.distance(vt.translation) < 3.4 {
+                hit_vis = Some(ve);
+                break;
+            }
+        }
+        if let Some(ve) = hit_vis {
+            let (cls, pos) = {
+                let Ok((_, v, vt)) = visitors.get(ve) else { continue };
+                (v.cls, vt.translation)
+            };
+            let dead = {
+                let Ok((_, mut v, _)) = visitors.get_mut(ve) else { continue };
+                v.hp -= b.dmg;
+                v.hp <= 0.0
+            };
+            if dead {
+                // 击毁：战利品直入货仓 + 信用点（JS destroyVisitor）
+                let (cr, items) = pirate_loot(cls);
+                if let Ok(mut p) = player.single_mut() {
+                    p.credits += cr;
+                    for (item, a, bx) in items {
+                        let n = a + (crate::rng::Rng::new(
+                            (pos.x as u32).wrapping_mul(31) ^ (pos.z as u32).wrapping_mul(57) ^ (pos.y as u32).wrapping_mul(97),
+                        )
+                        .next()
+                            * (bx - a + 1) as f32) as i32;
+                        let got = p.inv.add_item(item, n);
+                        if got < n {
+                            spawn_space_drop(&mut commands, &bolt_mesh, &drop_mat, pos + Vec3::Y * 2.0, item, n - got);
+                        }
+                    }
+                }
+                big_ev.write(BigMessageEvent {
+                    title: format!("☠ 击毁 {} 级访客船", cls),
+                    sub: format!("战利品入舱 · 信用点 +{}", cr),
+                    dur: 3.5,
+                });
+                crate::audio::play(&mut commands, sfx.break_block.clone(), 0.7, None);
+                commands.entity(ve).despawn();
+            } else {
+                crate::audio::play(&mut commands, sfx.laser_hit.clone(), 0.3, None);
+            }
+            commands.entity(e).despawn();
+            continue;
+        }
+        // 小行星命中（JS：r10 击碎 → 氚 4-8 + 25% 金 1-2）
+        let mut hit_ast: Option<(Entity, Vec3)> = None;
+        for (ae, at) in &asteroids {
+            if np.distance(at.translation) < 10.0 {
+                hit_ast = Some((ae, at.translation));
+                break;
+            }
+        }
+        if let Some((ae, apos)) = hit_ast {
+            let mut rng = crate::rng::Rng::new(
+                (np.x as u32).wrapping_mul(31) ^ (np.z as u32).wrapping_mul(57) ^ (time.elapsed_secs() as u32).wrapping_mul(97),
+            );
+            let trit = 4 + (rng.next() * 5.0) as i32;
+            spawn_space_drop(&mut commands, &bolt_mesh, &drop_mat, apos, "tritium", trit);
+            if rng.next() < 0.25 {
+                let gold = 1 + (rng.next() * 2.0) as i32;
+                spawn_space_drop(&mut commands, &bolt_mesh, &drop_mat, apos + Vec3::Y * 2.0, "gold_ore", gold);
+            }
+            crate::audio::play(&mut commands, sfx.break_block.clone(), 0.6, None);
+            commands.entity(ae).despawn();
+            commands.entity(e).despawn();
+            continue;
+        }
+        if alive {
+            if let Ok((_, mut bq, mut bt)) = bolts.get_mut(e) {
+                bq.life = b.life - dt;
+                bt.translation = np;
+            }
+        } else {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// 生成太空掉落物（发光小立方）。
+fn spawn_space_drop(
+    commands: &mut Commands,
+    mesh: &Handle<Mesh>,
+    mat: &Handle<StandardMaterial>,
+    pos: Vec3,
+    item: &str,
+    n: i32,
+) {
+    commands.spawn((
+        Mesh3d(mesh.clone()),
+        MeshMaterial3d(mat.clone()),
+        Transform::from_translation(pos),
+        SpaceDrop {
+            item: item.to_string(),
+            n,
+            vel: Vec3::ZERO,
+            age: 0.0,
+        },
+        crate::InGame,
+    ));
+}
+
+/// 太空掉落物：磁吸飞船拾取（JS 太空拾取）。
+pub fn space_drop_system(
+    time: Res<Time>,
+    mode: Res<FlightMode>,
+    mut commands: Commands,
+    mut drops: Query<(Entity, &mut SpaceDrop, &mut Transform)>,
+    mut ship: ResMut<ShipState>,
+    mut player: Query<&mut Player>,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    if *mode != FlightMode::Space {
+        return;
+    }
+    let dt = time.delta_secs();
+    for (e, mut d, mut tf) in &mut drops {
+        d.age += dt;
+        if d.age > 180.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let dist = tf.translation.distance(ship.pos);
+        if dist < 6.5 {
+            let dir = (ship.pos - tf.translation).normalize_or_zero();
+            tf.translation += dir * 24.0 * dt;
+            if dist < 1.6 {
+                if let Ok(mut p) = player.single_mut() {
+                    p.inv.add_item(&d.item, d.n);
+                    crate::audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+                    commands.entity(e).despawn();
+                }
+            }
+        } else {
+            tf.translation += d.vel * dt;
+            d.vel *= (1.0 - dt).max(0.0);
+        }
+    }
+}
+
+/// 访客舰队：巡航（行星轨道点之间）+ 补员（35-65s）。
+#[allow(clippy::too_many_arguments)]
+pub fn visitor_system(
+    time: Res<Time>,
+    mode: Res<FlightMode>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
+    game: Res<SpaceGame>,
+    mut respawn: ResMut<VisitorRespawn>,
+    mut visitors: Query<(Entity, &mut VisitorShip, &mut Transform)>,
+) {
+    if *mode != FlightMode::Space {
+        return;
+    }
+    let dt = time.delta_secs();
+    let count = visitors.iter().count();
+    if count < 5 {
+        respawn.t -= dt;
+        if respawn.t <= 0.0 {
+            let mut rng = crate::rng::Rng::new(
+                (time.elapsed_secs() as u32).wrapping_mul(7919) ^ 0x5EED,
+            );
+            respawn.t = 35.0 + rng.next() * 30.0;
+            // 出生点：当前星球轨道附近
+            let pd = &game.galaxy.planets[game.current_planet.min(game.galaxy.planets.len() - 1)];
+            let a = rng.next() * std::f32::consts::TAU;
+            let el = (rng.next() - 0.5) * 0.8;
+            let r = pd.radius + 220.0 + rng.next() * 300.0;
+            let pos = Vec3::from(pd.pos)
+                + Vec3::new(a.cos() * el.cos(), el.sin(), a.sin() * el.cos()) * r;
+            let cls = crate::data::roll_ship_class(rng.next());
+            let (ent, flames) = spawn_ship(
+                &mut commands,
+                &mut meshes,
+                &mut mats,
+                &asset_server,
+                pos,
+                a,
+                cls,
+            );
+            for f in flames {
+                commands.entity(f).despawn();
+            }
+            let mut target = Vec3::ZERO;
+            let p2 = &game.galaxy.planets[(game.current_planet + 1).min(game.galaxy.planets.len() - 1)];
+            target = Vec3::from(p2.pos)
+                + Vec3::new(rng.next() - 0.5, (rng.next() - 0.5) * 0.5, rng.next() - 0.5).normalize()
+                    * (p2.radius + 220.0 + rng.next() * 300.0);
+            commands.entity(ent).insert(VisitorShip {
+                cls: cls.key,
+                hp: vis_hp(cls.key),
+                hp_max: vis_hp(cls.key),
+                target,
+                speed: 30.0 + rng.next() * 20.0,
+            });
+        }
+    }
+    // 巡航
+    for (_e, mut v, mut tf) in &mut visitors {
+        let to = v.target - tf.translation;
+        let d = to.length();
+        if d < 25.0 {
+            // 换目标：随机行星轨道点
+            let mut rng = crate::rng::Rng::new(
+                (tf.translation.x as u32).wrapping_mul(31) ^ (time.elapsed_secs() as u32).wrapping_mul(97),
+            );
+            let pd = &game.galaxy.planets[((rng.next() * game.galaxy.planets.len() as f32) as usize)
+                .min(game.galaxy.planets.len() - 1)];
+            let a = rng.next() * std::f32::consts::TAU;
+            let el = (rng.next() - 0.5) * 0.6;
+            let r = pd.radius + 220.0 + rng.next() * 300.0;
+            v.target = Vec3::from(pd.pos)
+                + Vec3::new(a.cos() * el.cos(), el.sin(), a.sin() * el.cos()) * r;
+        } else {
+            let step = v.speed * dt / d;
+            tf.translation += to * step;
+            tf.look_to(to, Vec3::Y);
+        }
+    }
 }
 
 // ---------- 曲速 ----------
@@ -374,77 +775,51 @@ fn emissive_mat(mats: &mut Assets<StandardMaterial>, color: Color, mult: f32) ->
 
 // ---------- 场景构建 ----------
 
-/// 程序化飞船（JS buildShip 方块兜底模型），返回 (根实体, 尾焰实体)。
+/// CC0 GLB 飞船模型（Kenney Space Kit，等级差异化映射）。
+pub fn ship_model_for(cls_key: &str) -> &'static str {
+    match cls_key {
+        "B" => "models/ships/ship_b.glb",
+        "A" => "models/ships/ship_a.glb",
+        "S" => "models/ships/ship_s.glb",
+        _ => "models/ships/ship_c.glb",
+    }
+}
+
+/// 访客船模型（随机轮换）。
+pub fn visitor_model_for(i: usize) -> &'static str {
+    const V: [&str; 4] = [
+        "models/ships/visitor1.glb",
+        "models/ships/visitor2.glb",
+        "models/ships/visitor3.glb",
+        "models/ships/visitor4.glb",
+    ];
+    V[i % V.len()]
+}
+
+/// 飞船（GLB 模型 + 尾焰），返回 (根实体, 尾焰实体)。
+/// 模型几何分析：Kenney craft 机头朝 -Z（与游戏前进方向一致），无需旋转修正。
 pub fn spawn_ship(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     pos: Vec3,
     yaw: f32,
     cls: &ShipClass,
 ) -> (Entity, Vec<Entity>) {
-    let hull = metal_mat(mats, Color::srgb(0.62, 0.68, 0.74));
-    let dark = metal_mat(mats, Color::srgb(0.30, 0.34, 0.38));
-    let glass = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.4, 0.86, 0.93, 0.7),
-        emissive: LinearRgba::new(0.07, 0.2, 0.27, 1.0),
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
-    });
-    let accent_color = parse_hex(cls.color).unwrap_or(Color::srgb(0.79, 0.39, 0.1));
-    let accent = metal_mat(mats, accent_color);
-    let engine_glow = emissive_mat(mats, Color::srgb(0.21, 0.69, 1.0), 2.0);
-
+    let model = ship_model_for(cls.key);
     let root = commands
         .spawn((
-            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(model))),
+            // 模型全长约 2.1 格，放大 1.5 倍贴近原版 3.6 格机身
+            Transform::from_translation(pos)
+                .with_rotation(Quat::from_rotation_y(yaw))
+                .with_scale(Vec3::splat(1.5)),
             Visibility::default(),
             crate::InGame,
         ))
         .id();
-    let b = |commands: &mut Commands,
-             meshes: &mut Assets<Mesh>,
-             root: Entity,
-             w: f32,
-             h: f32,
-             d: f32,
-             m: &Handle<StandardMaterial>,
-             x: f32,
-             y: f32,
-             z: f32| {
-        let e = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(w, h, d))),
-                MeshMaterial3d(m.clone()),
-                Transform::from_xyz(x, y, z),
-                crate::InGame,
-            ))
-            .id();
-        commands.entity(root).add_child(e);
-    };
-    // 机身（-z 朝前）
-    b(commands, meshes, root, 1.4, 0.9, 3.6, &hull, 0.0, 0.0, 0.0);
-    b(commands, meshes, root, 1.0, 0.5, 1.4, &dark, 0.0, 0.6, 0.4);
-    b(commands, meshes, root, 0.9, 0.62, 1.2, &glass, 0.0, 0.55, -0.9);
-    b(commands, meshes, root, 1.2, 0.3, 1.1, &dark, 0.0, -0.35, -1.9);
-    b(commands, meshes, root, 0.8, 0.42, 0.9, &hull, 0.0, -0.1, -2.4);
-    // 机翼
-    b(commands, meshes, root, 2.6, 0.16, 1.4, &hull, -1.9, -0.1, 0.7);
-    b(commands, meshes, root, 2.6, 0.16, 1.4, &hull, 1.9, -0.1, 0.7);
-    b(commands, meshes, root, 0.5, 0.5, 1.0, &accent, -3.0, 0.05, 0.8);
-    b(commands, meshes, root, 0.5, 0.5, 1.0, &accent, 3.0, 0.05, 0.8);
-    // 引擎
-    b(commands, meshes, root, 0.55, 0.55, 0.9, &dark, -0.55, -0.05, 1.9);
-    b(commands, meshes, root, 0.55, 0.55, 0.9, &dark, 0.55, -0.05, 1.9);
-    // 起落架
-    b(commands, meshes, root, 0.14, 0.5, 0.14, &dark, -0.5, -0.7, -0.8);
-    b(commands, meshes, root, 0.14, 0.5, 0.14, &dark, 0.5, -0.7, -0.8);
-    b(commands, meshes, root, 0.14, 0.5, 0.14, &dark, 0.0, -0.7, 1.2);
-    // 引擎光斑
-    b(commands, meshes, root, 0.4, 0.4, 0.12, &engine_glow, -0.55, -0.05, 2.4);
-    b(commands, meshes, root, 0.4, 0.4, 0.12, &engine_glow, 0.55, -0.05, 2.4);
-    // 尾焰
+    // 尾焰（保留发光半透明方块，飞行时显隐）
     let flame_mat = mats.add(StandardMaterial {
         base_color: Color::srgba(0.4, 0.8, 1.0, 0.7),
         emissive: LinearRgba::new(0.3, 0.6, 1.0, 1.0) * 2.0,
@@ -521,6 +896,7 @@ pub fn spawn_space_scene(
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     mats: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     galaxy: &Galaxy,
 ) -> SpaceScene {
     // 星光背景：远球壳上的小发光方块
@@ -625,22 +1001,23 @@ pub fn spawn_space_scene(
     }
     // 空间站
     let station = crate::station::spawn_station(commands, meshes, mats, Vec3::from(galaxy.station));
-    // 小行星（不规则缩放球体）
+    // 小行星（CC0 陨石模型，随机缩放）
     let mut asteroids = Vec::new();
     let mut ar = crate::rng::Rng::new(0xA57E);
-    let rock_mat = metal_mat(mats, Color::srgb(0.42, 0.40, 0.38));
-    let rock_mesh = meshes.add(Sphere::new(1.0));
-    for _ in 0..26 {
+    let meteor_a = asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/asteroids/meteor.glb"));
+    let meteor_b = asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/asteroids/meteor_detailed.glb"));
+    for i in 0..26 {
         let ang = ar.next() * std::f32::consts::TAU;
         let dist = 500.0 + ar.next() * 2600.0;
         let el = (ar.next() - 0.5) * 1600.0;
         let pos = Vec3::new(ang.cos() * dist, el, ang.sin() * dist);
         let scale = 3.0 + ar.next() * 14.0;
+        let model = if i % 3 == 0 { meteor_b.clone() } else { meteor_a.clone() };
         let e = commands
             .spawn((
-                Mesh3d(rock_mesh.clone()),
-                MeshMaterial3d(rock_mat.clone()),
-                Transform::from_translation(pos).with_scale(Vec3::new(scale, scale * 0.7, scale * 0.9)),
+                WorldAssetRoot(model),
+                Transform::from_translation(pos)
+                    .with_scale(Vec3::new(scale, scale * 0.7, scale * 0.9)),
                 Asteroid {
                     spin: Vec3::new(ar.next() * 0.4 - 0.2, ar.next() * 0.4 - 0.2, 0.0),
                 },
@@ -660,7 +1037,61 @@ pub fn spawn_space_scene(
     }
 }
 
-pub fn despawn_space_scene(commands: &mut Commands, scene: &SpaceScene) {
+/// 小行星自转 + 补员（击碎后维持 ≥8 颗，远离飞船生成）。
+#[allow(clippy::too_many_arguments)]
+pub fn asteroid_spin_system(
+    time: Res<Time>,
+    mut q: Query<(&Asteroid, &mut Transform)>,
+    scene: Option<ResMut<SpaceScene>>,
+    ship: Res<ShipState>,
+    asset_server: Res<AssetServer>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (a, mut tf) in &mut q {
+        tf.rotate(Quat::from_scaled_axis(a.spin * dt));
+    }
+    if let Some(mut sc) = scene {
+        if sc.asteroids.len() < 8 {
+            let mut rng = crate::rng::Rng::new(
+                (time.elapsed_secs() as u32).wrapping_mul(7919) ^ 0xA57E,
+            );
+            let meteor_a = asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/asteroids/meteor.glb"));
+            for _ in 0..16 {
+                let ang = rng.next() * std::f32::consts::TAU;
+                let dist = 900.0 + rng.next() * 2000.0;
+                let el = (rng.next() - 0.5) * 1600.0;
+                let pos = ship.pos + Vec3::new(ang.cos() * dist, el, ang.sin() * dist);
+                if pos.distance(ship.pos) > 800.0 {
+                    let scale = 3.0 + rng.next() * 14.0;
+                    let e = commands
+                        .spawn((
+                            WorldAssetRoot(meteor_a.clone()),
+                            Transform::from_translation(pos)
+                                .with_scale(Vec3::new(scale, scale * 0.7, scale * 0.9)),
+                            Asteroid {
+                                spin: Vec3::new(
+                                    rng.next() * 0.4 - 0.2,
+                                    rng.next() * 0.4 - 0.2,
+                                    0.0,
+                                ),
+                            },
+                            crate::InGame,
+                        ))
+                        .id();
+                    sc.asteroids.push(e);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+pub fn despawn_space_scene(
+    commands: &mut Commands,
+    scene: &SpaceScene,
+    extras: Query<Entity, Or<(With<VisitorShip>, With<SpaceDrop>, With<LaserBolt>)>>,
+) {
     for p in &scene.planets {
         commands.entity(p.entity).despawn();
     }
@@ -670,6 +1101,9 @@ pub fn despawn_space_scene(commands: &mut Commands, scene: &SpaceScene) {
     commands.entity(scene.dir_light).despawn();
     for a in &scene.asteroids {
         commands.entity(*a).despawn();
+    }
+    for e in &extras {
+        commands.entity(e).despawn();
     }
 }
 
@@ -735,7 +1169,8 @@ pub fn ship_interact_system(
     let dx = p.pos.x - ship.x;
     let dy = p.pos.y - ship.y;
     let dz = p.pos.z - ship.z;
-    if dx * dx + dy * dy + dz * dz > 36.0 {
+    // JS: distanceTo(shipPos) < 4.5
+    if dx * dx + dy * dy + dz * dz > 20.25 {
         return;
     }
     if !quests.flags.get("checkedShip").copied().unwrap_or(false) {
@@ -1193,7 +1628,8 @@ fn exit_to_space(
     let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
     let center = Vec3::from(planet.pos);
     ship.pos = center + dir * (planet.radius + (ship.pos.y - data::SEA_Y) * s);
-    ship.speed = (ship.speed / s).max(12.0);
+    // JS: Space.shipState.speed = Math.max(24, atmo.speed * s)
+    ship.speed = (ship.speed * s).max(24.0);
     ship.warmed = false;
     ship.presaved = false;
     // 换系：A/D 滚转（camRoll）延续为太空真实滚转；鼠标侧倾（roll）不携带
@@ -1532,10 +1968,15 @@ fn finish_warp(
 ) {
     let prev_seed = game.galaxy.seed;
     let leaving_home = prev_seed == data::HOME_GALAXY_SEED;
-    game.archives.insert(
-        prev_seed,
-        GalaxyArchive { planets: game.visited.clone(), marks: HashMap::new() },
-    );
+    // 旧星系：档案含该星系全部星球 + 当前星球标记（JS galaxyArchives[seed] + _marks）
+    let mut prev_archive = GalaxyArchive {
+        planets: game.visited.clone(),
+        marks: HashMap::new(),
+    };
+    prev_archive
+        .marks
+        .insert(game.current_planet, std::mem::take(&mut game.marks));
+    game.archives.insert(prev_seed, prev_archive);
     let gal = if target_seed == data::HOME_GALAXY_SEED {
         data::home_galaxy()
     } else {
@@ -1544,6 +1985,11 @@ fn finish_warp(
     let restored = game.archives.remove(&target_seed).unwrap_or_default();
     game.galaxy = gal;
     game.visited = restored.planets;
+    game.marks = restored
+        .marks
+        .get(&0)
+        .cloned()
+        .unwrap_or_default();
     game.current_planet = 0;
     game.landed_planet = -1;
     game.galaxy_count += 1;
@@ -1677,6 +2123,8 @@ pub fn atmoland_system(
     if t >= 1.0 {
         game.ship_pos = land.to;
         game.landed_planet = game.current_planet as i32;
+        // JS: atmoLandStart 提前 boardYaw = atmo.yaw（下船朝向与降落航向一致）
+        ship.board_yaw = ship.yaw;
         *next_mode = FlightMode::Seated;
         big_ev.write(BigMessageEvent {
             title: "降落完成".into(),
@@ -1719,17 +2167,26 @@ pub fn space_scene_sync_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
     game: Res<SpaceGame>,
+    extras: Query<Entity, Or<(With<VisitorShip>, With<SpaceDrop>, With<LaserBolt>)>>,
     mut commands: Commands,
 ) {
     let want = mode.space_scene();
     match (want, scene) {
         (true, None) => {
-            let sc = spawn_space_scene(&mut commands, &mut meshes, &mut images, &mut mats, &game.galaxy);
+            let sc = spawn_space_scene(
+                &mut commands,
+                &mut meshes,
+                &mut images,
+                &mut mats,
+                &asset_server,
+                &game.galaxy,
+            );
             commands.insert_resource(sc);
         }
         (false, Some(sc)) => {
-            despawn_space_scene(&mut commands, &sc);
+            despawn_space_scene(&mut commands, &sc, extras);
             commands.remove_resource::<SpaceScene>();
         }
         _ => {}
@@ -1744,15 +2201,24 @@ pub fn warp_arrive_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
     game: Res<SpaceGame>,
+    extras: Query<Entity, Or<(With<VisitorShip>, With<SpaceDrop>, With<LaserBolt>)>>,
     mut commands: Commands,
 ) {
     for _ in ev.read() {
         if let Some(sc) = scene.as_deref() {
-            despawn_space_scene(&mut commands, sc);
+            despawn_space_scene(&mut commands, sc, extras);
             commands.remove_resource::<SpaceScene>();
         }
-        let sc = spawn_space_scene(&mut commands, &mut meshes, &mut images, &mut mats, &game.galaxy);
+        let sc = spawn_space_scene(
+            &mut commands,
+            &mut meshes,
+            &mut images,
+            &mut mats,
+            &asset_server,
+            &game.galaxy,
+        );
         commands.insert_resource(sc);
     }
 }
@@ -1818,6 +2284,7 @@ pub fn spawn_initial_ship(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     world: &VoxelWorld,
     ship_data: &ShipData,
 ) -> (Entity, Vec<Entity>, Vec3) {
@@ -1828,8 +2295,31 @@ pub fn spawn_initial_ship(
         spawn.z + 4.0,
     );
     let cls = data::ship_class_by_key(&ship_data.cls);
-    let (e, flames) = spawn_ship(commands, meshes, mats, pos, 0.0, cls);
+    let (e, flames) = spawn_ship(commands, meshes, mats, asset_server, pos, 0.0, cls);
     (e, flames, pos)
+}
+
+// ---------- 飞船引擎循环音 ----------
+
+/// 大气/太空飞行时循环播放引擎音（JS Sound.loops.engine 移植）。
+pub fn engine_loop_system(
+    mode: Res<FlightMode>,
+    mut ship: ResMut<ShipState>,
+    mut commands: Commands,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    let flying = matches!(
+        *mode,
+        FlightMode::Atmo | FlightMode::AtmoLand | FlightMode::Space | FlightMode::Warping
+    );
+    if flying && ship.engine_snd.is_none() {
+        let e = crate::audio::play_loop(&mut commands, sfx.engine_loop.clone(), 0.32);
+        ship.engine_snd = Some(e);
+    } else if !flying {
+        if let Some(e) = ship.engine_snd.take() {
+            commands.entity(e).despawn();
+        }
+    }
 }
 
 // ---------- 保存辅助 ----------

@@ -19,6 +19,8 @@ pub struct UiState {
     pub panel: Panel,
     pub prompt: Option<String>,
     pub selected_inv: Option<usize>,
+    /// 背包拖拽手持物品（JS cursorStack 移植）
+    pub cursor: Option<Slot>,
     /// 大字提示（标题, 副标题, 剩余秒数）
     pub big: Option<(String, String, f32)>,
 }
@@ -34,11 +36,51 @@ pub enum Panel {
     Trade,
     Garage,
     GalaxyMap,
+    /// 创造物品库（P）
+    Creative,
+    /// 星球全息地图（M）
+    Map,
 }
 
 impl UiState {
     pub fn locked(&self) -> bool {
         self.panel != Panel::None
+    }
+
+    /// 关闭当前面板（不处理手持物品）。
+    pub fn close_panel(&mut self) {
+        self.panel = Panel::None;
+        self.selected_inv = None;
+    }
+}
+
+/// 手持物品归还背包；背包满时剩余部分掉落在玩家身旁（JS dropCursor 移植）。
+pub fn drop_cursor(
+    ui: &mut UiState,
+    player: &mut Player,
+    commands: &mut Commands,
+    world: &World,
+    icons: &IconMaterials,
+    sfx: &audio::Sfx,
+) {
+    if let Some(c) = ui.cursor.take() {
+        let added = player.inv.add_item(&c.item, c.n);
+        let left = c.n - added;
+        if left > 0 {
+            crate::creatures::spawn_drop(
+                commands,
+                world,
+                icons,
+                player.pos + Vec3::Y * 0.6,
+                Vec3::ZERO,
+                c.item,
+                left,
+                0.4,
+            );
+            audio::play(commands, sfx.pickup.clone(), 0.5, None);
+        } else if added > 0 {
+            audio::play(commands, sfx.click.clone(), 0.4, None);
+        }
     }
 }
 
@@ -185,7 +227,14 @@ pub struct Research {
     pub active: Option<(String, f32)>, // (tech id, progress seconds)
 }
 
-pub fn research_system(time: Res<Time>, mut research: ResMut<Research>, mut player: Query<&mut Player>) {
+pub fn research_system(
+    time: Res<Time>,
+    mut research: ResMut<Research>,
+    mut player: Query<&mut Player>,
+    mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
+    mut commands: Commands,
+    sfx: Res<audio::Sfx>,
+) {
     let mut completed: Option<String> = None;
     if let Some((id, prog)) = research.active.as_mut() {
         *prog += time.delta_secs();
@@ -198,8 +247,15 @@ pub fn research_system(time: Res<Time>, mut research: ResMut<Research>, mut play
     if let Some(id) = completed {
         research.active = None;
         research.techs.push(id.clone());
-        if let Ok(mut p) = player.single_mut() {
-            if let Some(tech) = data::TECHS.iter().find(|t| t.id == id) {
+        if let Some(tech) = data::TECHS.iter().find(|t| t.id == id) {
+            // JS：bigMessage('科技解锁', name—desc) + research 音
+            big_ev.write(crate::quests::BigMessageEvent {
+                title: format!("科技解锁：{}", tech.name),
+                sub: tech.desc.to_string(),
+                dur: 3.2,
+            });
+            audio::play(&mut commands, sfx.craft.clone(), 0.6, None);
+            if let Ok(mut p) = player.single_mut() {
                 p.toast(format!("科技解锁：{}", tech.name));
             }
         }
@@ -287,24 +343,90 @@ pub fn hud_system(
             });
         });
 
-    // vitals top-left
+    // vitals top-left（JS 段条/细条移植）
     egui::Area::new(egui::Id::new("vitals"))
         .fixed_pos(egui::pos2(12.0, 10.0))
         .interactable(false)
         .show(ctx, |ui| {
-            ui.label(
-                egui::RichText::new(format!("❤ {:.0}/8   🛡 {:.0}/6", p.stats.hp.ceil(), p.stats.shield.ceil()))
-                    .size(18.0)
-                    .strong(),
-            );
-            ui.label(egui::RichText::new(format!("⭕ O₂ {:.0}%", p.stats.o2)).size(14.0));
-            ui.label(
-                egui::RichText::new(format!(
-                    "🛡 防护 {:.0}%   🚀 喷气 {:.0}%   ⚡ 激光 {:.0}%",
-                    p.stats.haz, p.stats.jet, p.stats.laser
-                ))
-                .size(14.0),
-            );
+            {
+                let painter = ui.painter();
+                let bar_x = 44.0;
+                // 护盾段条（6 段）
+                painter.text(
+                    egui::pos2(0.0, 2.0),
+                    egui::Align2::LEFT_TOP,
+                    "护盾",
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                );
+                for i in 0..6 {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(bar_x + i as f32 * 14.0, 0.0),
+                        egui::vec2(12.0, 12.0),
+                    );
+                    let on = p.stats.shield as i32 > i;
+                    painter.rect_filled(
+                        r,
+                        egui::CornerRadius::same(2),
+                        if on {
+                            egui::Color32::from_rgb(0x35, 0xe0, 0xe8)
+                        } else {
+                            egui::Color32::from_rgb(0x12, 0x32, 0x4a)
+                        },
+                    );
+                }
+                // 生命段条（8 段）
+                painter.text(
+                    egui::pos2(0.0, 18.0),
+                    egui::Align2::LEFT_TOP,
+                    "生命",
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                );
+                for i in 0..8 {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(bar_x + i as f32 * 11.0, 16.0),
+                        egui::vec2(9.0, 12.0),
+                    );
+                    let on = p.stats.hp as i32 > i;
+                    painter.rect_filled(
+                        r,
+                        egui::CornerRadius::same(2),
+                        if on {
+                            egui::Color32::from_rgb(0xff, 0x6b, 0x6b)
+                        } else {
+                            egui::Color32::from_rgb(0x12, 0x32, 0x4a)
+                        },
+                    );
+                }
+                // 细条：氧气/防护/喷气/激光
+                for (label, val, color, y) in [
+                    ("氧气", p.stats.o2, egui::Color32::from_rgb(0x5b, 0xc0, 0xff), 32.0),
+                    ("防护", p.stats.haz, egui::Color32::from_rgb(0xff, 0xb3, 0x47), 44.0),
+                    ("喷气", p.stats.jet, egui::Color32::from_rgb(0xff, 0xb3, 0x47), 56.0),
+                    ("激光", p.stats.laser, egui::Color32::from_rgb(0xff, 0x6a, 0x4d), 68.0),
+                ] {
+                    painter.text(
+                        egui::pos2(0.0, y + 1.0),
+                        egui::Align2::LEFT_TOP,
+                        label,
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                    );
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(bar_x, y),
+                        egui::vec2(170.0, 6.0),
+                    );
+                    painter.rect_filled(r, egui::CornerRadius::same(2), egui::Color32::from_rgb(0x12, 0x32, 0x4a));
+                    let w = (170.0 * (val / 100.0).clamp(0.0, 1.0)).max(if val > 0.0 { 2.0 } else { 0.0 });
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(r.min, egui::vec2(w, 6.0)),
+                        egui::CornerRadius::same(2),
+                        color,
+                    );
+                }
+            }
+            ui.add_space(80.0);
             if let Some(g) = game.as_ref() {
                 ui.label(
                     egui::RichText::new(format!(
@@ -323,10 +445,11 @@ pub fn hud_system(
             }
             if let Some(w) = world.as_ref() {
                 let b = w.biome();
+                let haz = if b.haz_name.is_empty() { "宜居" } else { b.haz_name };
                 ui.label(
                     egui::RichText::new(format!(
                         "{} {}  ({:.0}, {:.0}, {:.0})",
-                        b.name, b.haz_name, p.pos.x, p.pos.y, p.pos.z
+                        b.name, haz, p.pos.x, p.pos.y, p.pos.z
                     ))
                     .size(13.0),
                 );
@@ -487,7 +610,7 @@ pub fn hud_system(
                 .show(ctx, |ui| {
                     let hint = match *mode {
                         crate::space::FlightMode::Atmo => "W/S 油门 · Shift 加力 · A/D 滚转 · E 降落 · 拉升冲出大气层",
-                        crate::space::FlightMode::Space => "W/S 油门 · Shift 加力 · J 脉冲 · C 扫描 · M 星系图 · E 泊入空间站 · 冲向星球再入",
+                        crate::space::FlightMode::Space => "W/S 油门 · Shift 加力 · J 脉冲 · C 扫描 · M 星系图 · 左键 开火 · 飞向空间站自动泊入 · 冲向星球再入",
                         _ => "",
                     };
                     ui.label(
@@ -750,6 +873,100 @@ fn slot_button(
 
 // ---------- Inventory panel ----------
 
+/// 背包槽位操作（JS bindSlotEvents 移植）。
+enum InvAction {
+    Left(usize),
+    Right(usize),
+    Shift(usize),
+    Trash,
+    Charge(&'static str),
+}
+
+/// 带左右键与 Shift 检测的槽位按钮响应。
+struct SlotResp {
+    clicked: bool,
+    secondary: bool,
+    shift: bool,
+}
+
+fn slot_button_ex(
+    ui: &mut egui::Ui,
+    cache: &EguiIcons,
+    key: &str,
+    slot: &Option<Slot>,
+    selected: bool,
+    size: f32,
+    tooltip: bool,
+) -> SlotResp {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(3),
+        if selected {
+            egui::Color32::from_rgb(0x23, 0x4a, 0x5e)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(0x10, 0x14, 0x1a, 0xCC)
+        },
+    );
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(3),
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(0x35, 0x46, 0x55)),
+        egui::StrokeKind::Inside,
+    );
+    if !key.is_empty() {
+        let tex = egui_icon(cache, key);
+        let pad = size * 0.08;
+        let img_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x + pad, rect.min.y + pad),
+            egui::pos2(rect.max.x - pad, rect.max.y - pad),
+        );
+        painter.image(
+            tex,
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+    if let Some(s) = slot {
+        painter.text(
+            egui::pos2(rect.max.x - 3.0, rect.max.y - 12.0),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("{}", s.n),
+            egui::FontId::proportional(11.0),
+            egui::Color32::WHITE,
+        );
+    }
+    if tooltip && resp.hovered() {
+        let item_key = if key.is_empty() {
+            slot.as_ref().map(|s| s.item.clone())
+        } else {
+            Some(key.to_string())
+        };
+        if let Some(ik) = &item_key {
+            if let Some(it) = data::item_by_key(ik) {
+                let cat = match it.cat {
+                    "res" => "资源",
+                    "mat" => "材料",
+                    "blk" => "方块",
+                    _ => "机器",
+                };
+                resp.clone().on_hover_text(format!(
+                    "{}\n{} · 基准价 ₪{}\n{}",
+                    it.name, cat, it.price, it.desc
+                ));
+            }
+        }
+    }
+    let shift = ui.input(|i| i.modifiers.shift);
+    SlotResp {
+        clicked: resp.clicked(),
+        secondary: resp.secondary_clicked(),
+        shift,
+    }
+}
+
 pub fn inventory_panel_system(
     mut contexts: EguiContexts,
     cache: Res<EguiIcons>,
@@ -758,6 +975,9 @@ pub fn inventory_panel_system(
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
     research: Res<Research>,
+    world: Res<World>,
+    icons: Res<IconMaterials>,
+    mut tab: Local<usize>,
 ) {
     if ui_state.panel != Panel::Inventory {
         return;
@@ -767,102 +987,166 @@ pub fn inventory_panel_system(
         return;
     }
     let mut close = false;
-    let mut craft_request: Option<usize> = None;
+    let mut actions: Vec<InvAction> = Vec::new();
+    let mut craft_request: Option<(usize, i32)> = None;
     let mut sort_request = false;
-    let mut charge_request: Option<&'static str> = None;
-    let mut tab: usize = 0;
-    let mut click_slot: Option<usize> = None;
 
     // snapshot
     let credits = player.single().map(|p| p.credits).unwrap_or(0);
     let inv_snapshot = player.single().map(|p| p.inv.slots.clone()).unwrap_or_default();
-    let sel = ui_state.selected_inv;
+    let stats_snap = player
+        .single()
+        .map(|p| p.stats.clone())
+        .unwrap_or_else(|_| crate::player::Stats::full());
+    let cursor_snap = ui_state.cursor.clone();
+    let drop_mult = player.single().map(|p| p.difficulty.drop_mult()).unwrap_or(1.0);
 
-    egui::Window::new("背包与合成")
-        .default_size([720.0, 470.0])
+    egui::Window::new("◈ 外骨骼背包")
+        .default_size([760.0, 500.0])
         .resizable(false)
         .collapsible(false)
         .open(&mut !close)
         .show(ctx, |ui| {
-            if ui.button("✕ 关闭 (Tab)").clicked() {
-                close = true;
-            }
             ui.horizontal(|ui| {
                 if ui.button("🧹 整理").clicked() {
                     sort_request = true;
                 }
                 ui.label(format!("₪ {credits}"));
+                if let Some(c) = &cursor_snap {
+                    ui.label(
+                        egui::RichText::new(format!("手持：{} ×{}", item_name(&c.item), c.n))
+                            .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✕ 关闭 (Tab)").clicked() {
+                        close = true;
+                    }
+                });
             });
             ui.columns(2, |cols| {
-                // left: inventory grid
-                cols[0].label("物品栏 (前 9 格为快捷栏)");
+                // left: hotbar row + storage grid
+                cols[0].label("快捷栏 (1-9 · 0=激光)");
+                egui::Grid::new("inv_hotbar")
+                    .num_columns(9)
+                    .spacing([4.0, 4.0])
+                    .show(&mut cols[0], |ui| {
+                        for i in 0..crate::inventory::HOTBAR {
+                            let s = inv_snapshot[i].clone();
+                            let key = s.as_ref().map(|s| s.item.as_str()).unwrap_or("");
+                            let r = slot_button_ex(ui, &cache, key, &s, false, 40.0, true);
+                            if r.clicked && !r.shift {
+                                actions.push(InvAction::Left(i));
+                            } else if r.secondary {
+                                actions.push(InvAction::Right(i));
+                            } else if r.clicked && r.shift {
+                                actions.push(InvAction::Shift(i));
+                            }
+                        }
+                    });
+                cols[0].add_space(6.0);
+                cols[0].label("储物 (27 格)");
                 egui::Grid::new("inv_grid")
                     .num_columns(9)
                     .spacing([4.0, 4.0])
                     .show(&mut cols[0], |ui| {
-                        for i in 0..36 {
+                        for i in crate::inventory::HOTBAR..36 {
                             let s = inv_snapshot[i].clone();
-                            let is_sel = sel == Some(i);
-                            let clicked = slot_button(
-                                ui,
-                                &cache,
-                                s.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
-                                &s,
-                                is_sel,
-                                40.0,
-                            );
-                            if clicked {
-                                click_slot = Some(i);
-                            }
-                            if (i + 1) % 9 == 0 {
-                                ui.end_row();
+                            let key = s.as_ref().map(|s| s.item.as_str()).unwrap_or("");
+                            let r = slot_button_ex(ui, &cache, key, &s, false, 40.0, true);
+                            if r.clicked && !r.shift {
+                                actions.push(InvAction::Left(i));
+                            } else if r.secondary {
+                                actions.push(InvAction::Right(i));
+                            } else if r.clicked && r.shift {
+                                actions.push(InvAction::Shift(i));
                             }
                         }
                     });
+                cols[0].add_space(6.0);
+                // 充能面板
+                cols[0].label("充能");
+                for (sys, item, cost, gain) in data::CHARGE_DEFS {
+                    let label = match *sys {
+                        "laser" => "⚡",
+                        "shield" => "🛡",
+                        "hp" => "❤",
+                        "o2" => "⭕",
+                        _ => "🧪",
+                    };
+                    let name = data::item_by_key(item).map(|i| i.name).unwrap_or(item);
+                    let cur = stats_snap.get(sys);
+                    let max = match *sys {
+                        "hp" => 8.0,
+                        "shield" => 6.0,
+                        _ => 100.0,
+                    };
+                    let can = cur < max - 0.01 && has_items(&inv_snapshot, &[(item, *cost)]);
+                    if cols[0]
+                        .add_enabled(
+                            can,
+                            egui::Button::new(format!(
+                                "{label} {cur:.0}/{max:.0} 充能 {name}×{cost} → +{gain:.0}"
+                            ))
+                            .small(),
+                        )
+                        .clicked()
+                    {
+                        actions.push(InvAction::Charge(sys));
+                    }
+                }
+                cols[0].add_space(6.0);
+                // 垃圾桶 + 操作提示
                 cols[0].horizontal(|ui| {
-                    for (sys, item, cost, gain) in data::CHARGE_DEFS {
-                        let label = match *sys {
-                            "laser" => "⚡",
-                            "shield" => "🛡",
-                            "hp" => "❤",
-                            "o2" => "⭕",
-                            _ => "🧪",
-                        };
-                        let name = data::item_by_key(item).map(|i| i.name).unwrap_or(item);
-                        if ui
-                            .button(format!("{label} {name}×{cost} → +{gain:.0}"))
-                            .clicked()
-                        {
-                            charge_request = Some(sys);
+                    let has_cursor = cursor_snap.is_some();
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::click());
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::CornerRadius::same(3),
+                        egui::Color32::from_rgba_unmultiplied(0x2a, 0x14, 0x14, 0xCC),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(3),
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(0x8a, 0x35, 0x35)),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🗑",
+                        egui::FontId::proportional(20.0),
+                        egui::Color32::WHITE,
+                    );
+                    if resp.clicked() && has_cursor {
+                        actions.push(InvAction::Trash);
+                    }
+                    ui.label(
+                        egui::RichText::new("左键：选取/放下 · 右键：拆半/放1 · Shift+左键：快速移动 · 🗑：销毁手持 · 🧹：整理")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x7f, 0x9d, 0xb0)),
+                    );
+                });
+                // right: crafting
+                cols[1].label("⚒ 便携合成 (Shift+点击 合成 5 个)");
+                cols[1].horizontal(|ui| {
+                    let labels = ["全部", "材料", "机器", "方块"];
+                    for (i, l) in labels.iter().enumerate() {
+                        if ui.selectable_label(*tab == i, *l).clicked() {
+                            *tab = i;
                         }
                     }
                 });
-
-                // right: crafting
-                cols[1].label("合成 (T = 科技树)");
-                cols[1].horizontal(|ui| {
-                    if ui.selectable_label(tab == 0, "全部").clicked() {
-                        tab = 0;
-                    }
-                    if ui.selectable_label(tab == 1, "材料").clicked() {
-                        tab = 1;
-                    }
-                    if ui.selectable_label(tab == 2, "机器").clicked() {
-                        tab = 2;
-                    }
-                    if ui.selectable_label(tab == 3, "方块").clicked() {
-                        tab = 3;
-                    }
-                });
                 egui::ScrollArea::vertical()
-                    .max_height(330.0)
+                    .max_height(340.0)
                     .show(&mut cols[1], |ui| {
                         for (idx, r) in data::RECIPES.iter().enumerate() {
                             if r.station != "hand" {
                                 continue;
                             }
                             let Some(out_item) = data::item_by_key(r.output.0) else { continue };
-                            let show = match tab {
+                            let show = match *tab {
                                 1 => out_item.cat == "mat",
                                 2 => out_item.cat == "mach",
                                 3 => out_item.cat == "blk",
@@ -871,31 +1155,57 @@ pub fn inventory_panel_system(
                             if !show {
                                 continue;
                             }
-                            if let Some(t) = r.tech {
-                                if !research.techs.iter().any(|x| x == t) {
-                                    continue;
-                                }
+                            let tech_locked = r
+                                .tech
+                                .map(|t| !research.techs.iter().any(|x| x == t))
+                                .unwrap_or(false);
+                            if tech_locked {
+                                continue;
                             }
                             let affordable = has_items(&inv_snapshot, r.inputs);
-                            let inputs = r
-                                .inputs
-                                .iter()
-                                .map(|(i, n)| format!("{}×{}", data::item_by_key(i).map(|i| i.name).unwrap_or(i), n))
-                                .collect::<Vec<_>>()
-                                .join(" + ");
+                            let out_n = (r.output.1 as f32 * drop_mult).round() as i32;
+                            let mut cost_parts = Vec::new();
+                            for (i, n) in r.inputs {
+                                let have: i32 = inv_snapshot
+                                    .iter()
+                                    .flatten()
+                                    .filter(|s| s.item == *i)
+                                    .map(|s| s.n)
+                                    .sum();
+                                let name = data::item_by_key(i).map(|i| i.name).unwrap_or(i);
+                                cost_parts.push((
+                                    name,
+                                    *n,
+                                    have >= *n,
+                                ));
+                            }
                             ui.horizontal(|ui| {
                                 draw_slot(ui, &cache, r.output.0, None, false, 34.0);
                                 ui.vertical(|ui| {
-                                    ui.label(format!("{} ×{}", out_item.name, r.output.1));
-                                    ui.label(
-                                        egui::RichText::new(format!("{inputs}  ({:.1}s)", r.time))
-                                            .size(11.0)
-                                            .color(egui::Color32::GRAY),
-                                    );
+                                    ui.label(format!("{} ×{}", out_item.name, out_n));
+                                    ui.horizontal(|ui| {
+                                        for (name, n, ok) in &cost_parts {
+                                            ui.label(
+                                                egui::RichText::new(format!("{name}×{n}"))
+                                                    .size(11.0)
+                                                    .color(if *ok {
+                                                        egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
+                                                    } else {
+                                                        egui::Color32::from_rgb(0xff, 0x55, 0x55)
+                                                    }),
+                                            );
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!("({:.1}s)", r.time))
+                                                .size(11.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    });
                                 });
-                                let resp = ui.add_enabled(affordable, egui::Button::new("制作").small());
+                                let resp = ui.add_enabled(affordable, egui::Button::new("合成").small());
                                 if resp.clicked() {
-                                    craft_request = Some(idx);
+                                    let count = if resp.ctx.input(|i| i.modifiers.shift) { 5 } else { 1 };
+                                    craft_request = Some((idx, count));
                                 }
                             });
                             ui.separator();
@@ -905,51 +1215,194 @@ pub fn inventory_panel_system(
         });
 
     if close {
-        ui_state.panel = Panel::None;
-        ui_state.selected_inv = None;
+        ui_state.close_panel();
+        if let Ok(mut p) = player.single_mut() {
+            drop_cursor(&mut ui_state, &mut p, &mut commands, &world, &icons, &sfx);
+        }
     }
-    if let Some(i) = click_slot {
-        match ui_state.selected_inv {
-            None => ui_state.selected_inv = Some(i),
-            Some(prev) if prev == i => ui_state.selected_inv = None,
-            Some(prev) => {
-                if let Ok(mut p) = player.single_mut() {
-                    p.inv.slots.swap(prev, i);
+    // 应用槽位操作
+    let Ok(mut p) = player.single_mut() else { return };
+    for a in actions {
+        match a {
+            InvAction::Left(i) => {
+                let slot = p.inv.slots[i].clone();
+                match ui_state.cursor.take() {
+                    None => {
+                        if let Some(s) = slot {
+                            ui_state.cursor = Some(s);
+                            p.inv.slots[i] = None;
+                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                        }
+                    }
+                    Some(c) => match slot {
+                        None => {
+                            p.inv.slots[i] = Some(c);
+                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                        }
+                        Some(s) if s.item == c.item => {
+                            let stack = data::item_by_key(&c.item).map(|i| i.stack).unwrap_or(250);
+                            let add = (stack - s.n).min(c.n);
+                            if add > 0 {
+                                p.inv.slots[i] = Some(Slot { item: s.item, n: s.n + add });
+                                let left = c.n - add;
+                                if left > 0 {
+                                    ui_state.cursor = Some(Slot { item: c.item, n: left });
+                                }
+                                audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                            } else {
+                                ui_state.cursor = Some(c);
+                            }
+                        }
+                        Some(s) => {
+                            // 不同物品：交换
+                            p.inv.slots[i] = Some(c);
+                            ui_state.cursor = Some(s);
+                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                        }
+                    },
                 }
-                ui_state.selected_inv = None;
+            }
+            InvAction::Right(i) => {
+                let slot = p.inv.slots[i].clone();
+                match ui_state.cursor.take() {
+                    None => {
+                        if let Some(s) = slot {
+                            if s.n <= 1 {
+                                ui_state.cursor = Some(s);
+                                p.inv.slots[i] = None;
+                            } else {
+                                let half = (s.n as f32 / 2.0).ceil() as i32;
+                                ui_state.cursor = Some(Slot { item: s.item.clone(), n: half });
+                                p.inv.slots[i] = Some(Slot { item: s.item, n: s.n - half });
+                            }
+                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                        }
+                    }
+                    Some(c) => match slot {
+                        None => {
+                            // 放 1 个
+                            let n = c.n - 1;
+                            p.inv.slots[i] = Some(Slot { item: c.item.clone(), n: 1 });
+                            if n > 0 {
+                                ui_state.cursor = Some(Slot { item: c.item, n });
+                            }
+                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                        }
+                        Some(s) if s.item == c.item => {
+                            let stack = data::item_by_key(&c.item).map(|i| i.stack).unwrap_or(250);
+                            if s.n < stack {
+                                p.inv.slots[i] = Some(Slot { item: s.item, n: s.n + 1 });
+                                let left = c.n - 1;
+                                if left > 0 {
+                                    ui_state.cursor = Some(Slot { item: c.item, n: left });
+                                }
+                                audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                            } else {
+                                ui_state.cursor = Some(c);
+                            }
+                        }
+                        Some(_) => {
+                            ui_state.cursor = Some(c);
+                        }
+                    },
+                }
+            }
+            InvAction::Shift(i) => {
+                // 快速移动：热栏 ↔ 储物
+                let target_range: Vec<usize> = if i < crate::inventory::HOTBAR {
+                    (crate::inventory::HOTBAR..36).collect()
+                } else {
+                    (0..crate::inventory::HOTBAR).collect()
+                };
+                let Some(s) = p.inv.slots[i].clone() else { continue };
+                let stack = data::item_by_key(&s.item).map(|i| i.stack).unwrap_or(250);
+                // 先合并到部分堆
+                let mut moved = 0;
+                for t in &target_range {
+                    if moved >= s.n {
+                        break;
+                    }
+                    if let Some(ts) = &mut p.inv.slots[*t] {
+                        if ts.item == s.item && ts.n < stack {
+                            let add = (stack - ts.n).min(s.n - moved);
+                            ts.n += add;
+                            moved += add;
+                        }
+                    }
+                }
+                // 再放入空格
+                for t in &target_range {
+                    if moved >= s.n {
+                        break;
+                    }
+                    if p.inv.slots[*t].is_none() {
+                        let add = (s.n - moved).min(stack);
+                        p.inv.slots[*t] = Some(Slot { item: s.item.clone(), n: add });
+                        moved += add;
+                    }
+                }
+                if moved > 0 {
+                    let left = s.n - moved;
+                    if left > 0 {
+                        p.inv.slots[i] = Some(Slot { item: s.item, n: left });
+                    } else {
+                        p.inv.slots[i] = None;
+                    }
+                    audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                }
+            }
+            InvAction::Trash => {
+                if ui_state.cursor.take().is_some() {
+                    audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                }
+            }
+            InvAction::Charge(sys) => {
+                if p.charge(sys) {
+                    audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+                } else {
+                    audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+                }
             }
         }
     }
     if sort_request {
-        if let Ok(mut p) = player.single_mut() {
-            p.inv.sort_storage();
-            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-        }
+        p.inv.sort_storage();
+        audio::play(&mut commands, sfx.click.clone(), 0.4, None);
     }
-    if let Some(idx) = craft_request {
+    if let Some((idx, count)) = craft_request {
         let r = &data::RECIPES[idx];
-        if let Ok(mut p) = player.single_mut() {
-            if p.inv.pay_items(r.inputs) {
-                p.inv.add_item(r.output.0, r.output.1);
-                audio::play(&mut commands, sfx.craft.clone(), 0.6, None);
-                p.toast(format!(
-                    "合成：{} ×{}",
-                    data::item_by_key(r.output.0).map(|i| i.name).unwrap_or(r.output.0),
-                    r.output.1
-                ));
-            } else {
-                audio::play(&mut commands, sfx.error.clone(), 0.5, None);
-                p.toast("材料不足");
+        let mut crafted = 0;
+        for _ in 0..count {
+            if !p.inv.pay_items(r.inputs) {
+                break;
             }
+            let out_n = (r.output.1 as f32 * drop_mult).round() as i32;
+            let added = p.inv.add_item(r.output.0, out_n);
+            let left = out_n - added;
+            if left > 0 {
+                crate::creatures::spawn_drop(
+                    &mut commands,
+                    &world,
+                    &icons,
+                    p.pos + Vec3::Y * 0.6,
+                    Vec3::ZERO,
+                    r.output.0.to_string(),
+                    left,
+                    0.4,
+                );
+            }
+            crafted += 1;
         }
-    }
-    if let Some(sys) = charge_request {
-        if let Ok(mut p) = player.single_mut() {
-            if p.charge(sys) {
-                audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
-            } else {
-                audio::play(&mut commands, sfx.error.clone(), 0.5, None);
-            }
+        if crafted > 0 {
+            audio::play(&mut commands, sfx.craft.clone(), 0.6, None);
+            p.toast(format!(
+                "合成：{} ×{}",
+                data::item_by_key(r.output.0).map(|i| i.name).unwrap_or(r.output.0),
+                crafted
+            ));
+        } else {
+            audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+            p.toast("材料不足");
         }
     }
 }
@@ -997,17 +1450,39 @@ pub fn tech_panel_system(
             if ui.button("✕ 关闭 (T)").clicked() {
                 close = true;
             }
+            let data_n = player.single().map(|p| p.inv.count_item("data")).unwrap_or(0);
+            ui.label(
+                egui::RichText::new(format!("⬡ 研究数据 ×{data_n}"))
+                    .size(14.0)
+                    .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+            );
             let (resp, painter) = ui.allocate_painter(egui::vec2(990.0, 440.0), egui::Sense::hover());
             let origin = resp.rect.min + egui::vec2(30.0, 170.0);
+            // 连线三态配色（JS: done #7dff8a66 / req 完成 #ffb34766 / 锁定 #24405a，非 done 虚线 6 4）
             for t in data::TECHS {
                 for req in t.req {
                     if let Some(rt) = data::TECHS.iter().find(|x| x.id == *req) {
                         let a = origin + egui::vec2(rt.pos.0, rt.pos.1);
                         let b = origin + egui::vec2(t.pos.0, t.pos.1);
-                        painter.line_segment(
-                            [a, b],
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(0x3a, 0x4a, 0x5a)),
-                        );
+                        let t_done = research.techs.iter().any(|x| x == t.id) || t.unlocked;
+                        let req_done = research.techs.iter().any(|x| x == *req);
+                        let (color, dash) = if t_done {
+                            (egui::Color32::from_rgba_unmultiplied(0x7d, 0xff, 0x8a, 0x40), 0.0)
+                        } else if req_done {
+                            (egui::Color32::from_rgba_unmultiplied(0xff, 0xb3, 0x47, 0x40), 6.0)
+                        } else {
+                            (egui::Color32::from_rgb(0x24, 0x40, 0x5a), 6.0)
+                        };
+                        if dash > 0.0 {
+                            painter.add(egui::Shape::dashed_line(
+                                &[a, b],
+                                egui::Stroke::new(2.0, color),
+                                dash,
+                                4.0,
+                            ));
+                        } else {
+                            painter.line_segment([a, b], egui::Stroke::new(2.0, color));
+                        }
                     }
                 }
             }
@@ -1122,6 +1597,8 @@ pub fn machine_panel_system(
     mut ui_state: ResMut<UiState>,
     mut q: Query<(&Machine, &mut MachineState)>,
     power: Res<crate::factory::Power>,
+    world: Res<World>,
+    icons: Res<IconMaterials>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
 ) {
@@ -1148,12 +1625,12 @@ pub fn machine_panel_system(
     let state_snap = q.get(e).ok().map(|(_, s)| s.clone());
 
     egui::Window::new(format!("◈ {}", kind.label()))
-        .default_size([360.0, 360.0])
+        .default_size([420.0, 620.0])
         .resizable(false)
         .collapsible(false)
         .open(&mut open)
         .show(ctx, |ui| {
-            if ui.button("✕ 关闭 (E)").clicked() {
+            if ui.button("✕ 关闭 (Esc)").clicked() {
                 close = true;
             }
             ui.label(format!(
@@ -1228,12 +1705,16 @@ pub fn machine_panel_system(
                     }
                 }
                 Some(MachineState::Crafter(cr)) => {
-                    // 配方选择
+                    // 配方选择（装配机含便携配方，JS where:'both' 语义）
                     let where_ = if kind == MachineKind::Refinery { "refinery" } else { "assembler" };
                     let mut current = cr.recipe.unwrap_or("");
                     let avail: Vec<&'static data::Recipe> = data::RECIPES
                         .iter()
-                        .filter(|r| r.station == where_ || r.station == "both")
+                        .filter(|r| {
+                            r.station == where_
+                                || r.station == "both"
+                                || (where_ == "assembler" && r.station == "hand")
+                        })
                         .collect();
                     egui::ComboBox::from_id_salt("recipe_pick")
                         .selected_text(if current.is_empty() { "选择配方".to_string() } else { current.to_string() })
@@ -1331,6 +1812,72 @@ pub fn machine_panel_system(
                     .size(13.0)
                     .color(if power.sat < 0.99 { egui::Color32::from_rgb(0xff, 0x55, 0x55) } else { egui::Color32::from_rgb(0xff, 0xb3, 0x47) }),
             );
+            // 外骨骼背包（JS：机器面板内嵌 36 格背包；Shift+点击 直接放入机器）
+            ui.separator();
+            ui.label(
+                egui::RichText::new("◈ 外骨骼背包（点击选中 · Shift+点击 放入机器）")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+            );
+            egui::Grid::new("mach_inv_grid")
+                .num_columns(9)
+                .spacing([4.0, 4.0])
+                .show(ui, |ui| {
+                    for i in 0..36 {
+                        let s = inv_snapshot[i].clone();
+                        let key = s.as_ref().map(|s| s.item.as_str()).unwrap_or("");
+                        let is_sel = ui_state.selected_inv == Some(i);
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(3),
+                            if is_sel {
+                                egui::Color32::from_rgb(0x23, 0x4a, 0x5e)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(0x10, 0x14, 0x1a, 0xCC)
+                            },
+                        );
+                        ui.painter().rect_stroke(
+                            rect,
+                            egui::CornerRadius::same(3),
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x35, 0x46, 0x55)),
+                            egui::StrokeKind::Inside,
+                        );
+                        if !key.is_empty() {
+                            let tex = egui_icon(&cache, key);
+                            ui.painter().image(
+                                tex,
+                                egui::Rect::from_min_max(
+                                    rect.min + egui::vec2(3.0, 3.0),
+                                    rect.max - egui::vec2(3.0, 3.0),
+                                ),
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                        if let Some(s) = &s {
+                            ui.painter().text(
+                                egui::pos2(rect.max.x - 3.0, rect.max.y - 11.0),
+                                egui::Align2::RIGHT_BOTTOM,
+                                format!("{}", s.n),
+                                egui::FontId::proportional(10.0),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                        if resp.clicked() {
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            if shift {
+                                actions.push(MachinePanelAction::InsertItem(i));
+                            } else {
+                                ui_state.selected_inv = if is_sel { None } else { Some(i) };
+                            }
+                        }
+                        if (i + 1) % 9 == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
         });
     if !open {
         close = true;
@@ -1381,7 +1928,24 @@ pub fn machine_panel_system(
                     _ => None,
                 };
                 if let Some(o) = out {
-                    p.inv.add_item(&o.item, o.n);
+                    let added = p.inv.add_item(&o.item, o.n);
+                    let left = o.n - added;
+                    if left > 0 {
+                        crate::creatures::spawn_drop(
+                            &mut commands,
+                            &world,
+                            &icons,
+                            Vec3::new(
+                                mclone.pos[0] as f32 + 0.5,
+                                mclone.pos[1] as f32 + 1.2,
+                                mclone.pos[2] as f32 + 0.5,
+                            ),
+                            Vec3::ZERO,
+                            o.item,
+                            left,
+                            0.4,
+                        );
+                    }
                     audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
                 }
             }
@@ -1392,7 +1956,24 @@ pub fn machine_panel_system(
                     _ => None,
                 };
                 if let Some(s) = taken {
-                    p.inv.add_item(&s.item, s.n);
+                    let added = p.inv.add_item(&s.item, s.n);
+                    let left = s.n - added;
+                    if left > 0 {
+                        crate::creatures::spawn_drop(
+                            &mut commands,
+                            &world,
+                            &icons,
+                            Vec3::new(
+                                mclone.pos[0] as f32 + 0.5,
+                                mclone.pos[1] as f32 + 1.2,
+                                mclone.pos[2] as f32 + 0.5,
+                            ),
+                            Vec3::ZERO,
+                            s.item,
+                            left,
+                            0.4,
+                        );
+                    }
                     audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
                 }
             }
@@ -1409,14 +1990,50 @@ pub fn machine_panel_system(
             MachinePanelAction::SetRecipe(id) => {
                 let id_str: &'static str = Box::leak(id.clone().into_boxed_str());
                 if let MachineState::Crafter(cr) = &mut *st {
-                    // 切换配方：旧产出掉落
-                    if let Some(o) = cr.output.take() {
-                        p.inv.add_item(&o.item, o.n);
+                    // 切换配方：退还全部原料 + 进行中配方一组 + 旧产出（JS refund，溢出掉落机旁）
+                    let drop_pos = Vec3::new(
+                        mclone.pos[0] as f32 + 0.5,
+                        mclone.pos[1] as f32 + 1.2,
+                        mclone.pos[2] as f32 + 0.5,
+                    );
+                    let mut refund_one = |p: &mut Player, commands: &mut Commands, item: String, n: i32| {
+                        let added = p.inv.add_item(&item, n);
+                        let left = n - added;
+                        if left > 0 {
+                            crate::creatures::spawn_drop(
+                                commands, &world, &icons, drop_pos, Vec3::ZERO, item, left, 0.4,
+                            );
+                        }
+                    };
+                    for (k, v) in cr.input.drain() {
+                        refund_one(&mut p, &mut commands, k, v);
                     }
-                    cr.input.clear();
+                    if cr.prog > 0.0 {
+                        if let Some(rid) = cr.recipe {
+                            if let Some(r) = data::RECIPES.iter().find(|r| r.id == rid) {
+                                for (i, n) in r.inputs {
+                                    refund_one(&mut p, &mut commands, i.to_string(), *n);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(o) = cr.output.take() {
+                        refund_one(&mut p, &mut commands, o.item, o.n);
+                    }
                     cr.recipe = Some(id_str);
                     cr.prog = 0.0;
                     audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                }
+            }
+            MachinePanelAction::InsertItem(i) => {
+                if let Some(s) = p.inv.slots[i].clone() {
+                    if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
+                        p.inv.remove_item(&s.item, 1);
+                        audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                    } else {
+                        p.toast("机器不接受该物品");
+                        audio::play(&mut commands, sfx.error.clone(), 0.4, None);
+                    }
                 }
             }
             MachinePanelAction::BeaconLabel(label, gal) => {
@@ -1437,6 +2054,7 @@ enum MachinePanelAction {
     ChestPut,
     SetRecipe(String),
     BeaconLabel(String, bool),
+    InsertItem(usize),
 }
 
 fn chest_grid(
@@ -1604,7 +2222,10 @@ pub fn pause_panel_system(
             });
             ui.horizontal(|ui| {
                 ui.label("音量");
-                ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0));
+                if ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0)).changed() {
+                    crate::audio::set_master_volume(settings.volume);
+                    let _ = crate::save::save_settings(&settings);
+                }
             });
             ui.checkbox(&mut settings.show_fps, "显示 FPS");
             if ui.checkbox(&mut settings.pixelated, "像素风渲染（重启生效）").changed() {
@@ -1647,44 +2268,131 @@ pub struct SaveEvent;
 #[derive(Message)]
 pub struct QuitToMenuEvent;
 
-/// Handle F5 quicksave.
+/// Handle F5 quicksave（JS：任意时刻可存档）。
 pub fn quicksave_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut save_ev: MessageWriter<SaveEvent>,
-    ui: Res<UiState>,
 ) {
-    if keys.just_pressed(KeyCode::F5) && ui.panel == Panel::None {
+    if keys.just_pressed(KeyCode::F5) {
         save_ev.write(SaveEvent);
     }
 }
 
+/// 失焦（Alt-Tab/切窗）清空按键与飞行输入，防卡键（JS window.blur 移植）。
+pub fn clear_input_on_focus_lost(
+    mut focus_ev: MessageReader<bevy::window::WindowFocused>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut space_input: ResMut<crate::space::SpaceInput>,
+    mut player: Query<&mut Player>,
+) {
+    for ev in focus_ev.read() {
+        if !ev.focused {
+            keys.clear();
+            mouse.clear();
+            space_input.clear();
+            for mut p in &mut player {
+                p.mining = None;
+            }
+        }
+    }
+}
+
 /// Panel toggle hotkeys (Tab/T/E/Esc) + E interaction.
+#[allow(clippy::too_many_arguments)]
 pub fn panel_hotkeys_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_state: ResMut<UiState>,
+    mut quests: Option<ResMut<crate::quests::Quests>>,
+    mut station: Option<ResMut<crate::station::StationState>>,
     mut player: Query<&mut Player>,
     world: Res<World>,
     machines: Query<(Entity, &Machine)>,
     mode: Res<crate::space::FlightMode>,
+    icons: Res<IconMaterials>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
+        // 对话优先关闭（JS: dialogActive → closeDialog，Esc 不绕过对话开暂停面板）
+        if let Some(q) = quests.as_deref_mut() {
+            if q.side_dialog.is_some() {
+                q.side_dialog = None;
+                return;
+            }
+            if q.dialog.is_some() {
+                q.dialog = None;
+                return;
+            }
+        }
+        if let Some(st) = station.as_deref_mut() {
+            if st.dlg.is_some() {
+                st.dlg = None;
+                return;
+            }
+        }
+        let was_locked = ui_state.locked();
         match ui_state.panel {
             Panel::None => {
                 ui_state.panel = Panel::Pause;
                 ui_state.selected_inv = None;
+                audio::play(&mut commands, sfx.click.clone(), 0.5, None);
             }
-            Panel::Pause => ui_state.panel = Panel::None,
-            _ => ui_state.panel = Panel::None,
+            _ => {
+                ui_state.close_panel();
+                audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+            }
+        }
+        if was_locked {
+            // 关闭面板时手持物品归还背包
+            if let Ok(mut p) = player.single_mut() {
+                drop_cursor(&mut ui_state, &mut p, &mut commands, &world, &icons, &sfx);
+            }
         }
     }
-    if keys.just_pressed(KeyCode::Tab) && !ui_state.locked() {
-        ui_state.panel = Panel::Inventory;
-        ui_state.selected_inv = None;
+    // Tab：开关背包/合成面板（JS: UI.toggle('invPanel')）
+    if keys.just_pressed(KeyCode::Tab) {
+        if ui_state.panel == Panel::Inventory {
+            ui_state.close_panel();
+            if let Ok(mut p) = player.single_mut() {
+                drop_cursor(&mut ui_state, &mut p, &mut commands, &world, &icons, &sfx);
+            }
+            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+        } else if !ui_state.locked() {
+            ui_state.panel = Panel::Inventory;
+            ui_state.selected_inv = None;
+            audio::play(&mut commands, sfx.click.clone(), 0.5, None);
+        }
     }
     if keys.just_pressed(KeyCode::KeyT) && !ui_state.locked() && *mode == crate::space::FlightMode::Planet {
         ui_state.panel = Panel::Tech;
+    }
+    // P：创造物品库（JS: creative && (planet|space)）
+    if keys.just_pressed(KeyCode::KeyP)
+        && !ui_state.locked()
+        && matches!(*mode, crate::space::FlightMode::Planet | crate::space::FlightMode::Space)
+    {
+        if let Ok(p) = player.single() {
+            if p.creative() {
+                ui_state.panel = Panel::Creative;
+                ui_state.selected_inv = None;
+                audio::play(&mut commands, sfx.click.clone(), 0.5, None);
+            }
+        }
+    }
+    // M：星球地图（planet/seated/atmo）
+    if keys.just_pressed(KeyCode::KeyM)
+        && !ui_state.locked()
+        && matches!(
+            *mode,
+            crate::space::FlightMode::Planet
+                | crate::space::FlightMode::Seated
+                | crate::space::FlightMode::Atmo
+        )
+    {
+        ui_state.panel = Panel::Map;
+        ui_state.selected_inv = None;
+        audio::play(&mut commands, sfx.click.clone(), 0.5, None);
     }
     if keys.just_pressed(KeyCode::KeyE) && !ui_state.locked() && *mode == crate::space::FlightMode::Planet {
         let Ok(mut p) = player.single_mut() else { return };
@@ -1724,22 +2432,167 @@ pub struct ScanPulse {
     pub active: bool,
 }
 
+/// 扫描冷却/标记（JS doScan：cd 6s、范围 24/48/80、标记 25s 过期）。
+#[derive(Resource, Default)]
+pub struct ScanState {
+    pub cd: f32,
+    pub marker_mat: Option<Handle<StandardMaterial>>,
+    pub marker_mesh: Option<Handle<Mesh>>,
+}
+
+/// 扫描标记（发光小立方，靠近/被挖/过期即散）。
+#[derive(Component)]
+pub struct ScanMarker {
+    pub cell: [i32; 3],
+    pub block_id: u8,
+    pub expire: f32,
+}
+
 pub fn scan_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut pulse: ResMut<ScanPulse>,
+    mut state: ResMut<ScanState>,
     time: Res<Time>,
     mut materials: ResMut<Assets<crate::materials::TerrainMat>>,
     mats: Res<crate::materials::TerrainMaterials>,
     player: Query<&Player>,
     ui: Res<UiState>,
+    world: Res<World>,
+    research: Res<Research>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut stdmats: ResMut<Assets<StandardMaterial>>,
+    mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
+    mut markers: Query<(Entity, &mut ScanMarker, &Transform)>,
+    sfx: Res<audio::Sfx>,
 ) {
+    let dt = time.delta_secs();
+    state.cd = (state.cd - dt).max(0.0);
+    let Ok(p) = player.single() else { return };
+    // 标记过期 / 靠近 3.5m / 方块被挖 → 消散（JS doScan 标记生命周期）
+    for (e, mut m, tf) in &mut markers {
+        m.expire -= dt;
+        let dist = tf.translation.distance(p.pos);
+        let mined = world.get(m.cell[0], m.cell[1], m.cell[2]) != m.block_id;
+        if m.expire <= 0.0 || dist < 3.5 || mined {
+            commands.entity(e).despawn();
+        }
+    }
     if keys.just_pressed(KeyCode::KeyC) && !ui.locked() {
+        if state.cd > 0.0 {
+            return;
+        }
+        state.cd = 6.0;
         pulse.active = true;
         pulse.t = 0.0;
+        audio::play(&mut commands, sfx.pickup.clone(), 0.6, None);
+        let range: i32 = if research.techs.iter().any(|t| t == "scan2") {
+            80
+        } else if research.techs.iter().any(|t| t == "scan1") {
+            48
+        } else {
+            24
+        };
+        let pcx = p.pos.x.floor() as i32;
+        let pcz = p.pos.z.floor() as i32;
+        let py = p.pos.y.floor() as i32;
+        let y_lo = (py - 24).max(1);
+        let y_hi = (py + 16).min(crate::data::WORLD_H - 1);
+        let r2 = range * range;
+        let mut cands: Vec<([i32; 3], u8, f32)> = Vec::new();
+        for chunk in world.chunks.values() {
+            let bx = chunk.cx * crate::data::CHUNK;
+            let bz = chunk.cz * crate::data::CHUNK;
+            let cdx = bx - pcx;
+            let cdz = bz - pcz;
+            if cdx.abs() > range + 16 || cdz.abs() > range + 16 {
+                continue;
+            }
+            for y in y_lo..=y_hi {
+                for lz in 0..crate::data::CHUNK {
+                    for lx in 0..crate::data::CHUNK {
+                        let x = bx + lx;
+                        let z = bz + lz;
+                        let dx = x - pcx;
+                        let dz = z - pcz;
+                        if dx * dx + dz * dz > r2 {
+                            continue;
+                        }
+                        let id = chunk.data[crate::world::lidx(lx, y, lz)];
+                        if id == 0 {
+                            continue;
+                        }
+                        let def = crate::data::block_by_id(id);
+                        let target = def.ore
+                            || matches!(
+                                def.key,
+                                "sodium_plant" | "oxygen_plant" | "glow_shroom" | "crystal" | "amber"
+                            );
+                        if !target {
+                            continue;
+                        }
+                        let d2 = (dx * dx + dz * dz) as f32 + ((y - py) * (y - py)) as f32;
+                        cands.push(([x, y, z], id, d2));
+                    }
+                }
+            }
+        }
+        // 按距离升序 → 同类（同 block id）曼哈顿 <6 去重只留最近 → 上限 24
+        cands.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        let mut seen: Vec<(u8, i32, i32)> = Vec::new();
+        let mut out: Vec<([i32; 3], u8)> = Vec::new();
+        for (cell, id, _) in cands {
+            let dup = seen
+                .iter()
+                .any(|(k, sx, sz)| *k == id && (cell[0] - sx).abs() + (cell[2] - sz).abs() < 6);
+            if dup {
+                continue;
+            }
+            seen.push((id, cell[0], cell[2]));
+            out.push((cell, id));
+            if out.len() >= 24 {
+                break;
+            }
+        }
+        if state.marker_mesh.is_none() {
+            state.marker_mesh = Some(meshes.add(Cuboid::new(0.24, 0.24, 0.24)));
+        }
+        if state.marker_mat.is_none() {
+            state.marker_mat = Some(stdmats.add(StandardMaterial {
+                base_color: Color::srgb(0.35, 0.9, 0.95),
+                emissive: LinearRgba::new(0.2, 0.8, 0.9, 1.0) * 1.6,
+                unlit: true,
+                ..default()
+            }));
+        }
+        let mesh = state.marker_mesh.clone().unwrap();
+        let mat = state.marker_mat.clone().unwrap();
+        for (cell, id) in &out {
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform::from_translation(Vec3::new(
+                    cell[0] as f32 + 0.5,
+                    cell[1] as f32 + 1.35,
+                    cell[2] as f32 + 0.5,
+                )),
+                Visibility::default(),
+                ScanMarker {
+                    cell: *cell,
+                    block_id: *id,
+                    expire: 25.0,
+                },
+                crate::InGame,
+            ));
+        }
+        big_ev.write(crate::quests::BigMessageEvent {
+            title: format!("扫描完成：发现 {} 处矿物信号", out.len()),
+            sub: format!("范围 {}m", range),
+            dur: 2.5,
+        });
     }
-    let Ok(p) = player.single() else { return };
     if pulse.active {
-        pulse.t += time.delta_secs();
+        pulse.t += dt;
         let r = pulse.t * 480.0;
         let a = (pulse.t * 0.9).clamp(0.0, 0.9)
             * (1.0 - (pulse.t - 0.9).max(0.0) / 0.5).clamp(0.0, 1.0);
@@ -1849,6 +2702,9 @@ pub fn trade_panel_system(
         if p.credits >= price * n {
             p.credits -= price * n;
             p.inv.add_item(&item, n);
+            // 市场漂移（JS: mod = min(1.6, mod + 0.01*n)）
+            let m = game.galaxy.market.entry(item.clone()).or_insert(1.0);
+            *m = (*m + 0.01 * n as f32).min(1.6);
             traded = true;
             audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
         } else {
@@ -1860,6 +2716,9 @@ pub fn trade_panel_system(
         if p.inv.count_item(&item) >= n {
             p.inv.remove_item(&item, n);
             p.credits += price * n;
+            // 市场漂移（JS: mod = max(0.5, mod - 0.012*n)）
+            let m = game.galaxy.market.entry(item.clone()).or_insert(1.0);
+            *m = (*m - 0.012 * n as f32).max(0.5);
             traded = true;
             audio::play(&mut commands, sfx.click.clone(), 0.5, None);
         } else {
@@ -1976,7 +2835,345 @@ pub fn garage_panel_system(
     }
 }
 
-// ---------- 星系地图 ----------
+// ---------- 创造物品库（P） ----------
+
+pub fn creative_panel_system(
+    mut contexts: EguiContexts,
+    cache: Res<EguiIcons>,
+    mut player: Query<&mut Player>,
+    mut ui_state: ResMut<UiState>,
+    mut commands: Commands,
+    sfx: Res<audio::Sfx>,
+) {
+    if ui_state.panel != Panel::Creative {
+        return;
+    }
+    let ctx = contexts.ctx_mut().expect("egui primary context");
+    if !egui_fonts_ready(ctx) {
+        return;
+    }
+    let mut close = false;
+    let mut give: Vec<(String, i32)> = Vec::new();
+    egui::Window::new("✦ 创造物品库")
+        .default_size([520.0, 560.0])
+        .resizable(false)
+        .collapsible(false)
+        .open(&mut !close)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("左键 +64 · 右键 +1")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(0x7f, 0x9d, 0xb0)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✕ 关闭 (P)").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                egui::Grid::new("creative_grid")
+                    .num_columns(8)
+                    .spacing([4.0, 4.0])
+                    .show(ui, |ui| {
+                        for item in data::ITEMS {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::click());
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(3),
+                                egui::Color32::from_rgba_unmultiplied(0x10, 0x14, 0x1a, 0xCC),
+                            );
+                            ui.painter().rect_stroke(
+                                rect,
+                                egui::CornerRadius::same(3),
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x35, 0x46, 0x55)),
+                                egui::StrokeKind::Inside,
+                            );
+                            let tex = egui_icon(&cache, item.key);
+                            ui.painter().image(
+                                tex,
+                                egui::Rect::from_min_max(
+                                    rect.min + egui::vec2(4.0, 4.0),
+                                    rect.max - egui::vec2(4.0, 4.0),
+                                ),
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                            resp.clone().on_hover_text(format!("{}\n{}", item.name, item.desc));
+                            if resp.clicked() {
+                                give.push((item.key.to_string(), 64));
+                            } else if resp.secondary_clicked() {
+                                give.push((item.key.to_string(), 1));
+                            }
+                        }
+                    });
+            });
+        });
+    if close {
+        ui_state.close_panel();
+    }
+    if !give.is_empty() {
+        if let Ok(mut p) = player.single_mut() {
+            for (item, n) in give {
+                p.inv.add_item(&item, n);
+            }
+            audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+        }
+    }
+}
+
+// ---------- 星球全息地图（M） ----------
+
+/// 地图面板状态（名字输入、范围、待添加点、选中项）。
+#[derive(Resource, Default)]
+pub struct MapState {
+    pub name: String,
+    pub gal: bool,
+    pub pending: Option<(i32, i32)>,
+    pub sel: Option<usize>,
+}
+
+/// 地图可见区域（世界生成范围，JS genStructures x∈[-650,650] z∈[-220,220]）。
+const MAP_X0: i32 = -650;
+const MAP_X1: i32 = 650;
+const MAP_Z0: i32 = -220;
+const MAP_Z1: i32 = 220;
+
+pub fn planet_map_system(
+    mut contexts: EguiContexts,
+    mut ui_state: ResMut<UiState>,
+    mut game: ResMut<crate::space::SpaceGame>,
+    mut map: ResMut<MapState>,
+    player: Query<&Player>,
+    world: Res<World>,
+    machines: Query<(&crate::factory::Machine, &crate::factory::MachineState)>,
+    mut commands: Commands,
+    sfx: Res<audio::Sfx>,
+) {
+    if ui_state.panel != Panel::Map {
+        return;
+    }
+    let ctx = contexts.ctx_mut().expect("egui primary context");
+    if !egui_fonts_ready(ctx) {
+        return;
+    }
+    let Ok(p) = player.single() else { return };
+    let mut close = false;
+    let mut add_req = false;
+    let mut del_req: Option<usize> = None;
+    let mut toggle_req: Option<usize> = None;
+    let (cw, ch) = (560.0f32, 340.0f32);
+    let sx = cw / (MAP_X1 - MAP_X0) as f32;
+    let sz = ch / (MAP_Z1 - MAP_Z0) as f32;
+    let to_canvas = |wx: f32, wz: f32| -> egui::Pos2 {
+        egui::pos2(
+            (wx - MAP_X0 as f32) * sx,
+            ch - (wz - MAP_Z0 as f32) * sz,
+        )
+    };
+    let to_world = |px: f32, py: f32| -> (i32, i32) {
+        (
+            ((px / sx) as i32 + MAP_X0).clamp(MAP_X0, MAP_X1),
+            (( (ch - py) / sz) as i32 + MAP_Z0).clamp(MAP_Z0, MAP_Z1),
+        )
+    };
+    egui::Window::new("◈ 星球全息地图")
+        .default_size([600.0, 520.0])
+        .resizable(false)
+        .collapsible(false)
+        .open(&mut !close)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "X {:.0} · Z {:.0} · 标记 {} 个",
+                        p.pos.x,
+                        p.pos.z,
+                        game.marks.len()
+                    ))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0x7f, 0x9d, 0xb0)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✕ 关闭 (M)").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            let (resp, painter) = ui.allocate_painter(egui::vec2(cw, ch), egui::Sense::click_and_drag());
+            let rect = resp.rect;
+            // 底图
+            painter.rect_filled(rect, egui::CornerRadius::same(4), egui::Color32::from_rgb(0x07, 0x10, 0x1a));
+            // 网格
+            for gx in (MAP_X0..=MAP_X1).step_by(130) {
+                let a = to_canvas(gx as f32, MAP_Z0 as f32);
+                let b = to_canvas(gx as f32, MAP_Z1 as f32);
+                painter.line_segment(
+                    [rect.min + egui::vec2(a.x, a.y), rect.min + egui::vec2(b.x, b.y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0x1d, 0x3a, 0x52, 0x80)),
+                );
+            }
+            for gz in (MAP_Z0..=MAP_Z1).step_by(110) {
+                let a = to_canvas(MAP_X0 as f32, gz as f32);
+                let b = to_canvas(MAP_X1 as f32, gz as f32);
+                painter.line_segment(
+                    [rect.min + egui::vec2(a.x, a.y), rect.min + egui::vec2(b.x, b.y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0x1d, 0x3a, 0x52, 0x80)),
+                );
+            }
+            let pin = |painter: &egui::Painter, pos: egui::Pos2, color: egui::Color32, label: Option<&str>| {
+                let r = egui::Rect::from_center_size(pos, egui::vec2(7.0, 7.0));
+                painter.circle_filled(pos, 4.0, color);
+                if let Some(l) = label {
+                    painter.text(
+                        pos + egui::vec2(6.0, -6.0),
+                        egui::Align2::LEFT_TOP,
+                        l,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(0xc9, 0xe6, 0xee),
+                    );
+                }
+                let _ = r;
+            };
+            // 村庄 / 遗迹
+            for s in &world.g.structures {
+                match s {
+                    crate::world::Structure::Village { x, z, .. } => {
+                        pin(&painter, rect.min + to_canvas(*x as f32, *z as f32).to_vec2(), egui::Color32::from_rgb(0x4d, 0xc8, 0x6a), None);
+                    }
+                    crate::world::Structure::Ruin { x, z, .. } => {
+                        pin(&painter, rect.min + to_canvas(*x as f32, *z as f32).to_vec2(), egui::Color32::from_rgb(0xd8, 0xb0, 0x38), None);
+                    }
+                }
+            }
+            // 信标方块（金色菱形）
+            for (m, bs) in &machines {
+                if let crate::factory::MachineState::Beacon(bc) = bs {
+                    pin(
+                        &painter,
+                        rect.min + to_canvas(m.pos[0] as f32 + 0.5, m.pos[2] as f32 + 0.5).to_vec2(),
+                        egui::Color32::from_rgb(0xff, 0xa0, 0x30),
+                        Some(&bc.label),
+                    );
+                }
+            }
+            // 飞船
+            pin(&painter, rect.min + to_canvas(game.ship_pos.x, game.ship_pos.z).to_vec2(), egui::Color32::from_rgb(0x35, 0xe0, 0xe8), Some("🚀"));
+            // 玩家箭头（按朝向）
+            {
+                let pp = rect.min + to_canvas(p.pos.x, p.pos.z).to_vec2();
+                let ang = -p.yaw;
+                let dir = egui::vec2(ang.sin(), -ang.cos()) * 10.0;
+                let mut pts = vec![pp + dir, pp + egui::vec2(-dir.y, dir.x) * 0.6, pp + egui::vec2(dir.y, -dir.x) * 0.6];
+                pts.push(pp + dir);
+                painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, egui::Color32::from_rgb(0x7d, 0xff, 0x8a))));
+            }
+            // 用户标记
+            for (i, m) in game.marks.iter().enumerate() {
+                let c = if m.gal {
+                    egui::Color32::from_rgb(0xc0, 0x7d, 0xff)
+                } else {
+                    egui::Color32::from_rgb(0xff, 0xd1, 0x66)
+                };
+                let pp = rect.min + to_canvas(m.x as f32, m.z as f32).to_vec2();
+                pin(&painter, pp, c, Some(&m.label));
+                if map.sel == Some(i) {
+                    painter.rect_stroke(
+                        egui::Rect::from_center_size(pp, egui::vec2(14.0, 14.0)),
+                        egui::CornerRadius::same(7),
+                        egui::Stroke::new(1.5, egui::Color32::WHITE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+            // 待添加点
+            if let Some((mx, mz)) = map.pending {
+                pin(&painter, rect.min + to_canvas(mx as f32, mz as f32).to_vec2(), egui::Color32::from_rgb(0xff, 0x44, 0x44), None);
+            }
+            // 点击拾取
+            if resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let (wx, wz) = to_world(pos.x - rect.min.x, pos.y - rect.min.y);
+                    map.pending = Some((wx, wz));
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("标记名");
+                ui.add(egui::TextEdit::singleline(&mut map.name).desired_width(160.0));
+                ui.checkbox(&mut map.gal, "✦ 全星系显示");
+                let can_add = map.pending.is_some() && !map.name.trim().is_empty();
+                if ui.add_enabled(can_add, egui::Button::new("⚑ 添加标记")).clicked() {
+                    add_req = true;
+                }
+                if let Some((mx, mz)) = map.pending {
+                    ui.label(
+                        egui::RichText::new(format!("坐标 ({mx}, {mz})"))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+                    );
+                }
+            });
+            ui.separator();
+            ui.label(
+                egui::RichText::new("标记列表（⚑ 切换全星系 · 🗑 删除）")
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0x7f, 0x9d, 0xb0)),
+            );
+            if game.marks.is_empty() {
+                ui.label("（暂无标记）");
+            }
+            for (i, m) in game.marks.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let sel = map.sel == Some(i);
+                    if ui.selectable_label(sel, format!("{} ({}, {})", m.label, m.x, m.z)).clicked() {
+                        map.sel = if sel { None } else { Some(i) };
+                        map.pending = None;
+                    }
+                    if ui.button(if m.gal { "✦ 全星系" } else { "⚑ 本星球" }).clicked() {
+                        toggle_req = Some(i);
+                    }
+                    if ui.button("🗑").clicked() {
+                        del_req = Some(i);
+                    }
+                });
+            }
+        });
+    if close {
+        ui_state.close_panel();
+        map.pending = None;
+        map.sel = None;
+    }
+    if add_req {
+        if let Some((mx, mz)) = map.pending.take() {
+            game.marks.push(crate::space::Mark {
+                x: mx,
+                z: mz,
+                y: world.top_at(mx, mz) + 1,
+                label: map.name.trim().to_string(),
+                gal: map.gal,
+            });
+            map.name.clear();
+            audio::play(&mut commands, sfx.click.clone(), 0.5, None);
+        }
+    }
+    if let Some(i) = del_req {
+        if i < game.marks.len() {
+            game.marks.remove(i);
+            map.sel = None;
+            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+        }
+    }
+    if let Some(i) = toggle_req {
+        if let Some(m) = game.marks.get_mut(i) {
+            m.gal = !m.gal;
+            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+        }
+    }
+}
 
 pub fn galaxy_map_system(
     mut contexts: EguiContexts,

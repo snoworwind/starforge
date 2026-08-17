@@ -706,7 +706,7 @@ pub fn space_input_system(
 
 #[allow(clippy::too_many_arguments)]
 pub fn ship_interact_system(
-    keys: Res<ButtonInput<KeyCode>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
     mut next_mode: ResMut<FlightMode>,
     mut player: Query<&mut Player>,
     mut ship_state: ResMut<ShipState>,
@@ -739,6 +739,8 @@ pub fn ship_interact_system(
     }
     if p.creative() {
         board_ship(&mut next_mode, &mut p, &mut ship_state, &game, &world, &mut commands, &sfx);
+        // 本次 E 已被登船消费：同帧链内 seated_system 不能再触发下船
+        keys.clear_just_pressed(KeyCode::KeyE);
         return;
     }
     let repaired = quests.flags.get("shipRepaired").copied().unwrap_or(false);
@@ -765,6 +767,8 @@ pub fn ship_interact_system(
         return;
     }
     board_ship(&mut next_mode, &mut p, &mut ship_state, &game, &world, &mut commands, &sfx);
+    // 同上：清掉本帧的 E，避免链内 seated_system 同帧立即下船
+    keys.clear_just_pressed(KeyCode::KeyE);
 }
 
 fn board_ship(

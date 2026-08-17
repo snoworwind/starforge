@@ -1309,4 +1309,35 @@ mod tests {
         // volcanic: dry+lava → water id present (as lava)
         assert!(d.iter().any(|&v| v == ids::WATER));
     }
+
+    #[test]
+    fn chunk_mesh_uses_absolute_world_coordinates() {
+        // 回归：网格顶点必须是绝对世界坐标 —— spawn_chunk_mesh 以恒等变换渲染，
+        // 若这里变成区块局部坐标，每块地形会被双倍偏移、块间出现大空洞。
+        let atlas = crate::textures::Atlas::build();
+        let mut w = World::new(4242, "lush", 8);
+        for cz in 4..=6 {
+            for cx in 2..=4 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        let c = w.get_chunk(3, 5).expect("chunk 3,5 generated");
+        let (solid, _water) = build_chunk_meshes(&w, c, &atlas);
+        let m = solid.expect("chunk 3,5 must contain terrain");
+        assert!(!m.positions.is_empty());
+        for p in &m.positions {
+            // 块面角点可恰好落在区块边界（lx=15 的 +X 面在 x0+16.0），故上界含等号
+            assert!(
+                (48.0..=64.0).contains(&p[0]),
+                "x {:?} outside chunk 3 world footprint [48,64]",
+                p
+            );
+            assert!(
+                (80.0..=96.0).contains(&p[2]),
+                "z {:?} outside chunk 5 world footprint [80,96]",
+                p
+            );
+            assert!((0.0..=96.0).contains(&p[1]), "y {:?} outside world height", p);
+        }
+    }
 }

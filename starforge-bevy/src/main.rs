@@ -1450,7 +1450,9 @@ fn spawn_chunk_mesh(
         .spawn((
             Mesh3d(handle),
             MeshMaterial3d(mat),
-            Transform::from_xyz(cx as f32 * 16.0, 0.0, cz as f32 * 16.0),
+            // 顶点已是绝对世界坐标（build_chunk_meshes 以 x0+lx / z0+lz 生成），
+            // 不能再叠加区块原点平移，否则每块地形被双倍偏移、块间出现大空洞。
+            Transform::default(),
             aabb,
             NoAutoAabb,
             ChunkMesh,

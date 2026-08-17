@@ -797,7 +797,10 @@ pub fn visitor_model_for(i: usize) -> &'static str {
 }
 
 /// 飞船（GLB 模型 + 尾焰），返回 (根实体, 尾焰实体)。
-/// 模型几何分析：Kenney craft 机头朝 -Z（与游戏前进方向一致），无需旋转修正。
+/// 模型几何分析：Kenney craft 机头朝 -Z（与游戏前进方向一致），无需旋转修正；
+/// 资产已去除 Kenney 建模残留的根节点 t(2,0,1.5) 平移，位置直接落在 pos。
+pub const SHIP_SCALE: f32 = 1.5;
+
 pub fn spawn_ship(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -814,7 +817,7 @@ pub fn spawn_ship(
             // 模型全长约 2.1 格，放大 1.5 倍贴近原版 3.6 格机身
             Transform::from_translation(pos)
                 .with_rotation(Quat::from_rotation_y(yaw))
-                .with_scale(Vec3::splat(1.5)),
+                .with_scale(Vec3::splat(SHIP_SCALE)),
             Visibility::default(),
             crate::InGame,
         ))

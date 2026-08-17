@@ -25,6 +25,8 @@ pub struct Creature {
     pub home: Vec3,
     pub jump_t: f32,
     pub kind: &'static str,
+    /// 模型基准缩放（spawn 时按实测包围盒换算；呼吸动画必须乘性应用，不能覆盖）
+    pub scale: f32,
 }
 
 impl Creature {
@@ -41,6 +43,7 @@ impl Creature {
             home,
             jump_t: 0.0,
             kind: "strider",
+            scale: 1.0,
         }
     }
 }
@@ -57,9 +60,8 @@ impl Default for CreatureSpawner {
 }
 
 /// Spawn a creature at a ground position（CC0 GLB 模型：crab/blob/strider）。
-/// 缩放按模型实测包围盒（strider 135.4 / crab 19.4 / blob 0.03 单位高）换算，
-/// 目标尺寸对照原版：strider 高 1.1、crab 高 0.4、blob 高 0.5 格；
-/// y 偏移把模型脚底对齐地面（这些模型原点不在脚底）。
+/// 缩放按模型**最终渲染尺寸**（含 GLB 节点变换）换算，目标尺寸对照原版：
+/// strider 高 1.1、crab 高 0.4、blob 高 0.5 格；y 偏移把模型脚底对齐地面。
 pub fn spawn_creature(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -72,9 +74,11 @@ pub fn spawn_creature(
 ) {
     let _ = (body, legs, eye);
     // (model, scale, y_offset 脚底对齐)
+    // 尺寸实测：strider 网格 135.4 高（无节点变换）；crab 网格 19.4 高（无节点变换）；
+    // blob 网格仅 0.03 高但节点自带 scale(100)+旋转 → 实际渲染约 2 高、脚底 y=0
     let (model, scale, y_off) = match kind {
         "crab" => ("models/creatures/crab.glb", 0.4 / 19.42, 8.64 * (0.4 / 19.42)),
-        "blob" => ("models/creatures/blob.glb", 0.5 / 0.03, 0.02 * (0.5 / 0.03)),
+        "blob" => ("models/creatures/blob.glb", 0.5 / 2.0, 0.0),
         _ => ("models/creatures/strider.glb", 1.1 / 135.37, 67.52 * (1.1 / 135.37)),
     };
     let (w, h, d) = match kind {
@@ -98,6 +102,7 @@ pub fn spawn_creature(
             home: pos,
             jump_t: 0.0,
             kind,
+            scale,
         },
     ));
 }
@@ -124,20 +129,19 @@ pub fn creature_spawn_system(
     if count >= animal.4 as usize {
         return;
     }
-    // random position within 25 blocks of player
+    // 生成位置：玩家周围 12~40 格环形随机（原版生成环 12-92m；避免全堆在脚下）
     let mut rng = Rng::new(
         (p.pos.x as u32)
             .wrapping_mul(7919)
             .wrapping_add(time.elapsed_secs() as u32),
     );
     for _ in 0..8 {
-        let dx = rng.range_f(-25.0, 25.0);
-        let dz = rng.range_f(-25.0, 25.0);
+        let ang = rng.next() * std::f32::consts::TAU;
+        let dist = 12.0 + rng.next() * 28.0;
+        let dx = ang.cos() * dist;
+        let dz = ang.sin() * dist;
         let x = (p.pos.x + dx).floor() as i32;
         let z = (p.pos.z + dz).floor() as i32;
-        if dx * dx + dz * dz < 9.0 {
-            continue;
-        }
         let top = world.top_at(x, z);
         if top <= data::SEA {
             continue;
@@ -183,8 +187,9 @@ pub fn creature_system(
             let a = rng.next() * std::f32::consts::TAU;
             c.dir = Vec3::new(a.cos(), 0.0, a.sin());
             c.vel = c.dir * (if c.kind == "blob" { 0.35 } else if c.kind == "crab" { 0.7 } else { 1.8 });
-            if c.kind == "strider" && rng.next() < 0.4 {
-                c.vel.y = 5.0;
+            // strider 跳跃：低概率（原版每帧 0.0004 ≈ 换向周期内 ~7%）、初速 6.4（≈1 格高）
+            if c.kind == "strider" && rng.next() < 0.08 {
+                c.vel.y = 6.4;
             }
         }
         // flee if player very close? keep simple: wander
@@ -218,7 +223,8 @@ pub fn creature_system(
             let yaw = c.vel.x.atan2(c.vel.z);
             tf.rotation = Quat::from_rotation_y(yaw);
         }
-        tf.scale = Vec3::splat(1.0 + (time.elapsed_secs() * 3.0).sin() * 0.03);
+        // 呼吸动画：乘性应用（不能覆盖 spawn 时按模型实测换算的基准缩放！）
+        tf.scale = Vec3::splat(c.scale * (1.0 + (time.elapsed_secs() * 3.0).sin() * 0.03));
         // despawn if dead or too far
         let dist = (pos - p.pos).length();
         if dist > 120.0 {
@@ -357,6 +363,7 @@ pub fn sentinel_system(
                         home: Vec3::new(x as f32 + 0.5, top as f32 + 1.0, z as f32 + 0.5),
                         jump_t: 0.0,
                         kind: "sentinel",
+                        scale: 1.9 / 2.17,
                     },
                     crate::InGame,
                 ));

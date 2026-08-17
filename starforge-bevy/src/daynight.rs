@@ -72,7 +72,14 @@ pub fn daynight_system(
     // space factor from altitude
     let Ok(p) = player.single() else { return };
     let cam_y = p.eye().y;
-    let sf = ((cam_y - 80.0) / (150.0 - 80.0)).clamp(0.0, 1.0);
+    // 太空/曲速/空间站模式强制 1：Bevy 单相机 ClearColor 全屏共享，而太空态玩家坐标
+    // 已被镜像到星球球面坐标系（赤道附近 Y≈0），按高度计算会退化成星球大气色
+    // （JS 原版太空为独立场景固定底色，不存在此问题）。
+    let sf = if mode.space_scene() {
+        1.0
+    } else {
+        ((cam_y - 80.0) / (150.0 - 80.0)).clamp(0.0, 1.0)
+    };
     space.0 = sf;
 
     // sun disc follows the light direction, centered on the player

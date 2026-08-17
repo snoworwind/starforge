@@ -22,6 +22,13 @@ pub struct CurveUniform {
     pub scan_cx: f32,  // scan center x
     pub scan_cz: f32,  // scan center z
     pub scan_a: f32,   // scan alpha
+    // 远景挖空环（far_hole_on=1 时在片元着色器里按到 far_hole_cx/cz 的距离淡出，
+    // 替代旧实现每帧在 CPU 上改写 129×129 顶点 alpha——JS farMesh 用 shader uniform 同口径）
+    pub far_hole_on: f32,
+    pub far_hole_r0: f32,
+    pub far_hole_r1: f32,
+    pub far_hole_cx: f32,
+    pub far_hole_cz: f32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
@@ -130,7 +137,7 @@ impl TerrainMaterials {
                 base_color: Color::WHITE,
                 double_sided: true,
                 cull_mode: None,
-                // 半透明：顶点 alpha 承载“远景挖空环”（玩家周围由真实区块覆盖，视距边缘淡出）
+                // 半透明：顶点 alpha 恒为 1，挖空环由 far_hole_* uniform 在片元着色器计算
                 alpha_mode: AlphaMode::Blend,
                 ..default()
             },
@@ -141,6 +148,7 @@ impl TerrainMaterials {
                     fade: 1.0,
                     edge_r: 9999.0,
                     wave_on: 0.0,
+                    far_hole_on: 1.0,
                     ..default()
                 },
             },
@@ -158,6 +166,9 @@ impl TerrainMaterials {
 pub fn curve_system(
     time: Res<Time>,
     player: Query<&crate::player::Player>,
+    ship: Res<crate::space::ShipState>,
+    mode: Res<crate::space::FlightMode>,
+    world: Option<Res<crate::world::World>>,
     mut materials: ResMut<Assets<TerrainMat>>,
     mats: Res<TerrainMaterials>,
     mut wave_t: Local<f32>,
@@ -166,15 +177,33 @@ pub fn curve_system(
     *wave_t += time.delta_secs();
     let cam_y = p.eye().y;
     let amt = ((cam_y - 62.0) / (150.0 - 62.0)).clamp(0.0, 1.0);
+    // 出大气过渡：最后 60 格地形/远景淡出（球面 LOD 无缝接棒，避免飞出大气瞬间贴图突变）
+    let fade = if *mode == crate::space::FlightMode::Atmo
+        || *mode == crate::space::FlightMode::AtmoLand
+    {
+        ((crate::space::EXIT_Y - ship.pos.y) / 60.0).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    // 远景挖空环半径随区块视距联动（JS farHoleU 同口径），片元着色器按玩家距离计算
+    let (r0, r1) = crate::far_hole_radii(
+        world.map(|w| w.view_dist).unwrap_or(10),
+    );
     for handle in [&mats.solid, &mats.water, &mats.far] {
         if let Some(mut m) = materials.get_mut(handle) {
             let c = &mut m.extension.curve;
             c.center = Vec2::new(p.pos.x, p.pos.z);
             c.amt = amt;
             c.grow = 1.0;
-            c.fade = 1.0;
+            c.fade = fade;
             c.edge_r = 9999.0;
             c.wave_time = *wave_t;
+            // 远景挖空环（片元着色器计算，替代每帧 CPU 改写 129×129 顶点 alpha）
+            c.far_hole_on = if handle == &mats.far { 1.0 } else { 0.0 };
+            c.far_hole_r0 = r0;
+            c.far_hole_r1 = r1;
+            c.far_hole_cx = p.pos.x;
+            c.far_hole_cz = p.pos.z;
         }
     }
 }

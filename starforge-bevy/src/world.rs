@@ -1321,8 +1321,21 @@ fn emit_quad_col(
 pub const FAR_N: usize = 129; // 129×129 顶点
 pub const FAR_STEP: f32 = 24.0; // 格/单元 → ±1536 格视距
 pub const FAR_SNAP: f32 = 64.0; // 中心对齐（格，跨格才重建）
-pub const FAR_ROWS_PER_FRAME: usize = 12; // 每帧填充行数（分帧重建避免卡顿）
+pub const FAR_ROWS_PER_FRAME: usize = 24; // 每帧填充行数（中心向外填充，跨格重建约 6 帧收尾）
 pub const FAR_SINK: f32 = 2.2; // 下沉偏置：近处由真实区块覆盖
+
+/// 中心向外行序（64, 63, 65, 62, 66, …）：重建时新旧高度场接缝始终停留在
+/// 网格边缘（最远、最不易察觉），不再从一侧到另一侧横扫整个远景。
+pub fn far_row_order(i: usize) -> usize {
+    let mid = FAR_N / 2;
+    if i == 0 {
+        mid
+    } else if i % 2 == 1 {
+        mid + (i + 1) / 2
+    } else {
+        mid - i / 2
+    }
+}
 
 /// 地表瓦片平均色（与 JS `tileAvgColor` 同口径；瓦片缺失时给中性绿）。
 fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
@@ -1340,9 +1353,9 @@ fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
     [r as f32 / n, g as f32 / n, b as f32 / n]
 }
 
-/// 填充远景地形网格的行 `[from, to)`（原地修改，其余行保留原值）。
+/// 填充远景地形网格的行 `[from, to)`（原地修改，其余行保留原值；行序为中心向外）。
 /// 高度/地表色与 JS `mapHeightAt` / `mapColorRGB` 同口径（纯噪声高度、海平面抬升、地表瓦片平均色）。
-/// 顶点 alpha 留给挖空环（由 far_mesh_system 按玩家位置逐帧更新），这里恒为 1。
+/// 顶点 alpha 恒为 1，挖空环由 far_mesh_system 的 uniform 在片元着色器计算。
 pub fn fill_far_rows(
     world: &World,
     atlas: &crate::textures::Atlas,
@@ -1390,7 +1403,8 @@ pub fn fill_far_rows(
     let sand_avg = far_tile_avg(atlas, "sand");
     let half = (FAR_N as f32 - 1.0) / 2.0 * FAR_STEP;
     let to = to.min(FAR_N);
-    for iz in from..to {
+    for k in from..to {
+        let iz = far_row_order(k);
         let wz = cz - half + iz as f32 * FAR_STEP;
         for ix in 0..FAR_N {
             let wx = cx - half + ix as f32 * FAR_STEP;

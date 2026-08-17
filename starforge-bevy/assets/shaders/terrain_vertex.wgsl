@@ -20,6 +20,11 @@ struct CurveUniform {
     scan_cx: f32,
     scan_cz: f32,
     scan_a: f32,
+    far_hole_on: f32,
+    far_hole_r0: f32,
+    far_hole_r1: f32,
+    far_hole_cx: f32,
+    far_hole_cz: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)

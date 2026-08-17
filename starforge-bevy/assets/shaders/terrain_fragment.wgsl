@@ -19,6 +19,11 @@ struct CurveUniform {
     scan_cx: f32,
     scan_cz: f32,
     scan_a: f32,
+    far_hole_on: f32,
+    far_hole_r0: f32,
+    far_hole_r1: f32,
+    far_hole_cx: f32,
+    far_hole_cz: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -31,12 +36,17 @@ fn fragment(
 ) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-    // curvature edge fade + global fade (applied before alpha discard)
+    // curvature edge fade + global fade + far hole (applied before alpha discard)
     let dx = in.world_position.x - curve.center.x;
     let dz = in.world_position.z - curve.center.y;
     let r2 = dx * dx + dz * dz;
     let edge_fade = smoothstep(0.0, 3600.0, curve.edge_r * curve.edge_r - r2);
-    let fade = curve.fade * edge_fade;
+    var far_a = 1.0;
+    if curve.far_hole_on > 0.5 {
+        // 远景挖空环（JS farHoleU 同口径：smoothstep(r0², r1², d²)），替代旧版 CPU 逐帧改写顶点 alpha
+        far_a = smoothstep(curve.far_hole_r0 * curve.far_hole_r0, curve.far_hole_r1 * curve.far_hole_r1, r2);
+    }
+    let fade = curve.fade * edge_fade * far_a;
     let bc = pbr_input.material.base_color;
     pbr_input.material.base_color = vec4<f32>(bc.rgb, bc.a * fade);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);

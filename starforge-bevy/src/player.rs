@@ -626,6 +626,7 @@ pub fn mining_system(
                         1.0
                     };
                     c.hp -= dmg;
+                    c.hit_t = 0.25; // 受击反馈（缩放脉冲）
                     audio::play(&mut commands, sfx.laser_hit.clone(), 0.5, None);
                 }
             }

@@ -197,7 +197,9 @@ impl Player {
 
     /// Charge a system from inventory items (CHARGE_DEFS).
     pub fn can_charge(&self, system: &str) -> bool {
-        let def = CHARGE_DEFS.iter().find(|d| d.0 == system).unwrap();
+        let Some(def) = CHARGE_DEFS.iter().find(|d| d.0 == system) else {
+            return false;
+        };
         let max = match system {
             "hp" => 8.0,
             "shield" => 6.0,
@@ -207,7 +209,9 @@ impl Player {
     }
 
     pub fn charge(&mut self, system: &str) -> bool {
-        let def = CHARGE_DEFS.iter().find(|d| d.0 == system).unwrap();
+        let Some(def) = CHARGE_DEFS.iter().find(|d| d.0 == system) else {
+            return false;
+        };
         if !self.can_charge(system) {
             return false;
         }

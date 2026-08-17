@@ -30,8 +30,19 @@ impl Inventory {
             .iter()
             .flatten()
             .filter(|s| s.item == item)
-            .map(|s| s.n)
-            .sum()
+            .map(|s| s.n.max(0))
+            .fold(0, |total, n| total.saturating_add(n))
+    }
+
+    /// Normalize data loaded from disk to the fixed-size inventory shape.
+    pub fn from_slots(slots: Vec<Option<Slot>>) -> Self {
+        let mut inventory = Self::default();
+        for slot in slots.into_iter().take(INV_SLOTS).flatten() {
+            if slot.n > 0 {
+                inventory.add_item(&slot.item, slot.n);
+            }
+        }
+        inventory
     }
 
     /// Add items; merges into partial stacks (oldest first), then empty slots.
@@ -49,10 +60,10 @@ impl Inventory {
             }
             if let Some(s) = slot
                 && s.item == item
-                && s.n < max_stack
             {
-                let add = (max_stack - s.n).min(remaining);
-                s.n += add;
+                let current = s.n.max(0).min(max_stack);
+                let add = (max_stack - current).min(remaining);
+                s.n = current + add;
                 remaining -= add;
             }
         }
@@ -75,18 +86,24 @@ impl Inventory {
 
     /// Remove up to n of an item from the tail backwards; returns true if enough existed.
     pub fn remove_item(&mut self, item: &str, n: i32) -> bool {
+        if n < 0 {
+            return false;
+        }
+        if n == 0 {
+            return true;
+        }
         if self.count_item(item) < n {
             return false;
         }
         let mut remaining = n;
-        for i in (0..INV_SLOTS).rev() {
+        for i in (0..self.slots.len()).rev() {
             if remaining <= 0 {
                 break;
             }
             if let Some(s) = &mut self.slots[i]
                 && s.item == item
             {
-                let take = s.n.min(remaining);
+                let take = s.n.max(0).min(remaining);
                 s.n -= take;
                 remaining -= take;
                 if s.n <= 0 {
@@ -98,7 +115,9 @@ impl Inventory {
     }
 
     pub fn has_items(&self, costs: &[(&str, i32)]) -> bool {
-        costs.iter().all(|(item, n)| self.count_item(item) >= *n)
+        costs
+            .iter()
+            .all(|(item, n)| *n >= 0 && self.count_item(item) >= *n)
     }
 
     pub fn pay_items(&mut self, costs: &[(&str, i32)]) -> bool {
@@ -113,8 +132,12 @@ impl Inventory {
 
     /// Sort storage slots 9..36 only (merge & compact), hotbar untouched.
     pub fn sort_storage(&mut self) {
+        if self.slots.len() <= HOTBAR {
+            return;
+        }
         let mut totals: Vec<(String, i32)> = Vec::new();
-        for i in HOTBAR..INV_SLOTS {
+        let storage_end = self.slots.len().min(INV_SLOTS);
+        for i in HOTBAR..storage_end {
             if let Some(s) = &self.slots[i] {
                 if let Some(t) = totals.iter_mut().find(|(item, _)| *item == s.item) {
                     t.1 += s.n;
@@ -134,12 +157,12 @@ impl Inventory {
                 });
                 n -= take;
                 idx += 1;
-                if idx >= INV_SLOTS {
+                if idx >= storage_end {
                     break;
                 }
             }
         }
-        for i in idx..INV_SLOTS {
+        for i in idx..storage_end {
             self.slots[i] = None;
         }
     }
@@ -150,7 +173,7 @@ impl Inventory {
         let mut room = 0;
         for s in &self.slots {
             match s {
-                Some(s) if s.item == item => room += max_stack - s.n,
+                Some(s) if s.item == item => room += (max_stack - s.n.max(0)).max(0),
                 None => room += max_stack,
                 _ => {}
             }

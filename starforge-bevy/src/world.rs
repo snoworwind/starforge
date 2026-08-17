@@ -615,6 +615,9 @@ impl WorldGen {
 
     /// RLE decode into data; returns false on corruption/length mismatch.
     pub fn rle_decode(data: &mut [u8], pairs: &[u16]) -> bool {
+        if pairs.len() % 2 != 0 || pairs.chunks_exact(2).any(|p| p[1] > u8::MAX as u16) {
+            return false;
+        }
         let total: u64 = pairs.iter().step_by(2).map(|&r| r as u64).sum();
         if total != data.len() as u64 {
             return false;
@@ -978,6 +981,8 @@ pub struct Chunk {
     pub mesh: Option<bevy::prelude::Entity>,
     pub water_mesh: Option<bevy::prelude::Entity>,
     pub from_save: bool,
+    /// Newly materialized chunks need one voxel scan to rebuild machine state.
+    pub machine_scan: bool,
     pub need_save: bool,
 }
 
@@ -1041,6 +1046,7 @@ impl World {
                     mesh: None,
                     water_mesh: None,
                     from_save,
+                    machine_scan: true,
                     need_save: false,
                 },
             );
@@ -1270,7 +1276,9 @@ impl World {
 
     /// Serialize modified chunks: { "cx,cz": rle }
     pub fn serialize_mods(&self) -> HashMap<String, Vec<u16>> {
-        let mut out = HashMap::new();
+        // Preserve modifications loaded from an older save even if the player
+        // did not touch those chunks during this session.
+        let mut out = self.saved_mods.clone();
         for c in self.chunks.values() {
             if c.modified {
                 out.insert(strkey(c.cx, c.cz), WorldGen::rle_encode(c.data.as_slice()));

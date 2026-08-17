@@ -141,7 +141,12 @@ pub fn spawn_sky(
     materials: &mut Assets<StandardMaterial>,
 ) -> Vec<Entity> {
     // directional sunlight
-    commands.spawn((DirectionalLight::default(), Transform::IDENTITY, Sun));
+    commands.spawn((
+        DirectionalLight::default(),
+        Transform::IDENTITY,
+        Sun,
+        crate::InGame,
+    ));
     // sun disc (emissive sphere, positioned each frame by the daynight system)
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(60.0))),
@@ -154,6 +159,7 @@ pub fn spawn_sky(
         })),
         Transform::from_xyz(0.0, 850.0, 0.0),
         crate::SunDisc,
+        crate::InGame,
     ));
     // stars: small emissive quads on a dome
     let mut rng = crate::rng::Rng::new(0x57A1);
@@ -178,18 +184,22 @@ pub fn spawn_sky(
             Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Y),
             Visibility::Hidden,
             Star,
+            crate::InGame,
         ));
     }
     // lamp pool (6 point lights)
     let mut pool = Vec::new();
     for _ in 0..6 {
         let e = commands
-            .spawn((PointLight {
-                color: Color::srgb(1.0, 0.85, 0.62),
-                intensity: 0.0,
-                range: 11.0,
-                ..default()
-            },))
+            .spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.85, 0.62),
+                    intensity: 0.0,
+                    range: 11.0,
+                    ..default()
+                },
+                crate::InGame,
+            ))
             .id();
         pool.push(e);
     }

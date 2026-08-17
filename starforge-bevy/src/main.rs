@@ -43,6 +43,26 @@ use world::{VoxelMesh, World};
 #[derive(Component)]
 pub struct InGame;
 
+#[inline]
+fn finite_clamp(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
+    }
+}
+
+fn safe_player_position(pos: [f32; 3]) -> Option<Vec3> {
+    if !pos.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    Some(Vec3::new(
+        pos[0].clamp(-1_000_000.0, 1_000_000.0),
+        pos[1].clamp(-256.0, 512.0),
+        pos[2].clamp(-1_000_000.0, 1_000_000.0),
+    ))
+}
+
 /// Chunk terrain meshes (cleared on planet switch).
 #[derive(Component)]
 pub struct ChunkMesh;
@@ -250,6 +270,7 @@ fn main() {
         .insert_resource(weather::ClimateRuntime::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())
+        .init_resource::<creatures::CreatureAnimationLibrary>()
         .add_systems(Startup, startup)
         .add_systems(
             PreUpdate,
@@ -307,6 +328,7 @@ fn main() {
                                 stream_system.run_if(ground_scene_mode),
                                 creatures::creature_spawn_system.run_if(ground_mode),
                                 creatures::creature_system.run_if(ground_mode),
+                                creatures::creature_animation_system.run_if(ground_mode),
                                 creatures::sentinel_system.run_if(ground_mode),
                             )
                                 .chain(),
@@ -1096,7 +1118,24 @@ fn on_enter_loading(
         .as_ref()
         .map(|c| c.techs.clone())
         .unwrap_or_default();
-    let spawn = world.find_spawn(96, 96);
+    // Generate an anchor area before searching for a spawn. Without this the
+    // initial search saw only AIR and low-view-distance worlds started at y=2.
+    let in_space = world_data.as_ref().is_some_and(|w| w.state == "space");
+    let saved_position = char_data
+        .as_ref()
+        .filter(|_| !in_space)
+        .and_then(|c| safe_player_position(c.pos));
+    let anchor = saved_position
+        .map(|pos| (pos.x as i32, pos.z as i32))
+        .unwrap_or((96, 96));
+    let anchor_cx = world::cf(anchor.0 as f32);
+    let anchor_cz = world::cf(anchor.1 as f32);
+    for cz in anchor_cz - 2..=anchor_cz + 2 {
+        for cx in anchor_cx - 2..=anchor_cx + 2 {
+            world.ensure_chunk(cx, cz);
+        }
+    }
+    let spawn = saved_position.unwrap_or_else(|| world.find_spawn(anchor.0, anchor.1));
     commands.insert_resource(LoadingState {
         world,
         world_name: req.world_name.clone(),
@@ -1219,7 +1258,7 @@ fn spawn_scene(
     stdmats: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     world: World,
-    _spawn: Vec3,
+    spawn: Vec3,
     difficulty: data::Difficulty,
     char_data: Option<save::CharData>,
     world_data: Option<save::WorldData>,
@@ -1229,8 +1268,14 @@ fn spawn_scene(
 ) {
     let biome = world.biome();
     let world_seed = world.seed;
-    // recompute spawn on the loaded terrain (chunks are ready by now)
-    let spawn = world.find_spawn(96, 96);
+    // `on_enter_loading` already generated and selected a valid spawn. Keep
+    // it here; recomputing at the hard-coded default would discard a saved
+    // position and could place the player in a different part of the world.
+    let spawn = if spawn.is_finite() {
+        spawn
+    } else {
+        world.find_spawn(96, 96)
+    };
     // spawn logical machine entities for machine blocks present in loaded chunks
     let machine_cells: Vec<([i32; 3], u8)> = world
         .chunks
@@ -1267,7 +1312,14 @@ fn spawn_scene(
     });
 
     // ---- 角色 / 任务 / 飞船 / 星系 ----
-    let mut p = Player::new(difficulty);
+    let saved_difficulty = char_data.as_ref().and_then(|c| match c.difficulty {
+        0 => Some(data::Difficulty::Easy),
+        1 => Some(data::Difficulty::Normal),
+        2 => Some(data::Difficulty::Hard),
+        3 => Some(data::Difficulty::Creative),
+        _ => None,
+    });
+    let mut p = Player::new(saved_difficulty.unwrap_or(difficulty));
     p.pos = spawn;
     let appearance = char_data
         .as_ref()
@@ -1280,27 +1332,43 @@ fn spawn_scene(
     let mut ship_state = ShipState::default();
     let mut research_active: Option<(String, f32)> = None;
 
-    if let Some(cd) = char_data {
-        p.pos = Vec3::new(cd.pos[0], cd.pos[1], cd.pos[2]);
-        p.yaw = cd.yaw;
-        p.pitch = cd.pitch;
-        p.stats = player::Stats {
-            hp: cd.stats[0],
-            shield: cd.stats[1],
-            o2: cd.stats[2],
-            haz: cd.stats[3],
-            jet: cd.stats[4],
-            laser: cd.stats[5],
+    if let Some(cd) = char_data.as_ref() {
+        if let Some(saved_position) = safe_player_position(cd.pos) {
+            p.pos = saved_position;
+        }
+        p.yaw = if cd.yaw.is_finite() {
+            cd.yaw.clamp(-std::f32::consts::PI, std::f32::consts::PI)
+        } else {
+            0.0
         };
-        p.inv.slots = cd.inv;
-        p.hot_idx = cd.hot_idx;
-        p.credits = cd.credits;
-        p.play_time = cd.play_time;
+        p.pitch = if cd.pitch.is_finite() {
+            cd.pitch.clamp(-1.55, 1.55)
+        } else {
+            0.0
+        };
+        p.stats = player::Stats {
+            // A dead flag is not part of the save schema; never reload an
+            // alive player with zero health and no respawn timer.
+            hp: finite_clamp(cd.stats[0], 8.0, 0.1, 8.0),
+            shield: finite_clamp(cd.stats[1], 6.0, 0.0, 6.0),
+            o2: finite_clamp(cd.stats[2], 100.0, 0.0, 100.0),
+            haz: finite_clamp(cd.stats[3], 100.0, 0.0, 100.0),
+            jet: finite_clamp(cd.stats[4], 100.0, 0.0, 100.0),
+            laser: finite_clamp(cd.stats[5], 100.0, 0.0, 100.0),
+        };
+        p.inv = crate::inventory::Inventory::from_slots(cd.inv.clone());
+        p.hot_idx = cd.hot_idx.clamp(-1, 8);
+        p.credits = cd.credits.max(0);
+        p.play_time = if cd.play_time.is_finite() {
+            cd.play_time.max(0.0)
+        } else {
+            0.0
+        };
         quests.idx = cd.quest_idx;
         game = SpaceGame::new(load_galaxy(&world_data));
-        game.fuel_loaded = cd.fuel_loaded;
-        game.garage = cd.ship_garage;
-        research_active = cd.researching;
+        game.fuel_loaded = cd.fuel_loaded.max(0);
+        game.garage = cd.ship_garage.clone();
+        research_active = cd.researching.clone();
     } else {
         p.inv.add_item("carbon", 20);
         p.inv.add_item("oxygen", 5);
@@ -1313,13 +1381,17 @@ fn spawn_scene(
         for (k, v) in &wd.flags {
             quests.flags.insert(k.clone(), *v);
         }
-        game.current_planet = wd.current_planet.min(game.galaxy.planets.len() - 1);
+        if !game.galaxy.planets.is_empty() {
+            game.current_planet = wd.current_planet.min(game.galaxy.planets.len() - 1);
+        }
         game.galaxy_count = wd.galaxy_count.max(1);
         if !wd.market.is_empty() {
             game.galaxy.market = wd.market.clone();
         }
         if let Some(sp) = wd.ship_pos {
-            game.ship_pos = Vec3::new(sp[0], sp[1], sp[2]);
+            if sp.iter().all(|v| v.is_finite()) {
+                game.ship_pos = Vec3::new(sp[0], sp[1], sp[2]);
+            }
         }
         // 地图标记 / 跃迁锁定 / 跨星系档案 / 放置计数（JS mapMarks/warpLock/galaxyArchives/placedCount）
         game.marks = wd.marks.clone();
@@ -1329,28 +1401,60 @@ fn spawn_scene(
         if wd.state == "space" {
             start_mode = FlightMode::Space;
             if let Some(ss) = &wd.ship_state {
-                ship_state.pos = Vec3::new(ss.pos[0], ss.pos[1], ss.pos[2]);
-                ship_state.yaw = ss.yaw;
-                ship_state.pitch = ss.pitch;
-                ship_state.roll = ss.roll;
-                ship_state.speed = ss.speed;
+                if ss.pos.iter().all(|v| v.is_finite()) {
+                    ship_state.pos = Vec3::new(ss.pos[0], ss.pos[1], ss.pos[2]);
+                }
+                ship_state.yaw = if ss.yaw.is_finite() { ss.yaw } else { 0.0 };
+                ship_state.pitch = if ss.pitch.is_finite() { ss.pitch } else { 0.0 };
+                ship_state.roll = if ss.roll.is_finite() { ss.roll } else { 0.0 };
+                ship_state.speed = if ss.speed.is_finite() {
+                    ss.speed.max(0.0)
+                } else {
+                    0.0
+                };
             }
         }
     }
 
     // 初始飞船
-    let ship_data = save::ShipSave {
+    if start_mode == FlightMode::Space
+        && ship_state.pos.is_finite()
+        && ship_state.pos.length_squared() >= 1e-6
+    {
+        p.pos = ship_state.pos;
+    }
+    let mut ship_data = save::ShipSave {
         model: "ship".into(),
         cls: "C".into(),
         name: "拓荒者号".into(),
         inv: vec![None; 12],
     };
+    if let Some(cd) = char_data.as_ref()
+        && (!cd.player_ship.model.is_empty()
+            || !cd.player_ship.cls.is_empty()
+            || !cd.player_ship.inv.is_empty())
+    {
+        ship_data = cd.player_ship.clone();
+    }
+    let mut normalized_ship_inv =
+        crate::inventory::Inventory::from_slots(ship_data.inv.clone()).slots;
+    normalized_ship_inv.truncate(12);
+    normalized_ship_inv.resize(12, None);
+    ship_data.inv = normalized_ship_inv;
     let (ship_ent, flames, ship_spawn_pos) =
         space::spawn_initial_ship(commands, meshes, stdmats, asset_server, &world, &ship_data);
     if game.ship_pos == Vec3::ZERO {
         game.ship_pos = ship_spawn_pos;
     }
-    ship_state.pos = game.ship_pos;
+    // A space save stores the active ship in ship_state, not in the
+    // planetary parking position. Keep that position so loading in space
+    // does not teleport the ship back to the planet-side spawn pad.
+    if start_mode != FlightMode::Space
+        || !ship_state.pos.is_finite()
+        || ship_state.pos.length_squared() < 1e-6
+    {
+        ship_state.pos = game.ship_pos;
+    }
     ship_state.board_yaw = 0.0;
     ship_state.hp = 20.0;
     ship_state.hp_max = 20.0;
@@ -1358,14 +1462,21 @@ fn spawn_scene(
     commands.insert_resource(ShipAsset {
         entity: Some(ship_ent),
         flames,
-        data: ship_data,
+        data: ship_data.clone(),
     });
-    game.ship_inv = vec![None; 12];
+    game.ship_inv = crate::inventory::Inventory::from_slots(ship_data.inv.clone())
+        .slots
+        .into_iter()
+        .take(12)
+        .chain(std::iter::repeat(None))
+        .take(12)
+        .collect();
 
     p.toast("欢迎来到星穹熔炉 · W A S D 移动 · Tab 背包");
+    let player_pos = p.pos;
     commands.spawn((
         p,
-        Transform::from_translation(spawn),
+        Transform::from_translation(player_pos),
         Visibility::default(),
         InGame,
     ));
@@ -2163,6 +2274,14 @@ fn quit_to_menu_system(
         commands.remove_resource::<factory::Power>();
         commands.remove_resource::<space::AtmoLand>();
         commands.remove_resource::<space::SpaceScene>();
+        commands.remove_resource::<space::VisitorRespawn>();
+        commands.remove_resource::<space::VisitorTraffic>();
+        commands.remove_resource::<station::StationDefense>();
+        commands.remove_resource::<factory::TickAcc>();
+        commands.remove_resource::<weather::ClimateRuntime>();
+        commands.remove_resource::<creatures::SentinelSpawner>();
+        commands.remove_resource::<network::NetworkState>();
+        commands.remove_resource::<ui::ScanState>();
         commands.insert_resource(space::WarpAnim::default());
         commands.insert_resource(space::WarpVisuals::default());
         commands.insert_resource(Research::default());

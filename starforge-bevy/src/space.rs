@@ -679,6 +679,9 @@ fn spawn_space_drop(
     item: &str,
     n: i32,
 ) {
+    if n <= 0 {
+        return;
+    }
     commands.spawn((
         Mesh3d(mesh.clone()),
         MeshMaterial3d(mat.clone()),
@@ -720,9 +723,14 @@ pub fn space_drop_system(
             if dist < 1.6
                 && let Ok(mut p) = player.single_mut()
             {
-                p.inv.add_item(&d.item, d.n);
-                crate::audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
-                commands.entity(e).despawn();
+                let added = p.inv.add_item(&d.item, d.n);
+                if added > 0 {
+                    d.n -= added;
+                    crate::audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+                }
+                if d.n <= 0 {
+                    commands.entity(e).despawn();
+                }
             }
         } else {
             tf.translation += d.vel * dt;

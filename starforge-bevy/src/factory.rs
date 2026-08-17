@@ -267,6 +267,11 @@ pub struct Power {
 
 pub const DIRS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
+#[inline]
+fn dir_index(dir: u8) -> usize {
+    dir as usize % DIRS.len()
+}
+
 impl MachineState {
     pub fn for_kind(kind: MachineKind) -> Self {
         match kind {
@@ -832,7 +837,7 @@ impl Snapshot {
 
 /// 装配/精炼：该面是否是输入面（皮带终点指向机器所在格——简化：邻格有皮带）。
 fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
-    let (dx, dz) = DIRS[d as usize];
+    let (dx, dz) = DIRS[dir_index(d)];
     let bp = [m.pos[0] + dx, m.pos[1], m.pos[2] + dz];
     let b1 = snap.pos_index.get(&bp);
     let b2 = snap.pos_index.get(&[bp[0], bp[1] - 1, bp[2]]);
@@ -856,7 +861,7 @@ fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
 /// 机器输出一个物品：输出面皮带/机器优先，其余面仅入机器。
 fn try_output(m: &Machine, item: &str, snap: &mut Snapshot) -> bool {
     let crafter = matches!(m.kind, MachineKind::Assembler | MachineKind::Refinery);
-    let (fdx, fdz) = DIRS[m.dir as usize];
+    let (fdx, fdz) = DIRS[dir_index(m.dir)];
     let mut targets: Vec<Entity> = Vec::new();
     let front = [m.pos[0] + fdx, m.pos[1], m.pos[2] + fdz];
     if let Some(e) = snap.pos_index.get(&front)
@@ -865,7 +870,7 @@ fn try_output(m: &Machine, item: &str, snap: &mut Snapshot) -> bool {
         targets.push(*e);
     }
     for (d, (dx, dz)) in DIRS.iter().enumerate() {
-        if d == m.dir as usize {
+        if d == dir_index(m.dir) {
             continue;
         }
         if crafter && is_input_face(m, d as u8, snap) {
@@ -1108,7 +1113,7 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
         let t = b.items[i].t;
         b.items[i].t = (t + BELT_SPEED * TICK).min(max_t.max(t));
         if b.items[i].t >= 0.999 {
-            let (dx, dz) = DIRS[m.dir as usize];
+            let (dx, dz) = DIRS[dir_index(m.dir)];
             let item = b.items[i].item.clone();
             let nx = m.pos[0] + dx;
             let nz = m.pos[2] + dz;
@@ -1659,14 +1664,56 @@ pub fn factory_system(
 
 /// Sync machines with world blocks: despawn machines whose block was removed.
 pub fn machine_sync_system(
-    world: Res<GameWorld>,
+    mut world: ResMut<GameWorld>,
     machines: Query<(Entity, &Machine)>,
     mut commands: Commands,
 ) {
+    let existing: std::collections::HashSet<[i32; 3]> =
+        machines.iter().map(|(_, m)| m.pos).collect();
     for (e, m) in &machines {
+        // `World::get` intentionally returns AIR for an unloaded chunk. Do
+        // not interpret that streaming placeholder as a deleted machine.
+        let cx = m.pos[0].div_euclid(data::CHUNK);
+        let cz = m.pos[2].div_euclid(data::CHUNK);
+        if world.get_chunk(cx, cz).is_none() {
+            continue;
+        }
         let def = data::block_by_id(world.get(m.pos[0], m.pos[1], m.pos[2]));
         if def.machine.is_none() {
             commands.entity(e).despawn();
+        }
+    }
+
+    // Machine entities are logical state, while their block is stored in the
+    // voxel chunk. A chunk can be evicted and later regenerated from a save;
+    // recreate missing machine entities for those chunks so factories do not
+    // silently stop after the player returns.
+    let needs_scan = world.chunks.values().any(|chunk| chunk.machine_scan);
+    if needs_scan {
+        let mut to_spawn = Vec::new();
+        for chunk in world.chunks.values_mut() {
+            if !chunk.machine_scan {
+                continue;
+            }
+            for (i, &id) in chunk.data.iter().enumerate() {
+                if !data::block_by_id(id).machine.is_some() {
+                    continue;
+                }
+                let pos = [
+                    chunk.cx * data::CHUNK + (i % data::CHUNK as usize) as i32,
+                    (i / (data::CHUNK as usize * data::CHUNK as usize)) as i32,
+                    chunk.cz * data::CHUNK
+                        + ((i / data::CHUNK as usize) % data::CHUNK as usize) as i32,
+                ];
+                if !existing.contains(&pos) {
+                    to_spawn.push((pos, data::block_by_id(id).key));
+                }
+            }
+            // Avoid rescanning this chunk on unrelated stream updates.
+            chunk.machine_scan = false;
+        }
+        for (pos, key) in to_spawn {
+            spawn_machine(&mut commands, pos, key, 0);
         }
     }
 }
@@ -1701,7 +1748,7 @@ pub fn deserialize_machines(
                 Machine {
                     pos: [s.x, s.y, s.z],
                     kind,
-                    dir: s.dir,
+                    dir: s.dir % DIRS.len() as u8,
                     active: false,
                 },
                 MachineState::from_save(kind, &s.data),

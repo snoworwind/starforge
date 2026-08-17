@@ -17,6 +17,11 @@ const DOCK_INNER_WAIT: [f32; 3] = [0.0, 12.0, 44.0];
 const DOCK_PAD: [f32; 3] = [20.0, 3.2, 30.0];
 const DOCK_PAD_YAW: f32 = std::f32::consts::PI;
 const DOCK_EXIT: [f32; 3] = [0.0, 12.0, 150.0];
+
+/// 站内存档位置：机库出口（JS：站态存 dock exit，读档不再重泊入）。
+pub fn station_exit_pos() -> [f32; 3] {
+    DOCK_EXIT
+}
 const DOCK_TERMINAL: [f32; 3] = [0.0, 4.0, -3.0];
 const DOCK_GARAGE: [f32; 3] = [30.0, 4.0, 24.0];
 const BOUNDS_X: f32 = 30.0;
@@ -132,6 +137,8 @@ pub enum StationPhase {
 pub struct WalkState {
     pub pos: Vec3,
     pub board_cd: f32,
+    /// 站内喷气背包垂直速度（JS station.js:354-370）
+    pub vy: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -433,6 +440,7 @@ pub fn ship_switch_system(
     mut ship_asset: ResMut<ShipAsset>,
     mut ship_state: ResMut<ShipState>,
     mut game: ResMut<SpaceGame>,
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -475,12 +483,23 @@ pub fn ship_switch_system(
         for f in ship_asset.flames.drain(..) {
             commands.entity(f).despawn();
         }
-        let (ent, flames) =
-            crate::space::spawn_ship(&mut commands, &mut meshes, &mut mats, pos, yaw, cls);
+        let (ent, flames) = crate::space::spawn_ship(
+            &mut commands,
+            &mut meshes,
+            &mut mats,
+            &asset_server,
+            pos,
+            yaw,
+            cls,
+        );
         ship_asset.entity = Some(ent);
         ship_asset.flames = flames;
         ship_asset.data = new_data;
         game.ship_inv = ship_asset.data.inv.clone();
+        // 船体生命随等级（JS VIS_HP）
+        ship_state.hp = crate::space::vis_hp(&e.cls);
+        ship_state.hp_max = crate::space::vis_hp(&e.cls);
+        ship_state.fire_cd = 0.0;
     }
 }
 
@@ -575,7 +594,7 @@ pub fn station_system(
             *flight_cam = FlightCamera::set(ship.pos + cam_off, q, 75.0);
             if t >= 1.0 {
                 st.phase = StationPhase::Idle;
-                ship.speed = 20.0;
+                ship.speed = 30.0; // JS: 出口速度 30
                 *next_mode = FlightMode::Space;
                 crate::audio::play(&mut commands, sfx.laser_hit.clone(), 0.5, None);
             }
@@ -603,7 +622,7 @@ fn disembark(st: &mut StationState, player: &mut Query<&mut Player>) {
     let sx = st.station_pos.x + 8.0;
     let sz = st.station_pos.z + 24.0;
     let fy = st.station_pos.y + floor_at(8.0, 24.0) + 0.1;
-    st.walk = Some(WalkState { pos: Vec3::new(sx, fy, sz), board_cd: 0.6 });
+    st.walk = Some(WalkState { pos: Vec3::new(sx, fy, sz), board_cd: 0.6, vy: 0.0 });
     if let Ok(mut p) = player.single_mut() {
         let term = st.station_pos + Vec3::from(DOCK_TERMINAL);
         p.yaw = (-(term.x - sx)).atan2(-(term.z - sz));
@@ -678,43 +697,60 @@ fn walk_tick(
     w.pos += wish * sp * dt;
     let lx = (w.pos.x - o.x).clamp(-BOUNDS_X + 0.5, BOUNDS_X - 0.5);
     let lz = (w.pos.z - o.z).clamp(BOUNDS_Z_MIN + 0.5, BOUNDS_Z_MAX - 0.5);
-    let fy = o.y + floor_at(lx, lz) + 0.1;
-    w.pos = Vec3::new(o.x + lx, fy, o.z + lz);
+    // 站内喷气背包（JS：重力 20、喷气 +46 上限 8.5、耗 22/s、回充 16/s、天花板 +28）
+    let mut vy = w.vy - 20.0 * dt;
+    if keys.pressed(KeyCode::Space) && p.stats.jet > 0.0 {
+        vy = (vy + 46.0 * dt).min(8.5);
+        p.stats.jet = (p.stats.jet - 22.0 * dt).max(0.0);
+    }
+    let floor_y = o.y + floor_at(lx, lz) + 0.1;
+    let ceil_y = o.y + 28.0;
+    let mut ny = w.pos.y + vy * dt;
+    if ny <= floor_y {
+        ny = floor_y;
+        vy = 0.0;
+        p.stats.jet = (p.stats.jet + 16.0 * dt).min(100.0);
+    } else if ny >= ceil_y {
+        ny = ceil_y;
+        vy = 0.0;
+    }
+    w.vy = vy;
+    w.pos = Vec3::new(o.x + lx, ny, o.z + lz);
     p.pos = w.pos;
-    // 附近交互目标
+    // 附近交互目标（JS 固定优先级：ship 7.5 > garage 3.6 > terminal 4.2 > pilot 3.4 > staff 3.4）
     let mut near = StationNear::None;
-    let mut best_d = 1000.0f32;
     if w.board_cd <= 0.0 {
         let d = w.pos.distance(st.pad + Vec3::Y * 1.5);
-        if d < 7.0 {
+        if d < 7.5 {
             near = StationNear::Ship;
-            best_d = d;
         }
     }
-    let term = st.station_pos + Vec3::from(DOCK_TERMINAL);
-    let d = w.pos.distance(term + Vec3::Y * 1.5);
-    if d < 3.2 && d < best_d {
-        near = StationNear::Terminal;
-        best_d = d;
-    }
-    let gar = st.station_pos + Vec3::from(DOCK_GARAGE);
-    let d = w.pos.distance(gar + Vec3::Y * 1.2);
-    if d < 3.2 && d < best_d {
-        near = StationNear::Garage;
-        best_d = d;
-    }
-    for (i, pil) in st.pilots.iter().enumerate() {
-        let d = w.pos.distance(pil.pos + Vec3::Y * 1.0);
-        if d < 3.0 && d < best_d {
-            near = StationNear::Pilot(i);
-            best_d = d;
+    if near == StationNear::None {
+        let gar = st.station_pos + Vec3::from(DOCK_GARAGE);
+        if w.pos.distance(gar + Vec3::Y * 1.2) < 3.6 {
+            near = StationNear::Garage;
         }
     }
-    for (i, sp_) in st.staff_positions.iter().enumerate() {
-        let d = w.pos.distance(*sp_);
-        if d < 3.0 && d < best_d {
-            near = StationNear::Staff(i);
-            best_d = d;
+    if near == StationNear::None {
+        let term = st.station_pos + Vec3::from(DOCK_TERMINAL);
+        if w.pos.distance(term + Vec3::Y * 1.5) < 4.2 {
+            near = StationNear::Terminal;
+        }
+    }
+    if near == StationNear::None {
+        for (i, pil) in st.pilots.iter().enumerate() {
+            if w.pos.distance(pil.pos + Vec3::Y * 1.0) < 3.4 {
+                near = StationNear::Pilot(i);
+                break;
+            }
+        }
+    }
+    if near == StationNear::None {
+        for (i, sp_) in st.staff_positions.iter().enumerate() {
+            if w.pos.distance(*sp_) < 3.4 {
+                near = StationNear::Staff(i);
+                break;
+            }
         }
     }
     st.near = near;
@@ -844,7 +880,8 @@ fn walk_tick(
 pub fn station_dialog_system(time: Res<Time>, mut st: ResMut<StationState>) {
     if let Some(d) = st.dlg.as_mut() {
         let dt = time.delta_secs();
-        d.chars += (dt * 60.0) as usize;
+        // JS 打字机 26 字符/秒
+        d.chars += (dt * 26.0) as usize;
         if let Some(cur) = d.lines.get(d.idx) {
             if d.chars > cur.chars().count() + 8 {
                 d.chars = cur.chars().count();
@@ -859,6 +896,7 @@ pub fn station_dialog_system(time: Res<Time>, mut st: ResMut<StationState>) {
 pub fn station_npc_spawn_system(
     mode: Res<FlightMode>,
     mut st: ResMut<StationState>,
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -883,12 +921,10 @@ pub fn station_npc_spawn_system(
         let app = Appearance::random(rnd.next().to_bits());
         let human = crate::char::spawn_humanoid(
             &mut commands,
-            &mut meshes,
-            &mut mats,
+            &asset_server,
             &app,
             pil.pos,
             std::f32::consts::PI,
-            |_, _, _, _| {},
         );
         orig.entity = Some(human.root);
         let pad = station_pos + Vec3::from(VIS_PADS[i % VIS_PADS.len()]);
@@ -897,6 +933,7 @@ pub fn station_npc_spawn_system(
             &mut commands,
             &mut meshes,
             &mut mats,
+            &asset_server,
             pad + Vec3::new(0.0, 2.0, 0.0),
             std::f32::consts::PI,
             cls,
@@ -912,12 +949,10 @@ pub fn station_npc_spawn_system(
             let app = Appearance::random(rnd.next().to_bits());
             let human = crate::char::spawn_humanoid(
                 &mut commands,
-                &mut meshes,
-                &mut mats,
+                &asset_server,
                 &app,
                 sp,
                 std::f32::consts::PI,
-                |_, _, _, _| {},
             );
             st.staff_entities.push(human.root);
         }

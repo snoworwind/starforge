@@ -469,9 +469,9 @@ impl WorldGen {
                             data[idx] = oid;
                         }
                     }
-                    lx += (rng.next() * 3.0) as i32 - 1;
-                    y += (rng.next() * 3.0) as i32 - 1;
-                    lz += (rng.next() * 3.0) as i32 - 1;
+                    lx += (rng.next() * 3.0 - 1.0) as i32; // JS: (rng()*3-1)|0 向零截断
+                    y += (rng.next() * 3.0 - 1.0) as i32;
+                    lz += (rng.next() * 3.0 - 1.0) as i32;
                 }
             }
         }
@@ -497,7 +497,7 @@ impl WorldGen {
                                 set_local_if_air(&mut data, lx + ox, ty, lz + oz, ids::MUSH_CAP);
                             }
                         }
-                        set_local_if_air(&mut data, lx, h + th + 2, lz, ids::MUSH_CAP);
+                        set_local(&mut data, lx, h + th + 2, lz, ids::MUSH_CAP); // JS 无条件覆盖
                     } else {
                         for dy in 1..=th {
                             set_local(&mut data, lx, h + dy, lz, ids::LOG);
@@ -753,7 +753,8 @@ fn stamp_structure(g: &WorldGen, st: &Structure, cx: i32, cz: i32, data: &mut [u
                         0 => {
                             let dist = ((dx * dx + dz * dz) as f32).sqrt();
                             if (dist - 7.0).abs() < 0.7 && hr.next() < 0.7 {
-                                let hh2 = 2 + (hash2(wx, wz, g.seed.wrapping_add(7), g.seed).next() * 3.0) as i32;
+                                // JS: hash2(wx, wz, st.seed + 7) —— 结构种子派生柱高
+                                let hh2 = 2 + (hash2(wx, wz, seed.wrapping_add(7), g.seed).next() * 3.0) as i32;
                                 for dy in 1..=hh2 {
                                     let id = if dy == hh2 { data::block_by_key(b.deep).id } else { ids::STONE };
                                     set_local(data, lx, gh + dy, lz, id);
@@ -791,7 +792,8 @@ fn stamp_structure(g: &WorldGen, st: &Structure, cx: i32, cz: i32, data: &mut [u
                                 let edge = (dx.abs() == 8 && dz.abs() <= 6) || (dz.abs() == 6 && dx.abs() <= 8);
                                 if edge {
                                     let hh2 = (hr.next() * 4.0) as i32;
-                                    for dy in 1..hh2 {
+                                    // JS: for y = 1; y <= hh; y++（含端点）
+                                    for dy in 1..=hh2 {
                                         let id = if hr.next() < 0.25 { data::block_by_key(b.deep).id } else { ids::STONE };
                                         set_local(data, lx, gh + dy, lz, id);
                                     }
@@ -830,13 +832,14 @@ fn stamp_hut(g: &WorldGen, data: &mut [u8; CHUNK_CELLS], x0: i32, z0: i32, hx: i
                 set_abs(data, wx, y, wz, dirt_id);
             }
             set_abs(data, wx, f - 1, wz, ids::PLANKS);
-            // interior cleared
-            for y in f..f + 4 {
+            // interior cleared（JS: f..=f+4 五层）
+            for y in f..=f + 4 {
                 set_abs(data, wx, y, wz, ids::AIR);
             }
             let edge = dx.abs() == s || dz.abs() == s;
             if edge {
-                for y in f..f + 2 {
+                // 外墙（JS: f..=f+2 三层）
+                for y in f..=f + 2 {
                     let id = if dx.abs() == s && dz.abs() == s { ids::LOG } else { ids::PLANKS };
                     set_abs(data, wx, y, wz, id);
                 }
@@ -934,6 +937,15 @@ impl World {
                     need_save: false,
                 },
             );
+            // JS markNeighborsDirty：新块生成后，已网格化的 4 邻需重算边界面
+            for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+                if let Some(c) = self.chunks.get_mut(&ckey(nx, nz)) {
+                    if c.mesh.is_some() || c.water_mesh.is_some() {
+                        c.dirty = true;
+                        self.stream_dirty = true;
+                    }
+                }
+            }
         }
         self.chunks.get(&key).unwrap()
     }
@@ -989,42 +1001,94 @@ impl World {
         }
     }
 
-    /// Highest solid block y at column (top surface).
+    /// Highest solid-or-liquid block y at column (JS topAt：solid‖liquid，兜底 0)。
     pub fn top_at(&self, x: i32, z: i32) -> i32 {
         for y in (0..WORLD_H).rev() {
             let id = self.get(x, y, z);
-            if data::block_by_id(id).solid {
+            let def = data::block_by_id(id);
+            if def.solid || def.liquid {
                 return y;
             }
         }
-        SEA
+        0
     }
 
-    /// Find a spawn position near a column.
+    /// Find a spawn position（JS findSpawn 移植：种子派生、400 次随机逐步扩大搜索、网格兜底）。
+    /// 锚定在传入列附近以保证区块已生成（JS 为绝对坐标，此处取相对偏移保持流式中心一致）。
     pub fn find_spawn(&self, x: i32, z: i32) -> Vec3 {
-        let top = self.top_at(x, z);
-        Vec3::new(x as f32 + 0.5, top as f32 + 1.5, z as f32 + 0.5)
+        let seab = data::SEA + self.biome().sea_lift;
+        let mut rng = crate::rng::Rng::new(self.seed ^ 0xB00B5);
+        let valid = |wx: i32, wz: i32| -> bool {
+            let y = self.top_at(wx, wz);
+            if y <= seab {
+                return false;
+            }
+            let d = data::block_by_id(self.get(wx, y, wz));
+            d.solid && !d.liquid && d.key != "leaves" && d.key != "log"
+        };
+        for r in 0..400 {
+            let range = (20 + r) as f32;
+            let wx = x + ((rng.next() * range * 2.0 - range) as i32);
+            let wz = z + ((rng.next() * range * 2.0 - range) as i32);
+            if valid(wx, wz) {
+                return Vec3::new(
+                    wx as f32 + 0.5,
+                    self.top_at(wx, wz) as f32 + 2.0,
+                    wz as f32 + 0.5,
+                );
+            }
+        }
+        for gx in (-256..=256).step_by(8) {
+            for gz in (-256..=256).step_by(8) {
+                let wx = x + gx;
+                let wz = z + gz;
+                if valid(wx, wz) {
+                    return Vec3::new(
+                        wx as f32 + 0.5,
+                        self.top_at(wx, wz) as f32 + 2.0,
+                        wz as f32 + 0.5,
+                    );
+                }
+            }
+        }
+        Vec3::new(
+            x as f32 + 0.5,
+            self.top_at(x, z) as f32 + 2.0,
+            z as f32 + 0.5,
+        )
     }
 
-    /// Voxel DDA raycast. Returns hit cell + face normal + distance.
+    /// Voxel DDA raycast（JS 语义：命中=非空气且非液体，穿水、中植物；零分量轴不移动）。
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<([i32; 3], [i32; 3], f32)> {
         let mut x = origin.x.floor() as i32;
         let mut y = origin.y.floor() as i32;
         let mut z = origin.z.floor() as i32;
-        let step_x = if dir.x > 0.0 { 1 } else { -1 };
-        let step_y = if dir.y > 0.0 { 1 } else { -1 };
-        let step_z = if dir.z > 0.0 { 1 } else { -1 };
-        let t_delta_x = (1.0 / dir.x).abs();
-        let t_delta_y = (1.0 / dir.y).abs();
-        let t_delta_z = (1.0 / dir.z).abs();
-        let mut t_max_x = if dir.x != 0.0 { ((if step_x > 0 { x as f32 + 1.0 } else { x as f32 }) - origin.x) / dir.x } else { f32::INFINITY };
-        let mut t_max_y = if dir.y != 0.0 { ((if step_y > 0 { y as f32 + 1.0 } else { y as f32 }) - origin.y) / dir.y } else { f32::INFINITY };
-        let mut t_max_z = if dir.z != 0.0 { ((if step_z > 0 { z as f32 + 1.0 } else { z as f32 }) - origin.z) / dir.z } else { f32::INFINITY };
+        let step_x = if dir.x > 0.0 { 1 } else if dir.x < 0.0 { -1 } else { 0 };
+        let step_y = if dir.y > 0.0 { 1 } else if dir.y < 0.0 { -1 } else { 0 };
+        let step_z = if dir.z > 0.0 { 1 } else if dir.z < 0.0 { -1 } else { 0 };
+        let t_delta_x = if step_x != 0 { (1.0 / dir.x).abs() } else { f32::INFINITY };
+        let t_delta_y = if step_y != 0 { (1.0 / dir.y).abs() } else { f32::INFINITY };
+        let t_delta_z = if step_z != 0 { (1.0 / dir.z).abs() } else { f32::INFINITY };
+        let mut t_max_x = if step_x != 0 {
+            if step_x > 0 { (x as f32 + 1.0 - origin.x) * t_delta_x } else { (origin.x - x as f32) * t_delta_x }
+        } else {
+            f32::INFINITY
+        };
+        let mut t_max_y = if step_y != 0 {
+            if step_y > 0 { (y as f32 + 1.0 - origin.y) * t_delta_y } else { (origin.y - y as f32) * t_delta_y }
+        } else {
+            f32::INFINITY
+        };
+        let mut t_max_z = if step_z != 0 {
+            if step_z > 0 { (z as f32 + 1.0 - origin.z) * t_delta_z } else { (origin.z - z as f32) * t_delta_z }
+        } else {
+            f32::INFINITY
+        };
         let mut normal = [0, 0, 0];
         let mut t = 0.0f32;
         for _ in 0..256 {
             let def = data::block_by_id(self.get(x, y, z));
-            if def.solid || def.liquid {
+            if def.id != ids::AIR && !def.liquid {
                 return Some(([x, y, z], normal, t));
             }
             if t_max_x < t_max_y && t_max_x < t_max_z {
@@ -1311,14 +1375,18 @@ pub fn fill_far_rows(
         b.grass,
         "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
     );
-    let land_tile = match b.grass {
-        "grass" => "grass_top",
-        "snow" => "snow_top",
-        "alien" => "alien_top",
-        "murk" => "murk_top",
-        k => k,
-    };
-    let land_avg = far_tile_avg(atlas, land_tile);
+    // 地表瓦片：sub 地面覆盖优先（JS tileFor(BLOCKS[sd.g || biome.grass], 2)），redmoss→redmoss_top
+    fn tile_key(k: &'static str) -> &'static str {
+        match k {
+            "grass" => "grass_top",
+            "snow" => "snow_top",
+            "alien" => "alien_top",
+            "murk" => "murk_top",
+            "redmoss" => "redmoss_top",
+            other => other,
+        }
+    }
+    let mut tile_cache: std::collections::HashMap<&'static str, [f32; 3]> = std::collections::HashMap::new();
     let sand_avg = far_tile_avg(atlas, "sand");
     let half = (FAR_N as f32 - 1.0) / 2.0 * FAR_STEP;
     let to = to.min(FAR_N);
@@ -1326,13 +1394,30 @@ pub fn fill_far_rows(
         let wz = cz - half + iz as f32 * FAR_STEP;
         for ix in 0..FAR_N {
             let wx = cx - half + ix as f32 * FAR_STEP;
-            let h = g.height_at(wx.floor(), wz.floor()) as f32;
-            let (y, col) = if h < seab && (!b.dry || b.lava) {
+            let mut h = g.height_at(wx.floor(), wz.floor()) as f32;
+            // alien 浮岛（JS mapHeightAt：h+6 <= fl.base → fl.base+fl.thick）
+            let mut island_h = None;
+            if b.key == "alien" {
+                if let Some((base, thick)) = g.float_island_at(wx, wz) {
+                    if h + 6.0 <= base as f32 {
+                        island_h = Some((base, thick));
+                        h = base as f32 + thick as f32;
+                    }
+                }
+            }
+            let (y, col) = if h < seab && (!b.dry || b.lava) && island_h.is_none() {
                 let depth = (seab - h).max(0.0);
                 let sh = (0.78 - depth * 0.008).clamp(0.0, 1.0);
                 (seab, [water_rgb[0] * sh, water_rgb[1] * sh, water_rgb[2] * sh, 1.0])
             } else {
-                let avg = if h < seab + 1.0 && !no_beach { sand_avg } else { land_avg };
+                let ground_key = g
+                    .sub_at(wx.floor(), wz.floor())
+                    .map(|s| s.0)
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or(b.grass);
+                let tk = tile_key(ground_key);
+                let avg = *tile_cache.entry(tk).or_insert_with(|| far_tile_avg(atlas, tk));
+                let avg = if h < seab + 1.0 && !no_beach && island_h.is_none() { sand_avg } else { avg };
                 let sh = (0.72 + (h - 14.0) * 0.012).clamp(0.0, 1.35);
                 (
                     h,

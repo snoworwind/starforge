@@ -140,6 +140,9 @@ pub struct CharData {
     pub quest_idx: usize,
     #[serde(default)]
     pub play_time: f32,
+    /// 进行中的研究（JS researching {id, t}）
+    #[serde(default)]
+    pub researching: Option<(String, f32)>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -170,6 +173,18 @@ pub struct WorldData {
     /// 太空飞船状态（state=space 时存在）
     #[serde(default)]
     pub ship_state: Option<ShipStateSave>,
+    /// 当前星球地图标记（JS mapMarks[pid]）
+    #[serde(default)]
+    pub marks: Vec<crate::space::Mark>,
+    /// 曲率跃迁锁定
+    #[serde(default)]
+    pub warp_lock: Option<crate::space::WarpLock>,
+    /// 放置任务计数（JS placedCount）
+    #[serde(default)]
+    pub placed: HashMap<String, i32>,
+    /// 跨星系档案（JS galaxyArchives）
+    #[serde(default)]
+    pub archives: HashMap<u32, crate::space::GalaxyArchive>,
 }
 
 fn d_state() -> String { "planet".into() }
@@ -190,6 +205,7 @@ pub fn world_path(name: &str) -> PathBuf {
     saves_dir().join("worlds").join(format!("{name}.world.json"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn save_char(
     p: &Player,
     name: &str,
@@ -200,6 +216,7 @@ pub fn save_char(
     player_ship: &ShipSave,
     ship_garage: &[ShipSave],
     quest_idx: usize,
+    researching: Option<&(String, f32)>,
 ) -> bool {
     let data = CharData {
         v: SAVE_VERSION,
@@ -233,6 +250,7 @@ pub fn save_char(
         ship_garage: ship_garage.to_vec(),
         quest_idx,
         play_time: p.play_time,
+        researching: researching.cloned(),
     };
     write_json(&char_path(name), &data)
 }
@@ -254,6 +272,10 @@ pub fn save_world_full(
     flags: &HashMap<String, bool>,
     ship_pos: Option<[f32; 3]>,
     ship_state: Option<&ShipStateSave>,
+    marks: &[crate::space::Mark],
+    warp_lock: Option<&crate::space::WarpLock>,
+    placed: &HashMap<String, i32>,
+    archives: &HashMap<u32, crate::space::GalaxyArchive>,
 ) -> bool {
     let data = WorldData {
         v: SAVE_VERSION,
@@ -271,6 +293,10 @@ pub fn save_world_full(
         flags: flags.clone(),
         ship_pos,
         ship_state: ship_state.cloned(),
+        marks: marks.to_vec(),
+        warp_lock: warp_lock.cloned(),
+        placed: placed.clone(),
+        archives: archives.clone(),
     };
     write_json(&world_path(name), &data)
 }
@@ -288,6 +314,10 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         &HashMap::new(),
         None,
         None,
+        &[],
+        None,
+        &HashMap::new(),
+        &HashMap::new(),
     )
 }
 

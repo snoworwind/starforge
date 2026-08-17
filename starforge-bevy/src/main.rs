@@ -161,12 +161,12 @@ fn smoke_exit(
     }
 }
 
-/// In --smoke mode, immediately leave the menu and start loading a world.
+/// In --smoke/--play mode, immediately leave the menu and start loading a world.
 fn smoke_boot(
-    flag: Option<Res<SmokeFlag>>,
+    req: Option<Res<WorldRequest>>,
     mut next: ResMut<NextState<GameState>>,
 ) {
-    if flag.is_some() {
+    if req.is_some() {
         next.set(GameState::Loading);
     }
 }
@@ -190,6 +190,7 @@ fn main() {
         }
     }));
     let smoke = std::env::args().any(|a| a == "--smoke");
+    let play = std::env::args().any(|a| a == "--play");
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.1)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -207,6 +208,8 @@ fn main() {
         .insert_resource(UiState::default())
         .insert_resource(Research::default())
         .insert_resource(ui::EguiIcons::default())
+        .insert_resource(ui::ScanState::default())
+        .insert_resource(ui::MapState::default())
         .init_state::<GameState>()
         .add_message::<ui::SaveEvent>()
         .add_message::<ui::QuitToMenuEvent>()
@@ -225,6 +228,8 @@ fn main() {
         .insert_resource(factory::Power::default())
         .insert_resource(factory::TickAcc::default())
         .insert_resource(space::WarpAnim::default())
+        .insert_resource(space::VisitorRespawn::default())
+        .insert_resource(creatures::SentinelSpawner::default())
         .add_systems(Startup, startup)
         .add_systems(
             PreUpdate,
@@ -236,6 +241,7 @@ fn main() {
         .add_systems(OnEnter(GameState::Loading), on_enter_loading)
         .add_systems(OnExit(GameState::Loading), on_exit_loading)
         .add_systems(OnEnter(GameState::Playing), on_enter_playing)
+        .add_systems(OnExit(GameState::Playing), on_exit_playing)
         // menu
         .add_systems(
             Update,
@@ -254,6 +260,7 @@ fn main() {
                                 // 通用
                                 ui::panel_hotkeys_system,
                                 ui::quicksave_system,
+                                ui::clear_input_on_focus_lost,
                                 ui::big_message_system,
                                 quests::quest_tick_system,
                                 quests::side_quest_system,
@@ -273,10 +280,10 @@ fn main() {
                                 player::break_system.run_if(ground_mode),
                                 player::placement_system.run_if(ground_mode),
                                 player::hotbar_system.run_if(ground_mode),
-                                player::cursor_system.run_if(ground_mode),
                                 stream_system.run_if(ground_scene_mode),
                                 creatures::creature_spawn_system.run_if(ground_mode),
                                 creatures::creature_system.run_if(ground_mode),
+                                creatures::sentinel_system.run_if(ground_mode),
                             )
                                 .chain(),
                             (
@@ -284,6 +291,7 @@ fn main() {
                                 creatures::drops_system.run_if(ground_mode),
                                 factory::factory_system.run_if(ground_mode),
                                 factory::machine_sync_system.run_if(ground_mode),
+                                factory::lumberbot_visual_system.run_if(ground_mode),
                                 ui::scan_system.run_if(ground_mode),
                                 // 视角
                                 player::look_system.run_if(walk_look_mode),
@@ -303,6 +311,8 @@ fn main() {
                                 planet_switch_system,
                                 space_sky_sync_system,
                                 ground_scene_visibility_system,
+                                // 光标管理：所有模式（含太空/空间站）都按面板状态锁定/解锁
+                                player::cursor_system,
                             )
                                 .chain(),
                         )
@@ -319,6 +329,8 @@ fn main() {
                             ui::trade_panel_system,
                             ui::garage_panel_system,
                             ui::galaxy_map_system,
+                            ui::creative_panel_system,
+                            ui::planet_map_system,
                             save_system,
                             quit_to_menu_system,
                             smoke_exit,
@@ -371,11 +383,30 @@ fn main() {
         )
         .add_systems(
             Update,
+            space::bolt_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::space_drop_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::visitor_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::asteroid_spin_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::engine_loop_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
             far_mesh_system.run_if(in_state(GameState::Playing)),
         );
-    if smoke {
-        // self-test mode: auto-start a world and exit after a few seconds
-        app.insert_resource(SmokeFlag { frames: 0 });
+    if smoke || play {
+        // 自动建世界进入游戏（--play 不退出，供交互验证；--smoke 额外自测退出）
         app.insert_resource(WorldRequest {
             world_name: "smoke".into(),
             char_name: "smoker".into(),
@@ -385,6 +416,9 @@ fn main() {
             load: false,
             appearance: save::Appearance::random(4242),
         });
+    }
+    if smoke {
+        app.insert_resource(SmokeFlag { frames: 0 });
     }
     app.run();
 }
@@ -432,6 +466,23 @@ fn startup(
             shader_dir.join("terrain_fragment.wgsl"),
             include_str!("../assets/shaders/terrain_fragment.wgsl"),
         );
+        // GLB 模型同样自解压到 exe 旁（仅首次；源码在 <crate>/target/<profile>/ 下时向上两级即 crate 根）
+        let models_dir = dir.join("assets").join("models");
+        if !models_dir.exists() {
+            let mut src: Option<std::path::PathBuf> = None;
+            let via_exe = dir.join("..").join("..").join("assets").join("models");
+            if via_exe.is_dir() {
+                src = Some(via_exe);
+            } else if let Ok(cwd) = std::env::current_dir() {
+                let via_cwd = cwd.join("assets").join("models");
+                if via_cwd.is_dir() {
+                    src = Some(via_cwd);
+                }
+            }
+            if let Some(s) = src {
+                let _ = copy_dir_all(&s, &models_dir);
+            }
+        }
     }
     let atlas = textures::Atlas::build();
     commands.insert_resource(AtlasRes { atlas });
@@ -451,7 +502,7 @@ fn startup(
     icon_imgs.map.insert("fallback".to_string(), white);
     commands.insert_resource(icon_mats);
     commands.insert_resource(icon_imgs);
-    commands.insert_resource(audio::Sfx::build(&mut audio_assets));
+    commands.insert_resource(audio::Sfx::build(&mut audio_assets, settings.volume));
     // persistent camera: created now so bevy_egui's primary context exists in menus too.
     // The player camera system drives it during Playing.
     let cam = commands
@@ -511,6 +562,22 @@ fn startup(
             PixelUpscale,
         ));
     }
+}
+
+/// 递归复制目录（自解压素材用）。
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            let _ = std::fs::copy(entry.path(), &target);
+        }
+    }
+    Ok(())
 }
 
 // ---------- Menu ----------
@@ -974,6 +1041,7 @@ fn loading_system(
     mut images: ResMut<Assets<Image>>,
     mut stdmats: ResMut<Assets<StandardMaterial>>,
     atlas: Res<AtlasRes>,
+    asset_server: Res<AssetServer>,
     mut contexts: EguiContexts,
     mut next: ResMut<NextState<GameState>>,
     time: Res<Time>,
@@ -1045,6 +1113,7 @@ fn loading_system(
             &mut commands,
             &mut meshes,
             &mut stdmats,
+            &asset_server,
             world,
             spawn,
             difficulty,
@@ -1063,6 +1132,7 @@ fn spawn_scene(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     stdmats: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
     world: World,
     spawn: Vec3,
     difficulty: data::Difficulty,
@@ -1119,6 +1189,7 @@ fn spawn_scene(
     let mut game: SpaceGame;
     let mut start_mode = FlightMode::Planet;
     let mut ship_state = ShipState::default();
+    let mut research_active: Option<(String, f32)> = None;
 
     if let Some(cd) = char_data {
         p.pos = Vec3::new(cd.pos[0], cd.pos[1], cd.pos[2]);
@@ -1140,6 +1211,7 @@ fn spawn_scene(
         game = SpaceGame::new(load_galaxy(&world_data));
         game.fuel_loaded = cd.fuel_loaded;
         game.garage = cd.ship_garage;
+        research_active = cd.researching;
     } else {
         p.inv.add_item("carbon", 20);
         p.inv.add_item("oxygen", 5);
@@ -1160,6 +1232,11 @@ fn spawn_scene(
         if let Some(sp) = wd.ship_pos {
             game.ship_pos = Vec3::new(sp[0], sp[1], sp[2]);
         }
+        // 地图标记 / 跃迁锁定 / 跨星系档案 / 放置计数（JS mapMarks/warpLock/galaxyArchives/placedCount）
+        game.marks = wd.marks.clone();
+        game.warp_lock = wd.warp_lock.clone();
+        game.archives = wd.archives.clone();
+        quests.placed = wd.placed.clone();
         if wd.state == "space" {
             start_mode = FlightMode::Space;
             if let Some(ss) = &wd.ship_state {
@@ -1180,12 +1257,14 @@ fn spawn_scene(
         inv: vec![None; 12],
     };
     let (ship_ent, flames, ship_spawn_pos) =
-        space::spawn_initial_ship(commands, meshes, stdmats, &world, &ship_data);
+        space::spawn_initial_ship(commands, meshes, stdmats, asset_server, &world, &ship_data);
     if game.ship_pos == Vec3::ZERO {
         game.ship_pos = ship_spawn_pos;
     }
     ship_state.pos = game.ship_pos;
     ship_state.board_yaw = 0.0;
+    ship_state.hp = 20.0;
+    ship_state.hp_max = 20.0;
     commands.insert_resource(world);
     commands.insert_resource(ShipAsset {
         entity: Some(ship_ent),
@@ -1243,9 +1322,10 @@ fn spawn_scene(
     commands.insert_resource(player::BreakQueue::default());
     commands.insert_resource(creatures::CreatureSpawner::default());
     commands.insert_resource(ScanPulse::default());
+    commands.insert_resource(ui::ScanState::default());
     commands.insert_resource(Research {
         techs,
-        active: None,
+        active: research_active,
     });
     commands.insert_resource(SaveNames {
         world: world_name,
@@ -1280,6 +1360,14 @@ fn on_enter_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::Pr
     for mut opts in &mut windows {
         opts.grab_mode = bevy::window::CursorGrabMode::Locked;
         opts.visible = false;
+    }
+}
+
+/// 返回主菜单时释放鼠标（否则菜单里光标不可见/被锁）。
+fn on_exit_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>) {
+    for mut opts in &mut windows {
+        opts.grab_mode = bevy::window::CursorGrabMode::None;
+        opts.visible = true;
     }
 }
 
@@ -1327,8 +1415,8 @@ fn prompt_system(
         return;
     }
     let Ok(p) = player.single() else { return };
-    // 飞船优先
-    if p.pos.distance(game.ship_pos) < 6.0 {
+    // 飞船优先（与登船判定半径一致：JS 4.5）
+    if p.pos.distance(game.ship_pos) < 4.5 {
         ui_state.prompt = Some("[E] 检查飞船 / 登船".into());
         return;
     }
@@ -1688,6 +1776,9 @@ fn planet_switch_system(
     machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
     creatures: Query<Entity, With<creatures::Creature>>,
     mut spawner: ResMut<creatures::CreatureSpawner>,
+    mut sent_spawner: ResMut<creatures::SentinelSpawner>,
+    mut scan_state: ResMut<ui::ScanState>,
+    scan_markers: Query<Entity, With<ui::ScanMarker>>,
     mut terrain_materials: ResMut<Assets<TerrainMat>>,
     mut images: ResMut<Assets<Image>>,
     atlas: Res<AtlasRes>,
@@ -1703,6 +1794,7 @@ fn planet_switch_system(
         archive.mods = world.serialize_mods();
         archive.seed = world.seed;
         archive.biome = world.biome().key.to_string();
+        archive.marks = game.marks.clone();
         game.visited.insert(cur, archive);
         // 清理当前场景
         for ent in &chunk_meshes {
@@ -1714,7 +1806,12 @@ fn planet_switch_system(
         for ent in &creatures {
             commands.entity(ent).despawn();
         }
+        for ent in &scan_markers {
+            commands.entity(ent).despawn();
+        }
         *spawner = creatures::CreatureSpawner::default();
+        *sent_spawner = creatures::SentinelSpawner::default();
+        *scan_state = ui::ScanState::default();
         // 构建新星球世界
         let pd = game
             .galaxy
@@ -1749,9 +1846,11 @@ fn planet_switch_system(
         if let Some(a) = &archive_new {
             factory::deserialize_machines(&mut commands, &a.machines);
             game.ship_pos = Vec3::new(a.ship_pos[0], a.ship_pos[1], a.ship_pos[2]);
+            game.marks = a.marks.clone();
         } else {
             // 新星球：占位停泊点（落地动画会写入真实位置）
             game.ship_pos = Vec3::new(96.0, 40.0, 96.0);
+            game.marks = Vec::new();
         }
         *world = new_world;
         game.current_planet = pid;
@@ -1792,6 +1891,7 @@ fn ground_scene_visibility_system(
             With<creatures::Creature>,
             With<creatures::DropItem>,
             With<ui::Ghost>,
+            With<ui::ScanMarker>,
             With<Beam>,
         )>,
     >,
@@ -1827,6 +1927,7 @@ fn save_system(
     mode: Res<FlightMode>,
     ship_asset: Res<ShipAsset>,
     quests: Res<quests::Quests>,
+    station: Option<Res<station::StationState>>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
 ) {
@@ -1847,6 +1948,7 @@ fn save_system(
             &ship_asset.data,
             &game.garage,
             quests.idx,
+            research.active.as_ref(),
         );
         let ship_pos = if *mode == FlightMode::Planet || *mode == FlightMode::Seated {
             Some([game.ship_pos.x, game.ship_pos.y, game.ship_pos.z])
@@ -1854,7 +1956,18 @@ fn save_system(
             None
         };
         let ship_state = if matches!(*mode, FlightMode::Space | FlightMode::Warping | FlightMode::Station) {
-            Some(space::serialize_ship_state(&ship))
+            let mut ss = space::serialize_ship_state(&ship);
+            // 站内存档存机库出口（JS main.js:2770-2775），读档不会重新泊入
+            if *mode == FlightMode::Station {
+                if let Some(st) = station.as_ref() {
+                    ss.pos = [
+                        st.station_pos.x + station::station_exit_pos()[0],
+                        st.station_pos.y + station::station_exit_pos()[1],
+                        st.station_pos.z + station::station_exit_pos()[2],
+                    ];
+                }
+            }
+            Some(ss)
         } else {
             None
         };
@@ -1870,6 +1983,10 @@ fn save_system(
             &quests.flags,
             ship_pos,
             ship_state.as_ref(),
+            &game.marks,
+            game.warp_lock.as_ref(),
+            &quests.placed,
+            &game.archives,
         );
         if ok_char && ok_world {
             audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);

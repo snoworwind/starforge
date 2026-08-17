@@ -1011,7 +1011,8 @@ pub fn spawn_space_scene(
         let dist = 500.0 + ar.next() * 2600.0;
         let el = (ar.next() - 0.5) * 1600.0;
         let pos = Vec3::new(ang.cos() * dist, el, ang.sin() * dist);
-        let scale = 3.0 + ar.next() * 14.0;
+        // 陨石模型实测半径约 0.435 单位，按原版球体半径 3~17 换算缩放
+        let scale = (3.0 + ar.next() * 14.0) / 0.435;
         let model = if i % 3 == 0 { meteor_b.clone() } else { meteor_a.clone() };
         let e = commands
             .spawn((
@@ -1063,7 +1064,8 @@ pub fn asteroid_spin_system(
                 let el = (rng.next() - 0.5) * 1600.0;
                 let pos = ship.pos + Vec3::new(ang.cos() * dist, el, ang.sin() * dist);
                 if pos.distance(ship.pos) > 800.0 {
-                    let scale = 3.0 + rng.next() * 14.0;
+                    // 陨石模型实测半径约 0.435 单位，按原版球体半径 3~17 换算缩放
+                    let scale = (3.0 + rng.next() * 14.0) / 0.435;
                     let e = commands
                         .spawn((
                             WorldAssetRoot(meteor_a.clone()),

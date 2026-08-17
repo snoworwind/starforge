@@ -1029,11 +1029,22 @@ impl World {
         if !self.chunks.contains_key(&key) {
             self.gen_count += 1;
             let mut data = self.g.gen_chunk_data(cx, cz);
+            let save_key = strkey(cx, cz);
             let mut from_save = false;
-            if let Some(mods) = self.saved_mods.get(&strkey(cx, cz))
-                && WorldGen::rle_decode(data.as_mut_slice(), mods)
-            {
-                from_save = true;
+            let invalid_save = if let Some(mods) = self.saved_mods.get(&save_key) {
+                if WorldGen::rle_decode(data.as_mut_slice(), mods) {
+                    from_save = true;
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+            if invalid_save {
+                // A corrupt entry would otherwise be parsed on every reload
+                // of this chunk and preserved forever by serialize_mods.
+                self.saved_mods.remove(&save_key);
             }
             self.chunks.insert(
                 key,

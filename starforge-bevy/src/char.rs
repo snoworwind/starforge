@@ -19,8 +19,8 @@ pub const NPC_MODELS: [&str; 8] = [
     "models/npc/astronaut_b.glb",
 ];
 
-/// 各 NPC 模型的 (缩放, y 偏移)：按实测包围盒换算，目标总高 1.9 格（原版体素人形），
-/// 偏移把模型脚底（min.y）对齐到 spawn 位置。
+/// 各 NPC 模型的 (缩放, 脚底对齐 y 偏移)：按实测包围盒换算，目标总高 1.9 格（原版体素人形）。
+/// 资产已去除 Kenney 建模残留的根节点 t(2,0,1.5) 平移。
 fn npc_scale(model: &str) -> (f32, f32) {
     match model {
         // KayKit 冒险者：高 3.31~3.44、脚底 y=-1.12

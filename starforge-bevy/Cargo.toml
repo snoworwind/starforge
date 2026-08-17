@@ -1,0 +1,21 @@
+[package]
+name = "starforge-bevy"
+version = "0.1.0"
+edition = "2024"
+description = "STARFORGE 星穹熔炉 — 体素星际工厂 Bevy 移植版"
+license = "MIT"
+
+[dependencies]
+bevy = { version = "0.19.1", features = ["wav"] }
+bevy_egui = "0.41"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"

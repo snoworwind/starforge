@@ -1,2 +1,5 @@
 * text=auto
 *.bat text eol=crlf
+*.rs text eol=lf
+*.wgsl text eol=lf
+Cargo.lock text eol=lf

@@ -367,6 +367,10 @@ fn main() {
         )
         .add_systems(
             Update,
+            space::sphere_fade_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
             space::warp_arrive_system.run_if(in_state(GameState::Playing)),
         )
         .add_systems(
@@ -1143,6 +1147,7 @@ fn spawn_scene(
     char_name: String,
 ) {
     let biome = world.biome();
+    let world_seed = world.seed;
     // recompute spawn on the loaded terrain (chunks are ready by now)
     let spawn = world.find_spawn(96, 96);
     // spawn logical machine entities for machine blocks present in loaded chunks
@@ -1320,7 +1325,14 @@ fn spawn_scene(
     // state resources
     commands.insert_resource(UiState::default());
     commands.insert_resource(player::BreakQueue::default());
-    commands.insert_resource(creatures::CreatureSpawner::default());
+    // 兽群恢复（MC 风格：位置/血量/领地/被杀记录随存档还原）
+    {
+        let mut spawner = creatures::CreatureSpawner::default();
+        if let Some(wd) = &world_data {
+            spawner.restore(world_seed, &wd.creatures, &wd.creature_cells);
+        }
+        commands.insert_resource(spawner);
+    }
     commands.insert_resource(ScanPulse::default());
     commands.insert_resource(ui::ScanState::default());
     commands.insert_resource(Research {
@@ -1446,8 +1458,9 @@ fn stream_world_step(
 ) -> bool {
     let mut gen_left = gen_budget;
     let mut mesh_left = mesh_budget;
-    // generation rings (inside-out, Chebyshev)
-    'outer: for r in 0..=world.view_dist + 1 {
+    // generation rings (inside-out, Chebyshev)：预生成到 view+2，
+    // 玩家跨区块时新视距环的数据已就绪，只差网格化（不会出现"穿越区块→远处大量区块重新生成"）
+    'outer: for r in 0..=world.view_dist + 2 {
         if gen_left == 0 {
             break;
         }
@@ -1466,8 +1479,9 @@ fn stream_world_step(
             }
         }
     }
-    // meshing rings (neighbors must exist)
-    'mesh_outer: for r in 0..=world.view_dist {
+    // meshing rings (neighbors must exist)：网格化到 view+1（含预载环）——
+    // 玩家跨区块后新视距环立即有网格，地平线不再短暂只剩粗糙远景
+    'mesh_outer: for r in 0..=world.view_dist + 1 {
         if mesh_left == 0 {
             break;
         }
@@ -1619,6 +1633,8 @@ fn stream_system(
     if !world.stream_dirty && pcx == world.last_pcx && pcz == world.last_pcz {
         return;
     }
+    // 预载环已网格化（mesh 到 view+1），预算比 JS 浏览器版（4/2）更高——原生端单帧开销可控，
+    // 跨区块后新视距环 ~6 帧内全部就绪，不再长时间空荡
     stream_world_step(
         &mut world,
         pcx,
@@ -1627,15 +1643,17 @@ fn stream_system(
         &mut meshes,
         &atlas.atlas,
         &mats,
-        4,
-        2,
+        12,
+        6,
     );
     world.last_pcx = pcx;
     world.last_pcz = pcz;
+    // 空闲门控：只统计网格化范围内（≤ view+1）的脏块——view+2 纯数据预载环保持脏状态
+    // 但不唤醒扫描（旧实现统计到 view+3，预载环永远脏 → 每帧全环扫描永不空闲）
     world.stream_dirty = world
         .chunks
         .values()
-        .any(|c| c.dirty && World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 3);
+        .any(|c| c.dirty && World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 1);
 }
 
 // ---------- 远景模拟地形（JS farMesh 移植） ----------
@@ -1714,29 +1732,8 @@ fn far_mesh_system(
                 fm.cz = fm.target_cz;
             }
         }
-        // 挖空环：以玩家为中心逐帧更新顶点 alpha（远景在视距内淡出，不遮挡真实区块/玩家挖掘）
-        if show {
-            let (r0, r1) = far_hole_radii(world.view_dist);
-            let r0_2 = r0 * r0;
-            let r1_2 = r1 * r1;
-            let span = (r1_2 - r0_2).max(1e-4);
-            if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
-                use bevy::mesh::VertexAttributeValues;
-                if let Some(VertexAttributeValues::Float32x4(colors)) =
-                    mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
-                {
-                    for (i, c) in colors.iter_mut().enumerate() {
-                        let ix = (i % world::FAR_N) as f32;
-                        let iz = (i / world::FAR_N) as f32;
-                        let wx = fm.cx - (world::FAR_N as f32 - 1.0) / 2.0 * world::FAR_STEP + ix * world::FAR_STEP;
-                        let wz = fm.cz - (world::FAR_N as f32 - 1.0) / 2.0 * world::FAR_STEP + iz * world::FAR_STEP;
-                        let d2 = (wx - px) * (wx - px) + (wz - pz) * (wz - pz);
-                        let t = ((d2 - r0_2) / span).clamp(0.0, 1.0);
-                        c[3] = t * t * (3.0 - 2.0 * t);
-                    }
-                }
-            }
-        }
+        // 挖空环已移入片元着色器（far_hole_* uniform，curve_system 每帧更新）——
+        // 不再每帧在 CPU 上改写 129×129 顶点 alpha（旧实现每帧上传 16k 顶点，跨越区块时加剧卡顿）
         if mmat.0 != mats.far {
             mmat.0 = mats.far.clone();
         }
@@ -1774,7 +1771,7 @@ fn planet_switch_system(
     mut commands: Commands,
     chunk_meshes: Query<Entity, With<ChunkMesh>>,
     machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
-    creatures: Query<Entity, With<creatures::Creature>>,
+    creatures: Query<(Entity, &creatures::Creature, &Transform)>,
     mut spawner: ResMut<creatures::CreatureSpawner>,
     mut sent_spawner: ResMut<creatures::SentinelSpawner>,
     mut scan_state: ResMut<ui::ScanState>,
@@ -1795,6 +1792,10 @@ fn planet_switch_system(
         archive.seed = world.seed;
         archive.biome = world.biome().key.to_string();
         archive.marks = game.marks.clone();
+        // 兽群随星球档案归档（MC 风格：位置/血量/领地/被杀记录）
+        let (herds_save, cells_save) = spawner.serialize(&creatures);
+        archive.creatures = herds_save;
+        archive.creature_cells = cells_save;
         game.visited.insert(cur, archive);
         // 清理当前场景
         for ent in &chunk_meshes {
@@ -1803,7 +1804,7 @@ fn planet_switch_system(
         for (ent, _, _) in &machines {
             commands.entity(ent).despawn();
         }
-        for ent in &creatures {
+        for (ent, _, _) in &creatures {
             commands.entity(ent).despawn();
         }
         for ent in &scan_markers {
@@ -1842,15 +1843,17 @@ fn planet_switch_system(
             data::biome_by_key(&biome).water_tint,
         );
         commands.insert_resource(mats);
-        // 机器恢复
+        // 机器恢复 + 兽群恢复（新星球无档案则空）
         if let Some(a) = &archive_new {
             factory::deserialize_machines(&mut commands, &a.machines);
             game.ship_pos = Vec3::new(a.ship_pos[0], a.ship_pos[1], a.ship_pos[2]);
             game.marks = a.marks.clone();
+            spawner.restore(seed, &a.creatures, &a.creature_cells);
         } else {
             // 新星球：占位停泊点（落地动画会写入真实位置）
             game.ship_pos = Vec3::new(96.0, 40.0, 96.0);
             game.marks = Vec::new();
+            spawner.restore(seed, &[], &[]);
         }
         *world = new_world;
         game.current_planet = pid;
@@ -1928,6 +1931,8 @@ fn save_system(
     ship_asset: Res<ShipAsset>,
     quests: Res<quests::Quests>,
     station: Option<Res<station::StationState>>,
+    spawner: Res<creatures::CreatureSpawner>,
+    creatures_q: Query<(Entity, &creatures::Creature, &Transform)>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
 ) {
@@ -1971,6 +1976,7 @@ fn save_system(
         } else {
             None
         };
+        let (creatures_save, creature_cells_save) = spawner.serialize(&creatures_q);
         let ok_world = save::save_world_full(
             &world,
             &names.world,
@@ -1987,6 +1993,8 @@ fn save_system(
             game.warp_lock.as_ref(),
             &quests.placed,
             &game.archives,
+            &creatures_save,
+            &creature_cells_save,
         );
         if ok_char && ok_world {
             audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);

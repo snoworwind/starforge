@@ -185,6 +185,12 @@ pub struct WorldData {
     /// 跨星系档案（JS galaxyArchives）
     #[serde(default)]
     pub archives: HashMap<u32, crate::space::GalaxyArchive>,
+    /// 当前星球兽群（MC 风格：位置/血量/领地随存档保存，被杀不复活）
+    #[serde(default)]
+    pub creatures: Vec<crate::creatures::HerdSave>,
+    /// 兽群细胞占用/被杀位图
+    #[serde(default)]
+    pub creature_cells: Vec<crate::creatures::CellSave>,
 }
 
 fn d_state() -> String { "planet".into() }
@@ -276,6 +282,8 @@ pub fn save_world_full(
     warp_lock: Option<&crate::space::WarpLock>,
     placed: &HashMap<String, i32>,
     archives: &HashMap<u32, crate::space::GalaxyArchive>,
+    creatures: &[crate::creatures::HerdSave],
+    creature_cells: &[crate::creatures::CellSave],
 ) -> bool {
     let data = WorldData {
         v: SAVE_VERSION,
@@ -297,6 +305,8 @@ pub fn save_world_full(
         warp_lock: warp_lock.cloned(),
         placed: placed.clone(),
         archives: archives.clone(),
+        creatures: creatures.to_vec(),
+        creature_cells: creature_cells.to_vec(),
     };
     write_json(&world_path(name), &data)
 }
@@ -318,6 +328,8 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         None,
         &HashMap::new(),
         &HashMap::new(),
+        &[],
+        &[],
     )
 }
 

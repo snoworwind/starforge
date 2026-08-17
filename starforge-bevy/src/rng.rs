@@ -183,6 +183,14 @@ pub fn hash2(x: i32, z: i32, salt: u32, seed: u32) -> Rng {
     Rng::new((h ^ ((h as u32 >> 13) as i32)) as u32)
 }
 
+/// JS creatures.js `batchSeedOf`：24m 网格生物批次种子（世界生成式掷骰，跨客户端确定性一致）。
+pub fn batch_seed(seed: u32, x: i32, z: i32) -> u32 {
+    let mut h: i32 = (seed ^ 0xC7EA5) as i32;
+    h = imul(h ^ x, 374_761_393);
+    h = imul(h ^ z, 668_265_263);
+    (h ^ ((h as u32 >> 13) as i32)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

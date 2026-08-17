@@ -207,6 +207,12 @@ pub struct PlanetArchive {
     /// 该星球地图标记
     #[serde(default)]
     pub marks: Vec<Mark>,
+    /// 该星球兽群（随星球档案持久化）
+    #[serde(default)]
+    pub creatures: Vec<crate::creatures::HerdSave>,
+    /// 兽群细胞占用/被杀位图
+    #[serde(default)]
+    pub creature_cells: Vec<crate::creatures::CellSave>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -302,6 +308,33 @@ pub struct SpaceScene {
 #[derive(Component)]
 pub struct Asteroid {
     pub spin: Vec3,
+}
+
+/// 星球球面淡入（出大气/跃迁抵达时 0→1，约 1.2s，平滑 LOD 过渡）。
+#[derive(Component)]
+pub struct SphereFade {
+    pub mat: Handle<StandardMaterial>,
+    pub t: f32,
+}
+
+/// 星球球面淡入动画。
+pub fn sphere_fade_system(
+    time: Res<Time>,
+    mut q: Query<&mut SphereFade>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    let dt = time.delta_secs();
+    for mut f in &mut q {
+        if f.t >= 1.2 {
+            continue;
+        }
+        f.t = (f.t + dt).min(1.2);
+        let k = f.t / 1.2;
+        let a = k * k * (3.0 - 2.0 * k); // ease in-out
+        if let Some(mut m) = mats.get_mut(f.mat.id()) {
+            m.base_color.set_alpha(a);
+        }
+    }
 }
 
 #[derive(Component, Clone)]
@@ -742,10 +775,6 @@ pub fn galaxy_dir(seed: u32) -> Vec3 {
 
 // ---------- 颜色/材质辅助 ----------
 
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t).round() as u8
-}
-
 pub fn parse_hex(hex: &str) -> Option<Color> {
     let h = hex.trim_start_matches('#');
     if h.len() != 6 {
@@ -847,33 +876,102 @@ pub fn spawn_ship(
 }
 
 /// 程序化星球贴图（128×256，噪声着色 + 极冠）。
-pub fn planet_texture(images: &mut Assets<Image>, biome_key: &str, seed: u32) -> Handle<Image> {
+pub fn planet_texture(
+    images: &mut Assets<Image>,
+    biome_key: &str,
+    seed: u32,
+    world: Option<&VoxelWorld>,
+) -> Handle<Image> {
     let b = data::biome_by_key(biome_key);
     let noise = crate::rng::Noise2::new(seed);
-    let w = 128usize;
-    let h = 256usize;
+    let w = 512usize;
+    let h = 1024usize;
     let mut buf = vec![0u8; w * h * 4];
+    let tint = (
+        ((b.tint >> 16) & 0xFF) as f32 / 255.0,
+        ((b.tint >> 8) & 0xFF) as f32 / 255.0,
+        (b.tint & 0xFF) as f32 / 255.0,
+    );
+    let wt = b.water_tint;
+    let water_rgb = [
+        ((wt >> 16) & 0xFF) as f32 / 255.0,
+        ((wt >> 8) & 0xFF) as f32 / 255.0,
+        (wt & 0xFF) as f32 / 255.0,
+    ];
+    let seab = world.map(|wd| wd.g.sea() as f32).unwrap_or(32.0);
+    // 球面 UV ↔ 体素坐标（与 exit_to_space 的 lon/lat 映射一致：lon = x*0.004, lat = z*0.004）。
+    // 有当前星球体素世界时采样真实地形（高度/地表覆盖/海平面），
+    // 飞出大气后星球贴图与刚离开的地表一致（JS "整球回绘" 的近似）；否则程序化噪声回退。
     for y in 0..h {
-        let lat = (y as f32 / h as f32 - 0.5) * std::f32::consts::PI;
+        let v = (y as f32 + 0.5) / h as f32;
+        let lat = (0.5 - v) * std::f32::consts::PI;
         for x in 0..w {
-            let lon = x as f32 / w as f32 * std::f32::consts::TAU;
-            let n = noise.fbm2(lon.cos() * 3.0, lat.sin() * 3.0, 3, 2.0, 0.5);
-            let n2 = noise.fbm2(lon.sin() * 5.0 + 17.0, lat.cos() * 5.0 + 3.0, 3, 2.0, 0.5);
-            let mut r = ((b.tint >> 16) & 0xFF) as u8;
-            let mut g = ((b.tint >> 8) & 0xFF) as u8;
-            let mut bl = (b.tint & 0xFF) as u8;
-            let ice = ((lat.abs() - 1.1).max(0.0) * 4.0).min(1.0);
-            r = lerp_u8(r, 0xf2, ice);
-            g = lerp_u8(g, 0xf6, ice);
-            bl = lerp_u8(bl, 0xfa, ice);
-            let shade = (0.82 + n * 0.22 + n2 * 0.10).clamp(0.5, 1.2);
-            r = (r as f32 * shade).min(255.0) as u8;
-            g = (g as f32 * shade).min(255.0) as u8;
-            bl = (bl as f32 * shade).min(255.0) as u8;
+            let u = (x as f32 + 0.5) / w as f32;
+            let lon = (u - 0.5) * std::f32::consts::TAU;
+            let wx = (lon / 0.004).floor();
+            let wz = (lat / 0.004).floor();
+            let (mut r, mut g, mut bl) = if let Some(wd) = world {
+                let hgt = wd.g.height_at(wx, wz) as f32;
+                let mut grd = wd.g.biome.grass;
+                if let Some((k, _, _)) = wd.g.sub_at(wx, wz) {
+                    if !k.is_empty() {
+                        grd = k;
+                    }
+                }
+                let grass = match grd {
+                    "sand" => (0.80, 0.74, 0.55),
+                    "snow" => (0.92, 0.94, 0.96),
+                    "basalt" | "ash" | "rust" => (0.45, 0.44, 0.42),
+                    "salt" => (0.85, 0.85, 0.88),
+                    "obsidian" => (0.18, 0.18, 0.22),
+                    "hive" | "amber" => (0.55, 0.42, 0.25),
+                    "alien" => (0.45, 0.30, 0.55),
+                    "murk" => (0.35, 0.42, 0.30),
+                    "redmoss" => (0.55, 0.25, 0.25),
+                    _ => tint,
+                };
+                if hgt < seab && !b.dry {
+                    let depth = (seab - hgt).clamp(0.0, 12.0);
+                    let sh = (0.78 - depth * 0.02).clamp(0.15, 1.0);
+                    (water_rgb[0] * sh, water_rgb[1] * sh, water_rgb[2] * sh)
+                } else {
+                    let (cr, cg, cb) = if hgt < seab + 1.0
+                        && !matches!(
+                            b.grass,
+                            "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
+                        ) {
+                        (0.80, 0.74, 0.55)
+                    } else {
+                        grass
+                    };
+                    let sh = (0.72 + (hgt - 14.0) * 0.012).clamp(0.35, 1.35);
+                    (cr * sh, cg * sh, cb * sh)
+                }
+            } else {
+                // 程序化回退：大陆/海洋分形 + 生态色调 + 高度阴影 + 极冠
+                let n = noise.fbm2(lon.cos() * 3.0, lat.sin() * 3.0, 4, 2.0, 0.5);
+                let n2 = noise.fbm2(lon.sin() * 5.0 + 17.0, lat.cos() * 5.0 + 3.0, 3, 2.0, 0.5);
+                let land = n * 0.65 + n2 * 0.35;
+                let shade = (0.82 + n * 0.22 + n2 * 0.10).clamp(0.5, 1.2);
+                if land < 0.42 {
+                    let d = (0.42 - land) * 4.0;
+                    (
+                        water_rgb[0] * (0.55 - d * 0.3),
+                        water_rgb[1] * (0.55 - d * 0.3),
+                        water_rgb[2] * (0.55 - d * 0.3),
+                    )
+                } else {
+                    (tint.0 * shade, tint.1 * shade, tint.2 * shade)
+                }
+            };
+            let ice = ((lat.abs() - 1.15).max(0.0) * 8.0).min(1.0);
+            r = r * (1.0 - ice) + 0.95 * ice;
+            g = g * (1.0 - ice) + 0.96 * ice;
+            bl = bl * (1.0 - ice) + 0.98 * ice;
             let i = (y * w + x) * 4;
-            buf[i] = r;
-            buf[i + 1] = g;
-            buf[i + 2] = bl;
+            buf[i] = (r * 255.0).min(255.0) as u8;
+            buf[i + 1] = (g * 255.0).min(255.0) as u8;
+            buf[i + 2] = (bl * 255.0).min(255.0) as u8;
             buf[i + 3] = 255;
         }
     }
@@ -888,11 +986,13 @@ pub fn planet_texture(images: &mut Assets<Image>, biome_key: &str, seed: u32) ->
         bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
         bevy::asset::RenderAssetUsages::RENDER_WORLD,
     );
-    img.sampler = bevy::image::ImageSampler::nearest();
+    // 线性过滤：修复旧版 128×256 + 最近邻的“像素大色块”简陋贴图
+    img.sampler = bevy::image::ImageSampler::linear();
     images.add(img)
 }
 
 /// 构建太空场景（恒星/星球/星空/小行星/空间站）。
+/// `world` 为当前星球的体素世界（星球贴图采样真实地形用），`current_planet` 为其星球 id。
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_space_scene(
     commands: &mut Commands,
@@ -901,6 +1001,8 @@ pub fn spawn_space_scene(
     mats: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     galaxy: &Galaxy,
+    world: Option<&VoxelWorld>,
+    current_planet: usize,
 ) -> SpaceScene {
     // 星光背景：远球壳上的小发光方块
     let star_mat = emissive_mat(mats, Color::WHITE, 1.5);
@@ -969,18 +1071,27 @@ pub fn spawn_space_scene(
     // 星球群
     let mut planets = Vec::new();
     for pd in &galaxy.planets {
-        let tex = planet_texture(images, pd.biome, 1000 + pd.id as u32 * 137);
+        // 当前星球：采样真实体素地形；其他星球：程序化回退
+        let sample_world = if pd.id == current_planet { world } else { None };
+        let tex = planet_texture(images, pd.biome, 1000 + pd.id as u32 * 137, sample_world);
+        // 星球淡入（出大气/跃迁抵达时球面 0→1 平滑出现，避免贴图瞬间突变）
         let mat = mats.add(StandardMaterial {
             base_color_texture: Some(tex),
+            base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
             perceptual_roughness: 1.0,
             metallic: 0.0,
+            alpha_mode: AlphaMode::Blend,
             ..default()
         });
         let root = commands
             .spawn((
                 Mesh3d(meshes.add(Sphere::new(pd.radius))),
-                MeshMaterial3d(mat),
+                MeshMaterial3d(mat.clone()),
                 Transform::from_translation(Vec3::from(pd.pos)),
+                SphereFade {
+                    mat: mat.clone(),
+                    t: 0.0,
+                },
                 crate::InGame,
             ))
             .id();
@@ -1581,10 +1692,15 @@ pub fn atmo_system(
         ship.speed.min(max_s)
     };
     ship.speed += (target - ship.speed) * (dt * 2.2).min(1.0);
-    // 位移
+    // 位移：细分步进防高速穿墙（单步 ≤ 0.5 格）。船体 AABB 半宽 1.6/1.1/1.9，
+    // 高速（Boost 110 格/秒）单帧位移可达 1.8+ 格，终点碰撞检测会跳过 1 格厚的墙。
     let fwd = ship_forward(ship.yaw, ship.pitch);
-    let spd = ship.speed;
-    ship.pos += fwd * spd * dt;
+    let dist = ship.speed * dt;
+    let steps = (dist / 0.5).ceil().max(1.0) as u32;
+    for _ in 0..steps {
+        ship.pos += fwd * (dist / steps as f32);
+        ship_voxel_collision(&mut ship, &world, dt);
+    }
     // 星球是圆的：经纬环绕
     if ship.pos.x > WRAP_X / 2.0 {
         ship.pos.x -= WRAP_X;
@@ -2174,6 +2290,7 @@ pub fn space_scene_sync_system(
     mut mats: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     game: Res<SpaceGame>,
+    world: Option<Res<VoxelWorld>>,
     extras: Query<Entity, Or<(With<VisitorShip>, With<SpaceDrop>, With<LaserBolt>)>>,
     mut commands: Commands,
 ) {
@@ -2187,6 +2304,8 @@ pub fn space_scene_sync_system(
                 &mut mats,
                 &asset_server,
                 &game.galaxy,
+                world.as_deref(),
+                game.current_planet,
             );
             commands.insert_resource(sc);
         }
@@ -2208,6 +2327,7 @@ pub fn warp_arrive_system(
     mut mats: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     game: Res<SpaceGame>,
+    world: Option<Res<VoxelWorld>>,
     extras: Query<Entity, Or<(With<VisitorShip>, With<SpaceDrop>, With<LaserBolt>)>>,
     mut commands: Commands,
 ) {
@@ -2223,6 +2343,8 @@ pub fn warp_arrive_system(
             &mut mats,
             &asset_server,
             &game.galaxy,
+            world.as_deref(),
+            game.current_planet,
         );
         commands.insert_resource(sc);
     }
@@ -2233,18 +2355,23 @@ pub fn warp_arrive_system(
 pub fn ship_sync_system(
     ship: Res<ShipState>,
     ship_asset: Res<ShipAsset>,
-    mut q: Query<&mut Transform>,
+    mut q: Query<(Entity, &mut Transform, Option<&mut MeshMaterial3d<StandardMaterial>>)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
     mode: Res<FlightMode>,
+    time: Res<Time>,
 ) {
     let Some(e) = ship_asset.entity else { return };
-    let Ok(mut tf) = q.get_mut(e) else { return };
+    let Ok((_, mut tf, _)) = q.get_mut(e) else { return };
     tf.translation = ship.pos;
     // 模型姿态与相机同源（JS shipGroup.quaternion 口径）：
-    // 大气层：Euler(pitch, yaw, -roll)（鼠标侧倾反向展示）+ A/D 滚转微调整体携带；
+    // 大气层：Euler(pitch, yaw, roll)（鼠标侧倾银行：右转右倾、左转左倾，与太空模式一致）
+    //        + A/D 滚转微调整体携带；
     // 太空：真实滚转 + 转向银行 + 换系滚转微调。
+    // 注：JS 原版 atmo 模型对 roll 取反（Euler z = -atmo.roll），导致大气层内转向时
+    // 机身朝转弯反方向侧倾（太空模式却不取反，朝转弯方向侧倾）——移植版修正为与太空一致。
     tf.rotation = match *mode {
         FlightMode::Atmo | FlightMode::AtmoLand => {
-            ship_quat(ship.yaw, ship.pitch, -ship.roll) * Quat::from_rotation_z(ship.cam_roll)
+            ship_quat(ship.yaw, ship.pitch, ship.roll) * Quat::from_rotation_z(ship.cam_roll)
         }
         FlightMode::Space | FlightMode::Warping => {
             ship_quat(ship.yaw, ship.pitch, ship.roll)
@@ -2252,10 +2379,19 @@ pub fn ship_sync_system(
         }
         _ => ship_quat(ship.yaw, ship.pitch, ship.roll),
     };
+    // 引擎尾焰（JS Space.update 同口径）：长度随速度 + 脉冲引擎 2.0 加成；
+    // 逐帧随机闪烁 ±10%（0.9~1.1 倍）并随速度做透明度动画 0.4~0.9 —— 修复静态无动画的尾焰。
     let flame_scale = 0.4 + ship.speed / MAX_SPEED * 0.8 + if ship.pulsing { 2.0 } else { 0.0 };
+    let flick = 0.9 + crate::rng::Rng::new((time.elapsed_secs() * 1000.0) as u32).next() * 0.2;
+    let opacity = 0.4 + (ship.speed / 100.0).min(0.5);
     for f in &ship_asset.flames {
-        if let Ok(mut ftf) = q.get_mut(*f) {
-            ftf.scale.z = flame_scale;
+        if let Ok((_, mut ftf, mat)) = q.get_mut(*f) {
+            ftf.scale.z = flame_scale * flick;
+            if let Some(m) = mat {
+                if let Some(mut mm) = mats.get_mut(m.0.id()) {
+                    mm.base_color.set_alpha(opacity);
+                }
+            }
         }
     }
     let _ = mode;
@@ -2391,6 +2527,22 @@ mod tests {
         assert_eq!(data::roll_ship_class(0.6).key, "B");
         assert_eq!(data::roll_ship_class(0.85).key, "A");
         assert_eq!(data::roll_ship_class(0.99).key, "S");
+    }
+
+    #[test]
+    fn glam_euler_yxz_matches_threejs() {
+        // three.js r128 实测：Euler(pitch=0.4, yaw=0.5, roll=0.2, 'YXZ')
+        // 生成 q = (0.215738, 0.222044, 0.045896, 0.949762)（= Ry(yaw)*Rx(pitch)*Rz(roll)）
+        // glam from_euler(YXZ, yaw, pitch, roll) 必须与之逐分量一致，否则模型滚转方向/合成顺序与 JS 不一致。
+        let q = ship_quat(0.5, 0.4, 0.2);
+        let expected = Quat::from_xyzw(0.215738, 0.222044, 0.045896, 0.949762);
+        let d = (q - expected).length();
+        assert!(d < 1e-4, "glam YXZ mismatch: got {:?} expected {:?} (d={})", q, expected, d);
+        // 反向：roll 取负（JS 模型 Euler z = -roll）后与 three.js 对照
+        let q2 = ship_quat(0.5, 0.4, -0.2);
+        let expected2 = Quat::from_xyzw(0.167325, 0.260478, -0.143708, 0.939948);
+        let d2 = (q2 - expected2).length();
+        assert!(d2 < 1e-4, "glam YXZ(-roll) mismatch: got {:?} expected {:?} (d={})", q2, expected2, d2);
     }
 
     #[test]

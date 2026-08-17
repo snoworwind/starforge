@@ -107,6 +107,7 @@ pub fn spawn_creature(
             Mesh3d(body_mesh),
             MeshMaterial3d(body_mat.clone()),
             Transform::from_translation(pos),
+            Visibility::default(),
             Creature {
                 hp: 3.0,
                 radius: 0.5,
@@ -316,6 +317,7 @@ pub fn spawn_drop(
         Mesh3d(icon_materials.quad.clone()),
         MeshMaterial3d(mat),
         Transform::from_translation(pos),
+        Visibility::default(),
         DropItem {
             item,
             n,

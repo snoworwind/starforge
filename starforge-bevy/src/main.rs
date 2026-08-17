@@ -112,19 +112,42 @@ fn smoke_exit(
     mut ship: ResMut<ShipState>,
     game: Option<Res<SpaceGame>>,
     mut save_ev: MessageWriter<ui::SaveEvent>,
+    chunks: Query<&Visibility, With<ChunkMesh>>,
+    clear: Res<ClearColor>,
 ) {
     if let Some(mut f) = flag {
         f.frames += 1;
-        // 自测第二阶段：120 帧后切换到太空，验证太空场景/飞行/相机管线
+        // 自测第二阶段：120 帧后切换到太空，验证太空场景/飞行/相机管线。
+        // 出球点取近赤道方向（Y≈0），使旧代码的"按玩家高度算太空因子"必然退化成大气色，
+        // 以覆盖"太空背景变大气色"回归。
         if f.frames == 120 {
             if let Some(g) = game.as_ref() {
                 let p0 = &g.galaxy.planets[0];
                 let center = Vec3::from(p0.pos);
-                ship.pos = center + Vec3::new(0.3, 0.8, 0.5).normalize() * (p0.radius + 400.0);
+                ship.pos = center + Vec3::new(0.9, 0.1, 0.4).normalize() * (p0.radius + 400.0);
                 ship.speed = 20.0;
                 *mode = FlightMode::Space;
                 println!("SMOKE_STAGE space");
             }
+        }
+        // 太空回归检查：地形区块必须隐藏（平面地形残影/球壳错位）；ClearColor 必须是太空黑
+        if f.frames == 200 {
+            let n = chunks.iter().count();
+            let all_hidden = chunks.iter().all(|v| *v == Visibility::Hidden);
+            // daynight 以线性空间写 ClearColor（lerp_color 转 LinearRgba），按线性值断言
+            let c = clear.0.to_linear();
+            println!(
+                "SMOKE_CHECK space mode={mode:?} chunks={n} hidden={all_hidden} clear=({:.4},{:.4},{:.4})",
+                c.red, c.green, c.blue
+            );
+            assert_eq!(*mode, FlightMode::Space, "smoke: expected Space at frame 200");
+            assert!(n > 0, "smoke: no chunk meshes present for space visibility check");
+            assert!(all_hidden, "smoke: chunk terrain must be hidden in space mode");
+            assert!(
+                c.red < 0.03 && c.green < 0.03 && c.blue < 0.06,
+                "smoke: space clear color must be black, got {:?}",
+                clear.0
+            );
         }
         // 存档路径验证：地面存档 + 太空存档
         if f.frames == 60 || f.frames == 300 {
@@ -279,6 +302,7 @@ fn main() {
                                 station::ship_switch_system,
                                 planet_switch_system,
                                 space_sky_sync_system,
+                                ground_scene_visibility_system,
                             )
                                 .chain(),
                         )
@@ -1477,6 +1501,7 @@ fn spawn_chunk_mesh(
             Transform::default(),
             aabb,
             NoAutoAabb,
+            Visibility::default(),
             ChunkMesh,
             InGame,
         ))
@@ -1752,6 +1777,39 @@ fn space_sky_sync_system(
 
 fn stars_ok() -> bool {
     true
+}
+
+/// 地面体素场景实体（区块地形/生物/掉落物/建造虚影/激光束）随模式显隐：
+/// JS 原版太空态不渲染 planetScene（独立场景切换），Bevy 单相机下必须显式隐藏，
+/// 否则冲出大气后平面地形残影留在宇宙里，与太空星球球形外壳错位同屏。
+fn ground_scene_visibility_system(
+    mode: Res<FlightMode>,
+    mut commands: Commands,
+    mut q: Query<
+        (Entity, Option<&mut Visibility>),
+        Or<(
+            With<ChunkMesh>,
+            With<creatures::Creature>,
+            With<creatures::DropItem>,
+            With<ui::Ghost>,
+            With<Beam>,
+        )>,
+    >,
+) {
+    let show = mode.ground_scene();
+    let vis = if show { Visibility::Visible } else { Visibility::Hidden };
+    for (e, v) in &mut q {
+        match v {
+            Some(mut v) => {
+                if *v != vis {
+                    *v = vis;
+                }
+            }
+            None => {
+                commands.entity(e).insert(vis);
+            }
+        }
+    }
 }
 
 // ---------- Save / quit ----------

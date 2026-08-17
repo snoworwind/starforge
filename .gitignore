@@ -7,6 +7,10 @@ test-results/
 # 联机服务器存档（世界/玩家数据，按机器本地生成）
 save/
 
+# Bevy/Rust 移植版构建产物与存档（starforge-bevy/.gitignore 亦含同名规则）
+starforge-bevy/target/
+starforge-bevy/saves/
+
 # 系统 / 编辑器文件
 .DS_Store
 Thumbs.db

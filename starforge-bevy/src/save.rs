@@ -247,14 +247,38 @@ pub fn saves_dir() -> PathBuf {
         .join("saves")
 }
 
+fn safe_name(name: &str) -> String {
+    let mut out: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        "unnamed".into()
+    } else {
+        out.chars().take(80).collect()
+    }
+}
+
 pub fn char_path(name: &str) -> PathBuf {
-    saves_dir().join("chars").join(format!("{name}.char.json"))
+    saves_dir()
+        .join("chars")
+        .join(format!("{}.char.json", safe_name(name)))
 }
 
 pub fn world_path(name: &str) -> PathBuf {
     saves_dir()
         .join("worlds")
-        .join(format!("{name}.world.json"))
+        .join(format!("{}.world.json", safe_name(name)))
 }
 
 #[allow(clippy::too_many_arguments)]

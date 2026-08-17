@@ -8,8 +8,10 @@ use crate::ui::IconMaterials;
 use crate::world::World;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy::world_serialization::WorldInstanceReady;
 use bevy_world_serialization::prelude::WorldAssetRoot;
 use std::collections::HashMap;
+use std::time::Duration;
 
 // ---------- Creatures（Minecraft 风格兽群系统，JS creatures.js 移植） ----------
 
@@ -69,6 +71,123 @@ pub struct Creature {
     pub fade_t: f32,
     /// 受击反馈计时
     pub hit_t: f32,
+}
+
+/// Animation graph prepared before a creature scene is instantiated.
+///
+/// The glTF scene owns the `AnimationPlayer`, so this component stays on the
+/// gameplay root until `WorldInstanceReady` lets us find that player below it.
+#[derive(Clone, Component)]
+struct CreatureAnimationSetup {
+    graph: Handle<AnimationGraph>,
+    idle: AnimationNodeIndex,
+    walk: AnimationNodeIndex,
+}
+
+#[derive(Resource, Default)]
+pub struct CreatureAnimationLibrary {
+    blob: Option<CreatureAnimationSetup>,
+    sentinel: Option<CreatureAnimationSetup>,
+}
+
+/// Link an instantiated animation player back to its gameplay entity. This
+/// avoids assuming that the player is a direct child of the creature root.
+#[derive(Component)]
+struct CreatureAnimationTarget {
+    owner: Entity,
+    idle: AnimationNodeIndex,
+    walk: AnimationNodeIndex,
+}
+
+fn creature_animation_setup(
+    kind: &str,
+    asset_server: &AssetServer,
+    graphs: &mut Assets<AnimationGraph>,
+    library: &mut CreatureAnimationLibrary,
+) -> Option<CreatureAnimationSetup> {
+    let (cache, model, idle_index, walk_index) = match kind {
+        // The asset keeps these clips in a stable order; use handles rather
+        // than names so graph construction does not depend on glTF metadata.
+        "blob" => (&mut library.blob, "models/creatures/blob.glb", 2, 3),
+        "sentinel" => (
+            &mut library.sentinel,
+            "models/creatures/sentinel.glb",
+            40,
+            90,
+        ),
+        _ => return None,
+    };
+    if let Some(animation) = cache {
+        return Some(animation.clone());
+    }
+    let (graph, nodes) = AnimationGraph::from_clips([
+        asset_server.load(GltfAssetLabel::Animation(idle_index).from_asset(model)),
+        asset_server.load(GltfAssetLabel::Animation(walk_index).from_asset(model)),
+    ]);
+    let animation = CreatureAnimationSetup {
+        graph: graphs.add(graph),
+        idle: nodes[0],
+        walk: nodes[1],
+    };
+    *cache = Some(animation.clone());
+    Some(animation)
+}
+
+/// Attach the graph to the player generated inside a creature's glTF scene.
+fn creature_animation_ready(
+    ready: On<WorldInstanceReady>,
+    mut commands: Commands,
+    children: Query<&Children>,
+    setups: Query<&CreatureAnimationSetup>,
+    mut players: Query<&mut AnimationPlayer>,
+) {
+    let Ok(setup) = setups.get(ready.entity) else {
+        return;
+    };
+    for child in children.iter_descendants(ready.entity) {
+        let Ok(mut player) = players.get_mut(child) else {
+            continue;
+        };
+        let mut transitions = AnimationTransitions::new();
+        transitions
+            .play(&mut player, setup.idle, Duration::ZERO)
+            .repeat();
+        commands.entity(child).insert((
+            AnimationGraphHandle(setup.graph.clone()),
+            transitions,
+            CreatureAnimationTarget {
+                owner: ready.entity,
+                idle: setup.idle,
+                walk: setup.walk,
+            },
+        ));
+    }
+}
+
+/// Follow the existing creature AI state with skeletal idle/walk clips.
+pub fn creature_animation_system(
+    mut players: Query<(
+        &mut AnimationPlayer,
+        &mut AnimationTransitions,
+        &CreatureAnimationTarget,
+    )>,
+    creatures: Query<&Creature>,
+) {
+    for (mut player, mut transitions, target) in &mut players {
+        let Ok(creature) = creatures.get(target.owner) else {
+            continue;
+        };
+        let desired = if creature.walking {
+            target.walk
+        } else {
+            target.idle
+        };
+        if transitions.get_main_animation() != Some(desired) {
+            transitions
+                .play(&mut player, desired, Duration::from_millis(180))
+                .repeat();
+        }
+    }
 }
 
 impl Creature {
@@ -135,6 +254,7 @@ struct Cand {
 struct CellState {
     cands: Vec<Cand>,
     mask: u32,
+    initialized: bool,
 }
 
 #[derive(Clone)]
@@ -219,6 +339,9 @@ impl CreatureSpawner {
     pub fn restore(&mut self, world_seed: u32, herds: &[HerdSave], cells: &[CellSave]) {
         self.herds.clear();
         for h in herds {
+            if h.cand >= u32::BITS as usize {
+                continue;
+            }
             let nid = crate::rng::batch_seed(world_seed, h.cx, h.cz) as u64 * 64 + h.cand as u64;
             let mut rnd = Rng::new(nid as u32);
             let speed = 1.8 * (0.5 + rnd.next());
@@ -232,11 +355,11 @@ impl CreatureSpawner {
                     cx: h.cx,
                     cz: h.cz,
                     cand: h.cand,
-                    x: h.x,
-                    z: h.z,
-                    hp: h.hp.max(1.0),
-                    home_x: h.home_x,
-                    home_z: h.home_z,
+                    x: if h.x.is_finite() { h.x } else { 0.0 },
+                    z: if h.z.is_finite() { h.z } else { 0.0 },
+                    hp: if h.hp.is_finite() { h.hp.max(1.0) } else { 3.0 },
+                    home_x: if h.home_x.is_finite() { h.home_x } else { 0.0 },
+                    home_z: if h.home_z.is_finite() { h.home_z } else { 0.0 },
                     speed,
                     dir,
                     timer,
@@ -252,6 +375,7 @@ impl CreatureSpawner {
                 CellState {
                     cands: Vec::new(),
                     mask: c.mask,
+                    initialized: false,
                 },
             );
         }
@@ -358,7 +482,14 @@ fn register_cell(spawner: &mut CreatureSpawner, world: &World, cx: i32, cz: i32,
     } else {
         cands
     };
-    spawner.cells.insert(key, CellState { cands, mask: 0 });
+    spawner.cells.insert(
+        key,
+        CellState {
+            cands,
+            mask: 0,
+            initialized: true,
+        },
+    );
     if herd_roll {
         let nid = crate::rng::batch_seed(world.seed, cx, cz) as u64 * 64 + herd_idx as u64;
         if !spawner.herds.contains_key(&nid) {
@@ -393,6 +524,8 @@ fn materialize_herd(
     nid: u64,
     commands: &mut Commands,
     asset_server: &AssetServer,
+    graphs: &mut Assets<AnimationGraph>,
+    library: &mut CreatureAnimationLibrary,
     world: &World,
 ) -> bool {
     let Some(h) = spawner.herds.get(&nid) else {
@@ -415,6 +548,7 @@ fn materialize_herd(
         "blob" => (0.7, 1.0, 0.7),
         _ => (0.35, 2.2, 0.35),
     };
+    let animation = creature_animation_setup(kind, asset_server, graphs, library);
     let e = commands
         .spawn((
             WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(model))),
@@ -447,6 +581,12 @@ fn materialize_herd(
             crate::InGame,
         ))
         .id();
+    if let Some(animation) = animation {
+        commands
+            .entity(e)
+            .insert(animation)
+            .observe(creature_animation_ready);
+    }
     if let Some(hh) = spawner.herds.get_mut(&nid) {
         hh.entity = Some(e);
     }
@@ -465,6 +605,8 @@ pub fn creature_spawn_system(
     mut spawner: ResMut<CreatureSpawner>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut animation_library: ResMut<CreatureAnimationLibrary>,
     mut creatures: Query<(Entity, &mut Creature, &Transform)>,
     world: Res<World>,
     player: Query<&Player>,
@@ -480,8 +622,23 @@ pub fn creature_spawn_system(
     for dx in -BUCKET_R..=BUCKET_R {
         for dz in -BUCKET_R..=BUCKET_R {
             let (cx, cz) = (pcx + dx, pcz + dz);
-            if !spawner.cells.contains_key(&(cx, cz)) {
+            let needs_init = spawner
+                .cells
+                .get(&(cx, cz))
+                .map(|cell| !cell.initialized)
+                .unwrap_or(true);
+            if needs_init {
+                let saved_mask = spawner
+                    .cells
+                    .remove(&(cx, cz))
+                    .map(|cell| cell.mask)
+                    .unwrap_or(0);
                 register_cell(&mut spawner, &world, cx, cz, animal.4);
+                if saved_mask != 0
+                    && let Some(cell) = spawner.cells.get_mut(&(cx, cz))
+                {
+                    cell.mask = saved_mask;
+                }
             }
         }
     }
@@ -511,7 +668,15 @@ pub fn creature_spawn_system(
             }
             if let Some((d, nid)) = best {
                 println!("CREATURE topup active={active} spawn herd {nid} d={d:.0}");
-                materialize_herd(&mut spawner, nid, &mut commands, &asset_server, &world);
+                materialize_herd(
+                    &mut spawner,
+                    nid,
+                    &mut commands,
+                    &asset_server,
+                    &mut graphs,
+                    &mut animation_library,
+                    &world,
+                );
             }
         }
     }
@@ -539,7 +704,15 @@ pub fn creature_spawn_system(
         }
     }
     for nid in to_reload {
-        materialize_herd(&mut spawner, nid, &mut commands, &asset_server, &world);
+        materialize_herd(
+            &mut spawner,
+            nid,
+            &mut commands,
+            &asset_server,
+            &mut graphs,
+            &mut animation_library,
+            &world,
+        );
     }
 }
 
@@ -753,6 +926,8 @@ pub fn sentinel_system(
     mut spawner: ResMut<SentinelSpawner>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut animation_library: ResMut<CreatureAnimationLibrary>,
     world: Res<World>,
     mut player: Query<&mut Player>,
     mut creatures: Query<(Entity, &mut Creature, &mut Transform)>,
@@ -787,42 +962,56 @@ pub fn sentinel_system(
                 let x = cell[0];
                 let z = cell[2];
                 let top = world.top_at(x, z);
-                commands.spawn((
-                    WorldAssetRoot(asset_server.load(
-                        GltfAssetLabel::Scene(0).from_asset("models/creatures/sentinel.glb"),
-                    )),
-                    // 骷髅实测高 2.17，目标 1.9 格（脚底即模型原点，无需偏移）
-                    Transform::from_translation(Vec3::new(
-                        x as f32 + 0.5,
-                        top as f32 + 1.0,
-                        z as f32 + 0.5,
+                let animation = creature_animation_setup(
+                    "sentinel",
+                    &asset_server,
+                    &mut graphs,
+                    &mut animation_library,
+                );
+                let entity = commands
+                    .spawn((
+                        WorldAssetRoot(asset_server.load(
+                            GltfAssetLabel::Scene(0).from_asset("models/creatures/sentinel.glb"),
+                        )),
+                        // 骷髅实测高 2.17，目标 1.9 格（脚底即模型原点，无需偏移）
+                        Transform::from_translation(Vec3::new(
+                            x as f32 + 0.5,
+                            top as f32 + 1.0,
+                            z as f32 + 0.5,
+                        ))
+                        .with_scale(Vec3::splat(1.9 / 2.17)),
+                        Creature {
+                            hp: 10.0,
+                            radius: 0.6,
+                            height: 1.8,
+                            shoot_t: 0.0,
+                            ai_t: 0.0,
+                            dir: Vec3::X,
+                            vel: Vec3::ZERO,
+                            grounded: true,
+                            home: Vec3::new(x as f32 + 0.5, top as f32 + 1.0, z as f32 + 0.5),
+                            jump_t: 0.0,
+                            kind: "sentinel",
+                            scale: 1.9 / 2.17,
+                            foot: 0.0,
+                            nid: None,
+                            speed: 2.4,
+                            walking: true,
+                            anim_t: 0.0,
+                            spawn_t: 1.0,
+                            fading: false,
+                            fade_t: 0.0,
+                            hit_t: 0.0,
+                        },
+                        crate::InGame,
                     ))
-                    .with_scale(Vec3::splat(1.9 / 2.17)),
-                    Creature {
-                        hp: 10.0,
-                        radius: 0.6,
-                        height: 1.8,
-                        shoot_t: 0.0,
-                        ai_t: 0.0,
-                        dir: Vec3::X,
-                        vel: Vec3::ZERO,
-                        grounded: true,
-                        home: Vec3::new(x as f32 + 0.5, top as f32 + 1.0, z as f32 + 0.5),
-                        jump_t: 0.0,
-                        kind: "sentinel",
-                        scale: 1.9 / 2.17,
-                        foot: 0.0,
-                        nid: None,
-                        speed: 2.4,
-                        walking: true,
-                        anim_t: 0.0,
-                        spawn_t: 1.0,
-                        fading: false,
-                        fade_t: 0.0,
-                        hit_t: 0.0,
-                    },
-                    crate::InGame,
-                ));
+                    .id();
+                if let Some(animation) = animation {
+                    commands
+                        .entity(entity)
+                        .insert(animation)
+                        .observe(creature_animation_ready);
+                }
             }
         }
     }
@@ -879,6 +1068,9 @@ pub fn spawn_drop(
     n: i32,
     pick_delay: f32,
 ) {
+    if n <= 0 {
+        return;
+    }
     let mat = icon_materials
         .map
         .get(&item)
@@ -900,6 +1092,7 @@ pub fn spawn_drop(
             resting: false,
             no_space_t: 0.0,
         },
+        crate::InGame,
     ));
 }
 

@@ -202,6 +202,12 @@ fn main() {
         .insert_resource(factory::TickAcc::default())
         .insert_resource(space::WarpAnim::default())
         .add_systems(Startup, startup)
+        .add_systems(
+            PreUpdate,
+            egui_manual_pass
+                .after(bevy_egui::EguiPreUpdateSet::InitContexts)
+                .before(bevy_egui::EguiPreUpdateSet::BeginPass),
+        )
         .add_systems(PostUpdate, ui::setup_egui)
         .add_systems(OnEnter(GameState::Loading), on_enter_loading)
         .add_systems(OnExit(GameState::Loading), on_exit_loading)
@@ -209,93 +215,97 @@ fn main() {
         // menu
         .add_systems(
             Update,
-            (smoke_boot, menu_system)
-                .chain()
-                .run_if(in_state(GameState::Menu)),
-        )
-        // loading
-        .add_systems(Update, loading_system.run_if(in_state(GameState::Loading)))
-        // playing
-        .add_systems(
-            Update,
             (
+                egui_begin_pass,
                 (
+                    (smoke_boot, menu_system)
+                        .chain()
+                        .run_if(in_state(GameState::Menu)),
+                    // loading
+                    loading_system.run_if(in_state(GameState::Loading)),
+                    // playing
                     (
-                        // 通用
-                        ui::panel_hotkeys_system,
-                        ui::quicksave_system,
-                        ui::big_message_system,
-                        quests::quest_tick_system,
-                        quests::side_quest_system,
-                        quests::village_side_quest_system,
-                        ui::research_system,
-                        materials::curve_system,
-                        materials::lamp_pool_system,
-                        daynight::daynight_system,
+                        (
+                            (
+                                // 通用
+                                ui::panel_hotkeys_system,
+                                ui::quicksave_system,
+                                ui::big_message_system,
+                                quests::quest_tick_system,
+                                quests::side_quest_system,
+                                quests::village_side_quest_system,
+                                ui::research_system,
+                                materials::curve_system,
+                                materials::lamp_pool_system,
+                                daynight::daynight_system,
+                            )
+                                .chain(),
+                            (
+                                // 地面
+                                player::movement_system.run_if(ground_mode),
+                                player::collision_system.run_if(ground_mode),
+                                player::survival_system.run_if(ground_mode),
+                                player::mining_system.run_if(ground_mode),
+                                player::break_system.run_if(ground_mode),
+                                player::placement_system.run_if(ground_mode),
+                                player::hotbar_system.run_if(ground_mode),
+                                player::cursor_system.run_if(ground_mode),
+                                stream_system.run_if(ground_scene_mode),
+                                creatures::creature_spawn_system.run_if(ground_mode),
+                                creatures::creature_system.run_if(ground_mode),
+                            )
+                                .chain(),
+                            (
+                                creatures::creature_despawn_system.run_if(ground_mode),
+                                creatures::drops_system.run_if(ground_mode),
+                                factory::factory_system.run_if(ground_mode),
+                                factory::machine_sync_system.run_if(ground_mode),
+                                ui::scan_system.run_if(ground_mode),
+                                // 视角
+                                player::look_system.run_if(walk_look_mode),
+                                player::camera_system.run_if(in_planet_mode),
+                                // 太空
+                                space::space_input_system,
+                                space::ship_interact_system,
+                                space::seated_system,
+                                space::atmo_land_trigger_system,
+                            )
+                                .chain(),
+                            (
+                                station::station_system,
+                                station::station_dialog_system,
+                                station::station_npc_spawn_system,
+                                station::ship_switch_system,
+                                planet_switch_system,
+                                space_sky_sync_system,
+                            )
+                                .chain(),
+                        )
+                            .chain(),
+                        (
+                            ui::ghost_system.run_if(in_planet_mode),
+                            beam_system.run_if(in_planet_mode),
+                            prompt_system.run_if(in_planet_mode),
+                            ui::hud_system,
+                            ui::inventory_panel_system,
+                            ui::tech_panel_system,
+                            ui::machine_panel_system,
+                            ui::pause_panel_system,
+                            ui::trade_panel_system,
+                            ui::garage_panel_system,
+                            ui::galaxy_map_system,
+                            save_system,
+                            quit_to_menu_system,
+                            smoke_exit,
+                        )
+                            .chain(),
                     )
-                        .chain(),
-                    (
-                        // 地面
-                        player::movement_system.run_if(ground_mode),
-                        player::collision_system.run_if(ground_mode),
-                        player::survival_system.run_if(ground_mode),
-                        player::mining_system.run_if(ground_mode),
-                        player::break_system.run_if(ground_mode),
-                        player::placement_system.run_if(ground_mode),
-                        player::hotbar_system.run_if(ground_mode),
-                        player::cursor_system.run_if(ground_mode),
-                        stream_system.run_if(ground_scene_mode),
-                        creatures::creature_spawn_system.run_if(ground_mode),
-                        creatures::creature_system.run_if(ground_mode),
-                    )
-                        .chain(),
-                    (
-                        creatures::creature_despawn_system.run_if(ground_mode),
-                        creatures::drops_system.run_if(ground_mode),
-                        factory::factory_system.run_if(ground_mode),
-                        factory::machine_sync_system.run_if(ground_mode),
-                        ui::scan_system.run_if(ground_mode),
-                        // 视角
-                        player::look_system.run_if(walk_look_mode),
-                        player::camera_system.run_if(in_planet_mode),
-                        // 太空
-                        space::space_input_system,
-                        space::ship_interact_system,
-                        space::seated_system,
-                        space::atmo_land_trigger_system,
-                    )
-                        .chain(),
-                    (
-                        station::station_system,
-                        station::station_dialog_system,
-                        station::station_npc_spawn_system,
-                        station::ship_switch_system,
-                        planet_switch_system,
-                        space_sky_sync_system,
-                    )
-                        .chain(),
-                )
-                    .chain(),
-                (
-                    ui::ghost_system.run_if(in_planet_mode),
-                    beam_system.run_if(in_planet_mode),
-                    prompt_system.run_if(in_planet_mode),
-                    ui::hud_system,
-                    ui::inventory_panel_system,
-                    ui::tech_panel_system,
-                    ui::machine_panel_system,
-                    ui::pause_panel_system,
-                    ui::trade_panel_system,
-                    ui::garage_panel_system,
-                    ui::galaxy_map_system,
-                    save_system,
-                    quit_to_menu_system,
-                    smoke_exit,
-                )
-                    .chain(),
+                        .chain()
+                        .run_if(in_state(GameState::Playing)),
+                ),
+                egui_end_pass,
             )
-                .chain()
-                .run_if(in_state(GameState::Playing)),
+                .chain(),
         )
         // 飞行系统（模式互斥，无需严格顺序；逐一注册规避 tuple 配置组合问题）
         .add_systems(
@@ -465,6 +475,42 @@ fn startup(
 
 // ---------- Menu ----------
 
+/// egui 0.35 requires one contiguous begin_pass → draw → end_pass lifecycle per
+/// frame (as egui's own `run_ui` does). bevy_egui 0.41.1's split calls
+/// (begin_pass in PreUpdate, end_pass in PostUpdate) break egui 0.35's hit-test
+/// data chain (`prev_pass.widgets` stays empty, so no widget is ever hovered or
+/// clicked). Fix: switch the context to manual mode and run the whole pass
+/// inside Update, with all UI systems chained between the two.
+fn egui_manual_pass(mut q: Query<&mut bevy_egui::EguiContextSettings>) {
+    for mut s in &mut q {
+        if !s.run_manually {
+            s.run_manually = true;
+        }
+    }
+}
+
+fn egui_begin_pass(
+    mut contexts: EguiContexts,
+    mut input: Query<&mut bevy_egui::EguiInput>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    if let Ok(mut inp) = input.single_mut() {
+        let raw = std::mem::take(&mut inp.0);
+        ctx.begin_pass(raw);
+    }
+}
+
+fn egui_end_pass(
+    mut contexts: EguiContexts,
+    mut full: Query<&mut bevy_egui::EguiFullOutput>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let out = ctx.end_pass();
+    if let Ok(mut f) = full.single_mut() {
+        f.0 = Some(out);
+    }
+}
+
 #[derive(Default, PartialEq)]
 enum MenuScreen {
     #[default]
@@ -523,7 +569,8 @@ fn menu_system(
                             .color(egui::Color32::GRAY),
                     );
                     ui.add_space(48.0);
-                    if ui.add_sized([260.0, 40.0], egui::Button::new("🚀 新世界")).clicked() {
+                    let r_new = ui.add_sized([260.0, 40.0], egui::Button::new("🚀 新世界"));
+                    if r_new.clicked() {
                         menu.screen = MenuScreen::NewWorld;
                         menu.world_name = random_planet_name();
                         menu.char_name = "探险家".into();

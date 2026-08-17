@@ -16,3 +16,6 @@ starforge-bevy/saves/
 Thumbs.db
 desktop.ini
 *.log
+
+# DSH 运行时目录（本机工具生成，勿提交）
+.dsh-vision-router/

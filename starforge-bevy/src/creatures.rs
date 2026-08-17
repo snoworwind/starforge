@@ -159,8 +159,8 @@ struct Herd {
 #[derive(Resource)]
 pub struct CreatureSpawner {
     pub timer: f32,
-    pub cells: HashMap<(i32, i32), CellState>,
-    pub herds: HashMap<u64, Herd>,
+    cells: HashMap<(i32, i32), CellState>,
+    herds: HashMap<u64, Herd>,
 }
 
 impl Default for CreatureSpawner {
@@ -184,12 +184,12 @@ impl CreatureSpawner {
             let mut x = h.x;
             let mut z = h.z;
             let mut hp = h.hp;
-            if let Some(e) = h.entity {
-                if let Ok((_, c, tf)) = q.get(e) {
-                    x = tf.translation.x;
-                    z = tf.translation.z;
-                    hp = c.hp;
-                }
+            if let Some(e) = h.entity
+                && let Ok((_, c, tf)) = q.get(e)
+            {
+                x = tf.translation.x;
+                z = tf.translation.z;
+                hp = c.hp;
             }
             herds.push(HerdSave {
                 cx: h.cx,
@@ -205,7 +205,11 @@ impl CreatureSpawner {
         let cells = self
             .cells
             .iter()
-            .map(|((cx, cz), c)| CellSave { cx: *cx, cz: *cz, mask: c.mask })
+            .map(|((cx, cz), c)| CellSave {
+                cx: *cx,
+                cz: *cz,
+                mask: c.mask,
+            })
             .collect();
         (herds, cells)
     }
@@ -243,9 +247,19 @@ impl CreatureSpawner {
         }
         self.cells.clear();
         for c in cells {
-            self.cells.insert((c.cx, c.cz), CellState { cands: Vec::new(), mask: c.mask });
+            self.cells.insert(
+                (c.cx, c.cz),
+                CellState {
+                    cands: Vec::new(),
+                    mask: c.mask,
+                },
+            );
         }
-        println!("CREATURE restore herds={} cells={}", herds.len(), cells.len());
+        println!(
+            "CREATURE restore herds={} cells={}",
+            herds.len(),
+            cells.len()
+        );
     }
 }
 
@@ -253,9 +267,17 @@ impl CreatureSpawner {
 /// 缩放口径与 JS buildCreature 一致：模型最长边 = max(w,h,d) × 2.2（strider 2.42 / crab 1.54 / blob 1.54）。
 pub fn creature_model(kind: &str) -> (&'static str, f32, f32) {
     match kind {
-        "crab" => ("models/creatures/crab.glb", 1.54 / 19.42, 8.64 * (1.54 / 19.42)),
+        "crab" => (
+            "models/creatures/crab.glb",
+            1.54 / 19.42,
+            8.64 * (1.54 / 19.42),
+        ),
         "blob" => ("models/creatures/blob.glb", 1.54 / 2.0, 0.0),
-        _ => ("models/creatures/strider.glb", 2.42 / 135.37, 67.52 * (2.42 / 135.37)),
+        _ => (
+            "models/creatures/strider.glb",
+            2.42 / 135.37,
+            67.52 * (2.42 / 135.37),
+        ),
     }
 }
 
@@ -313,12 +335,23 @@ fn register_cell(spawner: &mut CreatureSpawner, world: &World, cx: i32, cz: i32,
         let timer = 1.0 + rnd.next() * 3.0;
         let anim_t = rnd.next() * 10.0;
         if ok {
-            cands.push(Cand { x: wx, z: wz, speed, dir, timer, anim_t });
+            cands.push(Cand {
+                x: wx,
+                z: wz,
+                speed,
+                dir,
+                timer,
+                anim_t,
+            });
         }
     }
     let roll = rnd.next();
     let herd_roll = !cands.is_empty() && roll < HERD_CHANCE;
-    let herd_idx = if cands.is_empty() { 0 } else { rnd.range(cands.len()) };
+    let herd_idx = if cands.is_empty() {
+        0
+    } else {
+        rnd.range(cands.len())
+    };
     let cands = if herd_roll {
         // 保留候选供兽群引用（避免 move 后借用冲突）
         cands
@@ -362,7 +395,9 @@ fn materialize_herd(
     asset_server: &AssetServer,
     world: &World,
 ) -> bool {
-    let Some(h) = spawner.herds.get(&nid) else { return false };
+    let Some(h) = spawner.herds.get(&nid) else {
+        return false;
+    };
     let h = h.clone();
     // 地形被破坏（水/树）→ 保持休眠，等恢复
     let ix = h.x.floor() as i32;
@@ -415,7 +450,10 @@ fn materialize_herd(
     if let Some(hh) = spawner.herds.get_mut(&nid) {
         hh.entity = Some(e);
     }
-    println!("CREATURE materialize herd {nid} kind={kind} at ({:.1},{:.1})", h.x, h.z);
+    println!(
+        "CREATURE materialize herd {nid} kind={kind} at ({:.1},{:.1})",
+        h.x, h.z
+    );
     let _ = (w, d);
     true
 }
@@ -433,7 +471,9 @@ pub fn creature_spawn_system(
 ) {
     let dt = time.delta_secs();
     let Ok(p) = player.single() else { return };
-    let Some(animal) = world.biome().animal else { return };
+    let Some(animal) = world.biome().animal else {
+        return;
+    };
     let pcx = (p.pos.x / CRE_CELL).floor() as i32;
     let pcz = (p.pos.z / CRE_CELL).floor() as i32;
     // 1. 注册玩家周边 BUCKET_R 格内的候选细胞（确定性；已注册的跳过）
@@ -449,10 +489,7 @@ pub fn creature_spawn_system(
     spawner.timer -= dt;
     if spawner.timer <= 0.0 {
         spawner.timer = SPAWN_INTERVAL;
-        let active = creatures
-            .iter()
-            .filter(|(_, c, _)| !c.fading)
-            .count();
+        let active = creatures.iter().filter(|(_, c, _)| !c.fading).count();
         println!(
             "CREATURE tick player=({:.0},{:.0}) active={active} herds={}",
             p.pos.x,
@@ -466,7 +503,9 @@ pub fn creature_spawn_system(
                     continue;
                 }
                 let d = ((h.x - p.pos.x).powi(2) + (h.z - p.pos.z).powi(2)).sqrt();
-                if d >= SPAWN_MIN && d <= SPAWN_MAX && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                if (SPAWN_MIN..=SPAWN_MAX).contains(&d)
+                    && best.map(|(bd, _)| d < bd).unwrap_or(true)
+                {
                     best = Some((d, *nid));
                 }
             }
@@ -482,18 +521,18 @@ pub fn creature_spawn_system(
     for (nid, h) in &mut spawner.herds {
         let d = ((h.x - p.pos.x).powi(2) + (h.z - p.pos.z).powi(2)).sqrt();
         if let Some(e) = h.entity {
-            if d > UNLOAD_D {
-                if let Ok((_, mut c, tf)) = creatures.get_mut(e) {
-                    if c.fading {
-                        continue; // 已在淡出卸载中，由 despawn 系统收尾
-                    }
-                    h.x = tf.translation.x;
-                    h.z = tf.translation.z;
-                    h.hp = c.hp;
-                    c.fading = true; // 淡出 0.8s 后卸载（数据已回写，随时可重载）
-                    c.fade_t = 0.0;
-                    println!("CREATURE unload herd {nid} d={d:.0} (fade-out)");
+            if d > UNLOAD_D
+                && let Ok((_, mut c, tf)) = creatures.get_mut(e)
+            {
+                if c.fading {
+                    continue; // 已在淡出卸载中，由 despawn 系统收尾
                 }
+                h.x = tf.translation.x;
+                h.z = tf.translation.z;
+                h.hp = c.hp;
+                c.fading = true; // 淡出 0.8s 后卸载（数据已回写，随时可重载）
+                c.fade_t = 0.0;
+                println!("CREATURE unload herd {nid} d={d:.0} (fade-out)");
             }
         } else if d < RELOAD_D {
             to_reload.push(*nid);
@@ -535,9 +574,8 @@ pub fn creature_system(
         // 每次开始散步只做小角度转向（±0.75 rad），不再每 1~4s 乱转
         c.ai_t -= dt;
         if c.ai_t <= 0.0 {
-            let mut rng = Rng::new(
-                (tf.translation.x as u32).wrapping_mul(31) + time.elapsed_secs() as u32,
-            );
+            let mut rng =
+                Rng::new((tf.translation.x as u32).wrapping_mul(31) + time.elapsed_secs() as u32);
             if c.walking {
                 c.walking = false;
                 c.ai_t = 1.5 + rng.next() * 3.0; // 休息
@@ -605,9 +643,17 @@ pub fn creature_system(
         }
         // 合成缩放：基准 × 淡入 × 呼吸 × 受击脉冲 × 淡出（全部乘性，不覆盖基准）
         let fade_in = ease_in_out((c.spawn_t / FADE_IN_T).min(1.0));
-        let fade_out = if c.fading { (1.0 - ease_in_out((c.fade_t / FADE_OUT_T).min(1.0))).max(0.001) } else { 1.0 };
+        let fade_out = if c.fading {
+            (1.0 - ease_in_out((c.fade_t / FADE_OUT_T).min(1.0))).max(0.001)
+        } else {
+            1.0
+        };
         let breath = 1.0 + (c.anim_t * 3.0).sin() * 0.03;
-        let hit = if c.hit_t > 0.0 { 1.0 + (c.hit_t / 0.25) * 0.18 } else { 1.0 };
+        let hit = if c.hit_t > 0.0 {
+            1.0 + (c.hit_t / 0.25) * 0.18
+        } else {
+            1.0
+        };
         tf.scale = Vec3::splat((c.scale * fade_in * breath * hit * fade_out).max(0.001));
     }
 }
@@ -742,9 +788,9 @@ pub fn sentinel_system(
                 let z = cell[2];
                 let top = world.top_at(x, z);
                 commands.spawn((
-                    WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(
-                        "models/creatures/sentinel.glb",
-                    ))),
+                    WorldAssetRoot(asset_server.load(
+                        GltfAssetLabel::Scene(0).from_asset("models/creatures/sentinel.glb"),
+                    )),
                     // 骷髅实测高 2.17，目标 1.9 格（脚底即模型原点，无需偏移）
                     Transform::from_translation(Vec3::new(
                         x as f32 + 0.5,
@@ -799,7 +845,8 @@ pub fn sentinel_system(
                         pp.damage(2.0);
                     }
                 }
-            }        } else if dist > 40.0 {
+            }
+        } else if dist > 40.0 {
             c.hp = -1.0; // 标记消失
         }
     }
@@ -866,7 +913,9 @@ pub fn drops_system(
     sfx: Res<crate::audio::Sfx>,
 ) {
     let dt = time.delta_secs();
-    let Ok(mut p) = player.single_mut() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     let player_chest = p.pos - Vec3::Y * 1.0;
     let mut pickup_sound = false;
     let all: Vec<Entity> = drops.iter().map(|(e, _, _)| e).collect();
@@ -927,10 +976,10 @@ pub fn drops_system(
             let added = p.inv.add_item(&d.item, d.n);
             if added >= d.n {
                 commands.entity(*e).despawn();
-            } else if added > 0 {
-                if let Ok((_, mut dd, _)) = drops.get_mut(*e) {
-                    dd.n -= added;
-                }
+            } else if added > 0
+                && let Ok((_, mut dd, _)) = drops.get_mut(*e)
+            {
+                dd.n -= added;
             }
         }
     }
@@ -957,7 +1006,7 @@ pub fn drops_system(
                 np.z.floor() as i32,
             ));
             if below.solid {
-                let fy = (np.y - 0.28).floor() as f32;
+                let fy = (np.y - 0.28).floor();
                 d.base_y = fy + 1.0 + 0.3;
                 np.y = d.base_y;
                 d.vel = Vec3::ZERO;
@@ -1072,7 +1121,7 @@ mod tests {
         // 候选点非空且与兽群位置一致
         for nid in &nids1 {
             let h = &s1.herds[nid];
-            assert!(s1.cells[&(h.cx, h.cz)].cands.len() > 0);
+            assert!(!s1.cells[&(h.cx, h.cz)].cands.is_empty());
             assert_eq!(s1.cells[&(h.cx, h.cz)].cands[h.cand].x, h.x);
         }
     }
@@ -1082,12 +1131,38 @@ mod tests {
         let world = test_world(1234);
         // 手动构造存档数据（serialize 的 Query 部分由集成验证）
         let herds = vec![
-            HerdSave { cx: 0, cz: 0, cand: 1, x: 10.5, z: 20.5, hp: 3.5, home_x: 12.0, home_z: 18.0 },
-            HerdSave { cx: 2, cz: -1, cand: 3, x: -40.25, z: 66.75, hp: 4.0, home_x: -40.25, home_z: 66.75 },
+            HerdSave {
+                cx: 0,
+                cz: 0,
+                cand: 1,
+                x: 10.5,
+                z: 20.5,
+                hp: 3.5,
+                home_x: 12.0,
+                home_z: 18.0,
+            },
+            HerdSave {
+                cx: 2,
+                cz: -1,
+                cand: 3,
+                x: -40.25,
+                z: 66.75,
+                hp: 4.0,
+                home_x: -40.25,
+                home_z: 66.75,
+            },
         ];
         let cells = vec![
-            CellSave { cx: 0, cz: 0, mask: 0b101 },
-            CellSave { cx: 2, cz: -1, mask: 0b1000 },
+            CellSave {
+                cx: 0,
+                cz: 0,
+                mask: 0b101,
+            },
+            CellSave {
+                cx: 2,
+                cz: -1,
+                mask: 0b1000,
+            },
         ];
         let mut s = CreatureSpawner::default();
         s.restore(world.seed, &herds, &cells);

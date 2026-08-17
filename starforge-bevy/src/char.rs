@@ -2,10 +2,10 @@
 //! 模型来源：KayKit Character Pack: Adventurers（CC0）+ Kenney Space Kit 宇航员/外星人（CC0），
 //! 许可证存于 assets/licenses/。用于：空间站 NPC / 村庄村民 / 角色创建预览。
 
+use crate::save::Appearance;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy_world_serialization::prelude::WorldAssetRoot;
-use crate::save::Appearance;
 
 /// 可用 NPC 模型（按位置哈希轮换，保证同位置同外观）。
 pub const NPC_MODELS: [&str; 8] = [
@@ -55,7 +55,8 @@ pub fn spawn_humanoid(
     pos: Vec3,
     yaw: f32,
 ) -> HumanoidParts {
-    let idx = ((pos.x as i32).wrapping_mul(31) ^ (pos.z as i32).wrapping_mul(57)).unsigned_abs() as usize
+    let idx = ((pos.x as i32).wrapping_mul(31) ^ (pos.z as i32).wrapping_mul(57)).unsigned_abs()
+        as usize
         % NPC_MODELS.len();
     let model = NPC_MODELS[idx];
     let (scale, y_off) = npc_scale(model);

@@ -1,4 +1,9 @@
 //! STARFORGE 星穹熔炉 — Bevy 移植版 (main entry + game flow).
+//!
+//! 部分数据字段和辅助入口按移植规格完整保留，尚不一定被当前运行路径读取。
+#![allow(dead_code)]
+// Bevy systems naturally expose their resources and queries as function parameters.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod audio;
 mod char;
@@ -8,6 +13,7 @@ mod daynight;
 mod factory;
 mod inventory;
 mod materials;
+mod network;
 mod player;
 mod quests;
 mod rng;
@@ -16,19 +22,20 @@ mod space;
 mod station;
 mod textures;
 mod ui;
+mod weather;
 mod world;
 
-use bevy::prelude::*;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::prelude::*;
 use bevy::window::{CursorOptions, PresentMode};
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::{EguiContexts, EguiPlugin, egui};
 use materials::{TerrainMat, TerrainMaterials};
 use player::Player;
-use space::{FlightMode, FlightCamera, SpaceGame, ShipAsset, ShipState, SpaceInput};
+use space::{FlightCamera, FlightMode, ShipAsset, ShipState, SpaceGame, SpaceInput};
 use ui::{Research, ScanPulse, UiState};
 use world::{VoxelMesh, World};
 
@@ -107,7 +114,7 @@ struct PixelTarget(pub Handle<Image>);
 struct PixelUpscale;
 
 fn smoke_exit(
-    mut flag: Option<ResMut<SmokeFlag>>,
+    flag: Option<ResMut<SmokeFlag>>,
     mut mode: ResMut<FlightMode>,
     mut ship: ResMut<ShipState>,
     game: Option<Res<SpaceGame>>,
@@ -120,15 +127,15 @@ fn smoke_exit(
         // 自测第二阶段：120 帧后切换到太空，验证太空场景/飞行/相机管线。
         // 出球点取近赤道方向（Y≈0），使旧代码的"按玩家高度算太空因子"必然退化成大气色，
         // 以覆盖"太空背景变大气色"回归。
-        if f.frames == 120 {
-            if let Some(g) = game.as_ref() {
-                let p0 = &g.galaxy.planets[0];
-                let center = Vec3::from(p0.pos);
-                ship.pos = center + Vec3::new(0.9, 0.1, 0.4).normalize() * (p0.radius + 400.0);
-                ship.speed = 20.0;
-                *mode = FlightMode::Space;
-                println!("SMOKE_STAGE space");
-            }
+        if f.frames == 120
+            && let Some(g) = game.as_ref()
+        {
+            let p0 = &g.galaxy.planets[0];
+            let center = Vec3::from(p0.pos);
+            ship.pos = center + Vec3::new(0.9, 0.1, 0.4).normalize() * (p0.radius + 400.0);
+            ship.speed = 20.0;
+            *mode = FlightMode::Space;
+            println!("SMOKE_STAGE space");
         }
         // 太空回归检查：地形区块必须隐藏（平面地形残影/球壳错位）；ClearColor 必须是太空黑
         if f.frames == 200 {
@@ -140,9 +147,19 @@ fn smoke_exit(
                 "SMOKE_CHECK space mode={mode:?} chunks={n} hidden={all_hidden} clear=({:.4},{:.4},{:.4})",
                 c.red, c.green, c.blue
             );
-            assert_eq!(*mode, FlightMode::Space, "smoke: expected Space at frame 200");
-            assert!(n > 0, "smoke: no chunk meshes present for space visibility check");
-            assert!(all_hidden, "smoke: chunk terrain must be hidden in space mode");
+            assert_eq!(
+                *mode,
+                FlightMode::Space,
+                "smoke: expected Space at frame 200"
+            );
+            assert!(
+                n > 0,
+                "smoke: no chunk meshes present for space visibility check"
+            );
+            assert!(
+                all_hidden,
+                "smoke: chunk terrain must be hidden in space mode"
+            );
             assert!(
                 c.red < 0.03 && c.green < 0.03 && c.blue < 0.06,
                 "smoke: space clear color must be black, got {:?}",
@@ -162,10 +179,7 @@ fn smoke_exit(
 }
 
 /// In --smoke/--play mode, immediately leave the menu and start loading a world.
-fn smoke_boot(
-    req: Option<Res<WorldRequest>>,
-    mut next: ResMut<NextState<GameState>>,
-) {
+fn smoke_boot(req: Option<Res<WorldRequest>>, mut next: ResMut<NextState<GameState>>) {
     if req.is_some() {
         next.set(GameState::Loading);
     }
@@ -202,7 +216,7 @@ fn main() {
             }),
             ..default()
         }))
-                .add_plugins(EguiPlugin::default())
+        .add_plugins(EguiPlugin::default())
         .add_plugins(MaterialPlugin::<TerrainMat>::default())
         .insert_resource(save::load_settings())
         .insert_resource(UiState::default())
@@ -219,16 +233,22 @@ fn main() {
         .add_message::<space::LandPlanetEvent>()
         .add_message::<space::WarpArriveEvent>()
         .add_message::<station::ShipSwitchEvent>()
+        .add_message::<network::BlockChanged>()
         .insert_resource(FlightMode::default())
         .insert_resource(ShipState::default())
         .insert_resource(SpaceInput::default())
         .insert_resource(FlightCamera::default())
         .insert_resource(station::StationState::default())
+        .insert_resource(station::StationDefense::default())
         .insert_resource(quests::Quests::default())
         .insert_resource(factory::Power::default())
         .insert_resource(factory::TickAcc::default())
         .insert_resource(space::WarpAnim::default())
+        .insert_resource(space::WarpVisuals::default())
         .insert_resource(space::VisitorRespawn::default())
+        .insert_resource(space::VisitorTraffic::default())
+        .insert_resource(weather::ClimateRuntime::default())
+        .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())
         .add_systems(Startup, startup)
         .add_systems(
@@ -241,7 +261,10 @@ fn main() {
         .add_systems(OnEnter(GameState::Loading), on_enter_loading)
         .add_systems(OnExit(GameState::Loading), on_exit_loading)
         .add_systems(OnEnter(GameState::Playing), on_enter_playing)
-        .add_systems(OnExit(GameState::Playing), on_exit_playing)
+        .add_systems(
+            OnExit(GameState::Playing),
+            (on_exit_playing, network::disconnect_system),
+        )
         // menu
         .add_systems(
             Update,
@@ -269,6 +292,7 @@ fn main() {
                                 materials::curve_system,
                                 materials::lamp_pool_system,
                                 daynight::daynight_system,
+                                weather::climate_system,
                             )
                                 .chain(),
                             (
@@ -305,6 +329,7 @@ fn main() {
                                 .chain(),
                             (
                                 station::station_system,
+                                station::station_defense_system,
                                 station::station_dialog_system,
                                 station::station_npc_spawn_system,
                                 station::ship_switch_system,
@@ -329,6 +354,7 @@ fn main() {
                             ui::trade_panel_system,
                             ui::garage_panel_system,
                             ui::galaxy_map_system,
+                            network::network_ui_system,
                             ui::creative_panel_system,
                             ui::planet_map_system,
                             save_system,
@@ -363,11 +389,19 @@ fn main() {
         )
         .add_systems(
             Update,
+            space::warp_visual_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
             space::space_scene_sync_system.run_if(in_state(GameState::Playing)),
         )
         .add_systems(
             Update,
             space::sphere_fade_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            weather::space_cloud_system.run_if(in_state(GameState::Playing)),
         )
         .add_systems(
             Update,
@@ -405,9 +439,10 @@ fn main() {
             Update,
             space::engine_loop_system.run_if(in_state(GameState::Playing)),
         )
+        .add_systems(Update, far_mesh_system.run_if(in_state(GameState::Playing)))
         .add_systems(
             Update,
-            far_mesh_system.run_if(in_state(GameState::Playing)),
+            network::network_system.run_if(in_state(GameState::Playing)),
         );
     if smoke || play {
         // 自动建世界进入游戏（--play 不退出，供交互验证；--smoke 额外自测退出）
@@ -455,7 +490,10 @@ fn startup(
 ) {
     // Self-extract the WGSL shader assets next to the executable so the
     // AssetServer finds them regardless of the working directory.
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
         let shader_dir = dir.join("assets").join("shaders");
         let _ = std::fs::create_dir_all(&shader_dir);
         let _ = std::fs::write(
@@ -549,13 +587,21 @@ fn startup(
             bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
         lowres.sampler = bevy::image::ImageSampler::nearest();
         let lowres = images.add(lowres);
-        commands.entity(cam).insert(RenderTarget::Image(ImageRenderTarget {
-            handle: lowres.clone(),
-            scale_factor: 1.0,
-        }));
+        commands
+            .entity(cam)
+            .insert(RenderTarget::Image(ImageRenderTarget {
+                handle: lowres.clone(),
+                scale_factor: 1.0,
+            }));
         commands.insert_resource(PixelTarget(lowres.clone()));
         // UI 相机 + 全屏放大节点
-        commands.spawn((Camera2d, Camera { order: 10, ..default() }));
+        commands.spawn((
+            Camera2d,
+            Camera {
+                order: 10,
+                ..default()
+            },
+        ));
         commands.spawn((
             Node {
                 width: bevy::ui::Val::Percent(100.0),
@@ -600,10 +646,7 @@ fn egui_manual_pass(mut q: Query<&mut bevy_egui::EguiContextSettings>) {
     }
 }
 
-fn egui_begin_pass(
-    mut contexts: EguiContexts,
-    mut input: Query<&mut bevy_egui::EguiInput>,
-) {
+fn egui_begin_pass(mut contexts: EguiContexts, mut input: Query<&mut bevy_egui::EguiInput>) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     if let Ok(mut inp) = input.single_mut() {
         let raw = std::mem::take(&mut inp.0);
@@ -611,10 +654,7 @@ fn egui_begin_pass(
     }
 }
 
-fn egui_end_pass(
-    mut contexts: EguiContexts,
-    mut full: Query<&mut bevy_egui::EguiFullOutput>,
-) {
+fn egui_end_pass(mut contexts: EguiContexts, mut full: Query<&mut bevy_egui::EguiFullOutput>) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let out = ctx.end_pass();
     if let Ok(mut f) = full.single_mut() {
@@ -691,17 +731,30 @@ fn menu_system(
                         menu.creative = false;
                         menu.error = None;
                     }
-                    if ui.add_sized([260.0, 40.0], egui::Button::new("📂 读取世界")).clicked() {
+                    if ui
+                        .add_sized([260.0, 40.0], egui::Button::new("📂 读取世界"))
+                        .clicked()
+                    {
                         menu.screen = MenuScreen::LoadWorld;
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.label(format!("渲染距离: {} 区块", settings.view_dist));
                         ui.label(format!("灵敏度: {:.1}", settings.mouse_sens));
-                        ui.label(format!("渲染: {}", if settings.pixelated { "像素" } else { "现代" }));
+                        ui.label(format!(
+                            "渲染: {}",
+                            if settings.pixelated {
+                                "像素"
+                            } else {
+                                "现代"
+                            }
+                        ));
                     });
                     ui.add_space(20.0);
-                    if ui.add_sized([260.0, 36.0], egui::Button::new("🚪 退出")).clicked() {
+                    if ui
+                        .add_sized([260.0, 36.0], egui::Button::new("🚪 退出"))
+                        .clicked()
+                    {
                         std::process::exit(0);
                     }
                 });
@@ -749,7 +802,10 @@ fn menu_system(
                         .enumerate()
                         {
                             if ui
-                                .selectable_label(menu.difficulty == i as u8 && !menu.creative, d.label())
+                                .selectable_label(
+                                    menu.difficulty == i as u8 && !menu.creative,
+                                    d.label(),
+                                )
                                 .clicked()
                             {
                                 menu.difficulty = i as u8;
@@ -807,42 +863,67 @@ fn menu_system(
                     });
                     ui.add_space(8.0);
                     // 外观编辑
-                    let opts_skin = ["#e8c49a", "#d8b48a", "#c89878", "#8d5a3c", "#6b4630", "#f0d8b8", "#b98e6a", "#e8d0b0"];
-                    let opts_hair = ["#4a3018", "#2e2620", "#5a4632", "#7a5a8a", "#a86a3a", "#d8c8a8", "#c23a3a", "#1e2e4a"];
-                    let opts_suit = ["#4a5a6e", "#3fa8c9", "#5a3e3e", "#6e6a2a", "#3e5a6e", "#4a4258", "#5a6a3a", "#7a3a2a"];
-                    let opts_trim = ["#35e0e8", "#ffb347", "#ff6a5e", "#b58aff", "#7dff8a", "#ffd94d", "#f0f0f0", "#35b0ff"];
-                    let opts_pants = ["#33404c", "#4a3c2e", "#2e3a44", "#3a3248", "#3e3a2e", "#443430"];
-                    let opts_boots = ["#1e262e", "#2e2620", "#26221a", "#241e2e", "#2a221e", "#33261a"];
-                    let opts_visor = ["#ffb347", "#35e0e8", "#ff6a5e", "#b58aff", "#7dff8a", "#f0f0f0"];
+                    let opts_skin = [
+                        "#e8c49a", "#d8b48a", "#c89878", "#8d5a3c", "#6b4630", "#f0d8b8",
+                        "#b98e6a", "#e8d0b0",
+                    ];
+                    let opts_hair = [
+                        "#4a3018", "#2e2620", "#5a4632", "#7a5a8a", "#a86a3a", "#d8c8a8",
+                        "#c23a3a", "#1e2e4a",
+                    ];
+                    let opts_suit = [
+                        "#4a5a6e", "#3fa8c9", "#5a3e3e", "#6e6a2a", "#3e5a6e", "#4a4258",
+                        "#5a6a3a", "#7a3a2a",
+                    ];
+                    let opts_trim = [
+                        "#35e0e8", "#ffb347", "#ff6a5e", "#b58aff", "#7dff8a", "#ffd94d",
+                        "#f0f0f0", "#35b0ff",
+                    ];
+                    let opts_pants = [
+                        "#33404c", "#4a3c2e", "#2e3a44", "#3a3248", "#3e3a2e", "#443430",
+                    ];
+                    let opts_boots = [
+                        "#1e262e", "#2e2620", "#26221a", "#241e2e", "#2a221e", "#33261a",
+                    ];
+                    let opts_visor = [
+                        "#ffb347", "#35e0e8", "#ff6a5e", "#b58aff", "#7dff8a", "#f0f0f0",
+                    ];
                     let styles = ["none", "short", "long", "pony", "mohawk", "bun"];
-                    egui::Grid::new("char_edit").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                        swatch_row(ui, "肤色", &opts_skin, &mut app.skin);
-                        ui.end_row();
-                        ui.label("发型");
-                        egui::ComboBox::from_id_salt("hair_style")
-                            .selected_text(save::Appearance::style_label(&app.hair_style))
-                            .show_ui(ui, |ui| {
-                                for s in styles {
-                                    ui.selectable_value(&mut app.hair_style, s.to_string(), save::Appearance::style_label(s));
-                                }
-                            });
-                        ui.end_row();
-                        swatch_row(ui, "发色", &opts_hair, &mut app.hair);
-                        ui.end_row();
-                        swatch_row(ui, "制服", &opts_suit, &mut app.suit);
-                        ui.end_row();
-                        swatch_row(ui, "饰条", &opts_trim, &mut app.trim);
-                        ui.end_row();
-                        swatch_row(ui, "裤装", &opts_pants, &mut app.pants);
-                        ui.end_row();
-                        swatch_row(ui, "靴子", &opts_boots, &mut app.boots);
-                        ui.end_row();
-                        swatch_row(ui, "目镜", &opts_visor, &mut app.visor);
-                        ui.end_row();
-                        ui.label("头盔");
-                        ui.checkbox(&mut app.helmet, "开启");
-                        ui.end_row();
-                    });
+                    egui::Grid::new("char_edit")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            swatch_row(ui, "肤色", &opts_skin, &mut app.skin);
+                            ui.end_row();
+                            ui.label("发型");
+                            egui::ComboBox::from_id_salt("hair_style")
+                                .selected_text(save::Appearance::style_label(&app.hair_style))
+                                .show_ui(ui, |ui| {
+                                    for s in styles {
+                                        ui.selectable_value(
+                                            &mut app.hair_style,
+                                            s.to_string(),
+                                            save::Appearance::style_label(s),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+                            swatch_row(ui, "发色", &opts_hair, &mut app.hair);
+                            ui.end_row();
+                            swatch_row(ui, "制服", &opts_suit, &mut app.suit);
+                            ui.end_row();
+                            swatch_row(ui, "饰条", &opts_trim, &mut app.trim);
+                            ui.end_row();
+                            swatch_row(ui, "裤装", &opts_pants, &mut app.pants);
+                            ui.end_row();
+                            swatch_row(ui, "靴子", &opts_boots, &mut app.boots);
+                            ui.end_row();
+                            swatch_row(ui, "目镜", &opts_visor, &mut app.visor);
+                            ui.end_row();
+                            ui.label("头盔");
+                            ui.checkbox(&mut app.helmet, "开启");
+                            ui.end_row();
+                        });
                     ui.add_space(8.0);
                     let mut go = false;
                     let mut back = false;
@@ -938,11 +1019,8 @@ fn swatch_row(ui: &mut egui::Ui, label: &str, opts: &[&str], current: &mut Strin
             let selected = current == c;
             let col = hex_to_egui(c);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
-            ui.painter().rect_filled(
-                rect,
-                egui::CornerRadius::same(3),
-                col,
-            );
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(3), col);
             if selected {
                 ui.painter().rect_stroke(
                     rect,
@@ -999,11 +1077,11 @@ fn on_enter_loading(
             } else {
                 let mut found = None;
                 for c in save::list_chars() {
-                    if let Some(cd) = save::load_char(&c) {
-                        if cd.world.as_deref() == Some(req.world_name.as_str()) {
-                            found = Some(cd);
-                            break;
-                        }
+                    if let Some(cd) = save::load_char(&c)
+                        && cd.world.as_deref() == Some(req.world_name.as_str())
+                    {
+                        found = Some(cd);
+                        break;
                     }
                 }
                 found
@@ -1014,7 +1092,10 @@ fn on_enter_loading(
     } else {
         None
     };
-    let techs = char_data.as_ref().map(|c| c.techs.clone()).unwrap_or_default();
+    let techs = char_data
+        .as_ref()
+        .map(|c| c.techs.clone())
+        .unwrap_or_default();
     let spawn = world.find_spawn(96, 96);
     commands.insert_resource(LoadingState {
         world,
@@ -1039,7 +1120,7 @@ fn on_exit_loading(mut commands: Commands) {
 #[allow(clippy::too_many_arguments)]
 fn loading_system(
     mut commands: Commands,
-    mut loading: Option<ResMut<LoadingState>>,
+    loading: Option<ResMut<LoadingState>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<TerrainMat>>,
     mut images: ResMut<Assets<Image>>,
@@ -1138,7 +1219,7 @@ fn spawn_scene(
     stdmats: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     world: World,
-    spawn: Vec3,
+    _spawn: Vec3,
     difficulty: data::Difficulty,
     char_data: Option<save::CharData>,
     world_data: Option<save::WorldData>,
@@ -1188,7 +1269,10 @@ fn spawn_scene(
     // ---- 角色 / 任务 / 飞船 / 星系 ----
     let mut p = Player::new(difficulty);
     p.pos = spawn;
-    let appearance = char_data.as_ref().map(|c| c.appearance.clone()).unwrap_or_default();
+    let appearance = char_data
+        .as_ref()
+        .map(|c| c.appearance.clone())
+        .unwrap_or_default();
     p.appearance = appearance.clone();
     let mut quests = quests::Quests::default();
     let mut game: SpaceGame;
@@ -1357,7 +1441,10 @@ fn spawn_scene(
 
 /// 从世界档恢复星系。
 fn load_galaxy(wd: &Option<save::WorldData>) -> data::Galaxy {
-    let seed = wd.as_ref().map(|w| w.galaxy_seed).unwrap_or(data::HOME_GALAXY_SEED);
+    let seed = wd
+        .as_ref()
+        .map(|w| w.galaxy_seed)
+        .unwrap_or(data::HOME_GALAXY_SEED);
     if seed == data::HOME_GALAXY_SEED {
         data::home_galaxy()
     } else {
@@ -1365,7 +1452,6 @@ fn load_galaxy(wd: &Option<save::WorldData>) -> data::Galaxy {
     }
 }
 
-/// Machine blocks in the (already-loaded) world spawn their logical entities.
 // ---------- Playing lifecycle ----------
 
 fn on_enter_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>) {
@@ -1433,12 +1519,11 @@ fn prompt_system(
         return;
     }
     let mut prompt = None;
-    if let Some((cell, _n, dist)) = world.raycast(p.eye(), p.look_dir(), 5.0) {
-        if dist <= 5.0 {
-            if let Some(m) = machines.iter().find(|m| m.pos == cell) {
-                prompt = Some(format!("[E] 打开{}", m.kind.label()));
-            }
-        }
+    if let Some((cell, _n, dist)) = world.raycast(p.eye(), p.look_dir(), 5.0)
+        && dist <= 5.0
+        && let Some(m) = machines.iter().find(|m| m.pos == cell)
+    {
+        prompt = Some(format!("[E] 打开{}", m.kind.label()));
     }
     ui_state.prompt = prompt;
 }
@@ -1491,7 +1576,9 @@ fn stream_world_step(
                     continue;
                 }
                 let key = world::ckey(cx, cz);
-                let Some(c) = world.chunks.get(&key) else { continue };
+                let Some(c) = world.chunks.get(&key) else {
+                    continue;
+                };
                 if (c.mesh.is_some() || c.water_mesh.is_some()) && !c.dirty {
                     continue;
                 }
@@ -1511,13 +1598,25 @@ fn stream_world_step(
                 // AABB 需覆盖曲率顶点位移（着色器按 0.002·r² 下压，视距外缘可达上百格），
                 // 否则高空时远景区块被视锥剔除、边缘地形闪烁
                 let y_min = -160.0
-                    - 0.002 * ((world.view_dist + 2) as f32 * crate::data::CHUNK as f32 + 16.0).powi(2)
+                    - 0.002
+                        * ((world.view_dist + 2) as f32 * crate::data::CHUNK as f32 + 16.0).powi(2)
                     - 8.0;
                 let c = world.chunks.get_mut(&key).unwrap();
-                c.mesh =
-                    solid_m.map(|m| spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.solid.clone(), false, y_min));
-                c.water_mesh =
-                    water_m.map(|m| spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.water.clone(), true, y_min));
+                c.mesh = solid_m.map(|m| {
+                    spawn_chunk_mesh(
+                        commands,
+                        meshes,
+                        cx,
+                        cz,
+                        m,
+                        mats.solid.clone(),
+                        false,
+                        y_min,
+                    )
+                });
+                c.water_mesh = water_m.map(|m| {
+                    spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.water.clone(), true, y_min)
+                });
                 c.dirty = false;
                 mesh_left -= 1;
                 if mesh_left == 0 {
@@ -1548,7 +1647,8 @@ fn stream_world_step(
             && !c.modified)
     });
     // completeness check: every chunk in view distance generated & meshed
-    let complete = (0..=world.view_dist).all(|r| {
+
+    (0..=world.view_dist).all(|r| {
         let mut ok = true;
         for cz in pcz - r..=pcz + r {
             for cx in pcx - r..=pcx + r {
@@ -1566,8 +1666,7 @@ fn stream_world_step(
             }
         }
         ok
-    });
-    complete
+    })
 }
 
 fn spawn_chunk_mesh(
@@ -1577,7 +1676,7 @@ fn spawn_chunk_mesh(
     cz: i32,
     vm: VoxelMesh,
     mat: Handle<TerrainMat>,
-    water: bool,
+    _water: bool,
     y_min: f32,
 ) -> Entity {
     let mut mesh = Mesh::new(
@@ -1689,7 +1788,12 @@ fn far_mesh_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mats: Res<TerrainMaterials>,
     atlas: Res<AtlasRes>,
-    mut far_q: Query<(Entity, &mut FarMesh, &mut Visibility, &mut MeshMaterial3d<TerrainMat>)>,
+    mut far_q: Query<(
+        Entity,
+        &mut FarMesh,
+        &mut Visibility,
+        &mut MeshMaterial3d<TerrainMat>,
+    )>,
 ) {
     let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
         (ship.pos.x, ship.pos.z)
@@ -1724,7 +1828,15 @@ fn far_mesh_system(
             let from = fm.row;
             let to = (fm.row + world::FAR_ROWS_PER_FRAME).min(world::FAR_N);
             if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
-                world::fill_far_rows(&world, &atlas.atlas, fm.target_cx, fm.target_cz, from, to, &mut mesh);
+                world::fill_far_rows(
+                    &world,
+                    &atlas.atlas,
+                    fm.target_cx,
+                    fm.target_cz,
+                    from,
+                    to,
+                    &mut mesh,
+                );
             }
             fm.row = to;
             if fm.row >= world::FAR_N {
@@ -1870,10 +1982,18 @@ fn space_sky_sync_system(
 ) {
     let show = mode.ground_scene();
     for mut vis in &mut sun_disc {
-        *vis = if show { Visibility::Visible } else { Visibility::Hidden };
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
     for mut vis in &mut stars {
-        *vis = if show && stars_ok() { Visibility::Visible } else { Visibility::Hidden };
+        *vis = if show && stars_ok() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 
@@ -1900,7 +2020,11 @@ fn ground_scene_visibility_system(
     >,
 ) {
     let show = mode.ground_scene();
-    let vis = if show { Visibility::Visible } else { Visibility::Hidden };
+    let vis = if show {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
     for (e, v) in &mut q {
         match v {
             Some(mut v) => {
@@ -1938,13 +2062,16 @@ fn save_system(
 ) {
     for _ in ev.read() {
         let Ok(p) = player.single() else { continue };
-        let state_str = if matches!(*mode, FlightMode::Space | FlightMode::Warping | FlightMode::Station) {
+        let state_str = if matches!(
+            *mode,
+            FlightMode::Space | FlightMode::Warping | FlightMode::Station
+        ) {
             "space"
         } else {
             "planet"
         };
         let ok_char = save::save_char(
-            &p,
+            p,
             &names.char,
             Some(&names.world),
             &research.techs,
@@ -1960,17 +2087,20 @@ fn save_system(
         } else {
             None
         };
-        let ship_state = if matches!(*mode, FlightMode::Space | FlightMode::Warping | FlightMode::Station) {
+        let ship_state = if matches!(
+            *mode,
+            FlightMode::Space | FlightMode::Warping | FlightMode::Station
+        ) {
             let mut ss = space::serialize_ship_state(&ship);
             // 站内存档存机库出口（JS main.js:2770-2775），读档不会重新泊入
-            if *mode == FlightMode::Station {
-                if let Some(st) = station.as_ref() {
-                    ss.pos = [
-                        st.station_pos.x + station::station_exit_pos()[0],
-                        st.station_pos.y + station::station_exit_pos()[1],
-                        st.station_pos.z + station::station_exit_pos()[2],
-                    ];
-                }
+            if *mode == FlightMode::Station
+                && let Some(st) = station.as_ref()
+            {
+                ss.pos = [
+                    st.station_pos.x + station::station_exit_pos()[0],
+                    st.station_pos.y + station::station_exit_pos()[1],
+                    st.station_pos.z + station::station_exit_pos()[2],
+                ];
             }
             Some(ss)
         } else {
@@ -2034,6 +2164,7 @@ fn quit_to_menu_system(
         commands.remove_resource::<space::AtmoLand>();
         commands.remove_resource::<space::SpaceScene>();
         commands.insert_resource(space::WarpAnim::default());
+        commands.insert_resource(space::WarpVisuals::default());
         commands.insert_resource(Research::default());
         commands.insert_resource(UiState::default());
         commands.insert_resource(FlightMode::default());

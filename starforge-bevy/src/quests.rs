@@ -110,7 +110,11 @@ impl Quests {
             }
             QuestType::Place if q.n > 1 => {
                 let block = q.block?;
-                Some(format!("{}/{}", self.placed.get(block).copied().unwrap_or(0), q.n))
+                Some(format!(
+                    "{}/{}",
+                    self.placed.get(block).copied().unwrap_or(0),
+                    q.n
+                ))
             }
             _ => None,
         }
@@ -130,16 +134,22 @@ impl Quests {
                     .map(|b| self.placed.get(b).copied().unwrap_or(0) >= need)
                     .unwrap_or(false)
             }
-            QuestType::Tech => q.tech.map(|t| techs.iter().any(|x| x == t)).unwrap_or(false),
-            QuestType::Event => q.flag.map(|f| self.flags.get(f).copied().unwrap_or(false)).unwrap_or(false),
+            QuestType::Tech => q
+                .tech
+                .map(|t| techs.iter().any(|x| x == t))
+                .unwrap_or(false),
+            QuestType::Event => q
+                .flag
+                .map(|f| self.flags.get(f).copied().unwrap_or(false))
+                .unwrap_or(false),
         };
         if done {
             self.idx += 1;
             // q_explore 激活即作废旧旗标（提前着陆不能瞬时完成「新世界」）
-            if let Some(nq) = data::QUESTS.get(self.idx) {
-                if nq.id == "q_explore" {
-                    self.flags.insert("newPlanet".into(), false);
-                }
+            if let Some(nq) = data::QUESTS.get(self.idx)
+                && nq.id == "q_explore"
+            {
+                self.flags.insert("newPlanet".into(), false);
             }
             self.announce = Some((
                 format!("任务完成：{}", q.title),
@@ -162,12 +172,18 @@ impl Quests {
                     if let Some(d) = q.dialog {
                         self.announce = Some((format!("◈ {}", q.title), d.to_string(), 5.2));
                     } else {
-                        self.announce =
-                            Some((format!("◈ 新任务"), format!("{} — {}", q.title, q.desc), 4.0));
+                        self.announce = Some((
+                            "◈ 新任务".to_string(),
+                            format!("{} — {}", q.title, q.desc),
+                            4.0,
+                        ));
                     }
                 } else if !p.creative() {
-                    self.announce =
-                        Some(("◈ 第一章 完结".into(), "宇宙没有边界。旅行者，继续前进吧。".into(), 5.0));
+                    self.announce = Some((
+                        "◈ 第一章 完结".into(),
+                        "宇宙没有边界。旅行者，继续前进吧。".into(),
+                        5.0,
+                    ));
                 }
             }
         }
@@ -202,7 +218,11 @@ pub fn quest_tick_system(
     if let Ok(mut p) = player.single_mut() {
         if let Some(q) = quests.check(&p, &research.techs) {
             p.credits += 50 + quests.idx as i32 * 25;
-            announced.push((format!("任务完成：{}", q.title), format!("奖励 ₪{}", 50 + quests.idx as i32 * 25), 3.2));
+            announced.push((
+                format!("任务完成：{}", q.title),
+                format!("奖励 ₪{}", 50 + quests.idx as i32 * 25),
+                3.2,
+            ));
         }
         quests.tick_announce(dt, &p);
     }
@@ -226,7 +246,11 @@ pub fn quest_tick_system(
         announced.push((t, s, dur));
     }
     for (t, s, dur) in announced {
-        big_ev.write(BigMessageEvent { title: t, sub: s, dur });
+        big_ev.write(BigMessageEvent {
+            title: t,
+            sub: s,
+            dur,
+        });
     }
 }
 
@@ -259,18 +283,22 @@ pub fn side_quest_system(
                 if let Some(action) = action {
                     match action {
                         DialogAction::SideReward => {
-                            if let Ok(mut p) = player.single_mut() {
-                                if let Some(sq) = quests.side.as_ref() {
-                                    if !sq.done {
-                                        let have = p.inv.count_item(&sq.item);
-                                        if have >= sq.need {
-                                            p.inv.remove_item(&sq.item, sq.need);
-                                            p.credits += sq.reward;
-                                            p.toast(format!("村庄感谢你！+₪{}", sq.reward));
-                                            quests.side.as_mut().unwrap().done = true;
-                                            crate::audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
-                                        }
-                                    }
+                            if let Ok(mut p) = player.single_mut()
+                                && let Some(sq) = quests.side.as_ref()
+                                && !sq.done
+                            {
+                                let have = p.inv.count_item(&sq.item);
+                                if have >= sq.need {
+                                    p.inv.remove_item(&sq.item, sq.need);
+                                    p.credits += sq.reward;
+                                    p.toast(format!("村庄感谢你！+₪{}", sq.reward));
+                                    quests.side.as_mut().unwrap().done = true;
+                                    crate::audio::play(
+                                        &mut commands,
+                                        sfx.pickup.clone(),
+                                        0.5,
+                                        None,
+                                    );
                                 }
                             }
                         }
@@ -290,11 +318,9 @@ pub fn side_quest_system(
     } else {
         false
     };
-    if advance {
-        if let Some(d) = quests.side_dialog.as_mut() {
-            d.idx += 1;
-            d.chars = 0;
-        }
+    if advance && let Some(d) = quests.side_dialog.as_mut() {
+        d.idx += 1;
+        d.chars = 0;
     }
 }
 
@@ -352,14 +378,14 @@ pub fn village_side_quest_system(
         quests.villager_pos = Some(villager_pos);
     }
     // 星球切换保护：村民位置距上次太远（旧星球实体未清理）
-    if let Some(op) = quests.villager_pos {
-        if op.distance(villager_pos) > 100.0 {
-            if let Some(e) = quests.villager.take() {
-                commands.entity(e).despawn();
-            }
-            quests.villager_pos = None;
-            return;
+    if let Some(op) = quests.villager_pos
+        && op.distance(villager_pos) > 100.0
+    {
+        if let Some(e) = quests.villager.take() {
+            commands.entity(e).despawn();
         }
+        quests.villager_pos = None;
+        return;
     }
     // 对话进行中：不重复开
     if quests.dialog.is_some() || quests.side_dialog.is_some() || ui.locked() {
@@ -375,9 +401,18 @@ pub fn village_side_quest_system(
     match quests.side.as_ref().map(|s| s.done) {
         None => {
             // 生成委托
-            let pool = ["sodium", "carbon", "oxygen", "coal", "iron_ore", "copper_ore", "stone"];
-            let item = pool[crate::rng::Rng::new((vx as u32) ^ 0x5EED ^ (vz as u32)).range(pool.len())]
-                .to_string();
+            let pool = [
+                "sodium",
+                "carbon",
+                "oxygen",
+                "coal",
+                "iron_ore",
+                "copper_ore",
+                "stone",
+            ];
+            let item = pool
+                [crate::rng::Rng::new((vx as u32) ^ 0x5EED ^ (vz as u32)).range(pool.len())]
+            .to_string();
             let need = 3 + (crate::rng::Rng::new((vz as u32) ^ 0x77).next() * 6.0) as i32;
             let reward = 100 + need * 25;
             quests.side = Some(SideQuest {
@@ -432,7 +467,11 @@ mod tests {
     use super::*;
 
     fn test_player(creative: bool) -> Player {
-        let mut p = Player::new(if creative { crate::data::Difficulty::Creative } else { crate::data::Difficulty::Normal });
+        let mut p = Player::new(if creative {
+            crate::data::Difficulty::Creative
+        } else {
+            crate::data::Difficulty::Normal
+        });
         p.inv.add_item("carbon", 30);
         p.inv.add_item("sodium", 10);
         p.inv.add_item("stone", 20);
@@ -442,7 +481,7 @@ mod tests {
     #[test]
     fn quest_chain_collect_progression() {
         let mut q = Quests::default();
-        let mut p = test_player(false);
+        let p = test_player(false);
         // q_wake 是事件旗标任务
         q.flags.insert("checkedShip".into(), true);
         assert!(q.check(&p, &[]).is_some());
@@ -484,8 +523,10 @@ mod tests {
 
     #[test]
     fn tech_quest_needs_research() {
-        let mut q = Quests::default();
-        q.idx = 7; // q_tech（研究 metallurgy）
+        let mut q = Quests {
+            idx: 7, // q_tech（研究 metallurgy）
+            ..Default::default()
+        };
         let p = test_player(false);
         assert!(q.check(&p, &[]).is_none());
         assert!(q.check(&p, &["metallurgy".to_string()]).is_some());
@@ -494,8 +535,10 @@ mod tests {
 
     #[test]
     fn place_quest_counts_blocks() {
-        let mut q = Quests::default();
-        q.idx = 4; // q_furnace：放置熔炉
+        let mut q = Quests {
+            idx: 4, // q_furnace：放置熔炉
+            ..Default::default()
+        };
         let p = test_player(false);
         assert!(q.check(&p, &[]).is_none());
         q.placed.insert("furnace".into(), 1);
@@ -506,7 +549,14 @@ mod tests {
     fn side_quest_reward_consumes_items() {
         let mut q = Quests::default();
         let mut p = test_player(false);
-        q.side = Some(SideQuest { item: "carbon".into(), need: 10, reward: 150, x: 0, z: 0, done: false });
+        q.side = Some(SideQuest {
+            item: "carbon".into(),
+            need: 10,
+            reward: 150,
+            x: 0,
+            z: 0,
+            done: false,
+        });
         // 模拟侧任务对话框关闭动作（交物品）
         q.side_dialog = Some(QuestDialog {
             name: "村民".into(),
@@ -517,16 +567,11 @@ mod tests {
         });
         let before = p.inv.count_item("carbon");
         let d = q.side_dialog.clone().unwrap();
-        if let Some(action) = d.on_close {
-            match action {
-                DialogAction::SideReward => {
-                    let sq = q.side.as_ref().unwrap();
-                    if !sq.done && p.inv.count_item(&sq.item) >= sq.need {
-                        p.inv.remove_item(&sq.item, sq.need);
-                        p.credits += sq.reward;
-                    }
-                }
-                _ => {}
+        if let Some(DialogAction::SideReward) = d.on_close {
+            let sq = q.side.as_ref().unwrap();
+            if !sq.done && p.inv.count_item(&sq.item) >= sq.need {
+                p.inv.remove_item(&sq.item, sq.need);
+                p.credits += sq.reward;
             }
         }
         assert_eq!(p.inv.count_item("carbon"), before - 10);

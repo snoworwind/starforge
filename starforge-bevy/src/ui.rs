@@ -6,10 +6,10 @@ use crate::factory::{Machine, MachineKind, MachineState};
 use crate::inventory::Slot;
 use crate::player::Player;
 use crate::save::Settings;
-use crate::textures::{item_icon, Atlas, IconBuf};
+use crate::textures::{Atlas, IconBuf, item_icon};
 use crate::world::World;
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
 
 // ---------- In-game panel state ----------
@@ -36,6 +36,8 @@ pub enum Panel {
     Trade,
     Garage,
     GalaxyMap,
+    /// Bevy 原生联机（O）
+    Network,
     /// 创造物品库（P）
     Creative,
     /// 星球全息地图（M）
@@ -132,7 +134,9 @@ pub fn build_icons(
         }),
         map: HashMap::new(),
     };
-    let mut ii = IconImages { map: HashMap::new() };
+    let mut ii = IconImages {
+        map: HashMap::new(),
+    };
     let mut keys: Vec<String> = data::ITEMS.iter().map(|i| i.key.to_string()).collect();
     keys.push("laser".into());
     for key in keys {
@@ -166,9 +170,9 @@ pub fn build_icons(
 
 fn icon_to_bytes(icon: &IconBuf, size: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(size * size * 4);
-    for y in 0..size {
-        for x in 0..size {
-            out.extend_from_slice(&icon[y][x]);
+    for row in icon.iter().take(size) {
+        for pixel in row.iter().take(size) {
+            out.extend_from_slice(pixel);
         }
     }
     out
@@ -238,10 +242,10 @@ pub fn research_system(
     let mut completed: Option<String> = None;
     if let Some((id, prog)) = research.active.as_mut() {
         *prog += time.delta_secs();
-        if let Some(tech) = data::TECHS.iter().find(|t| t.id == id) {
-            if *prog >= tech.time {
-                completed = Some(id.clone());
-            }
+        if let Some(tech) = data::TECHS.iter().find(|t| t.id == id)
+            && *prog >= tech.time
+        {
+            completed = Some(id.clone());
         }
     }
     if let Some(id) = completed {
@@ -291,7 +295,8 @@ pub fn hud_system(
         return;
     }
     let screen = ctx.content_rect();
-    let flying = *mode != crate::space::FlightMode::Planet && *mode != crate::space::FlightMode::Seated;
+    let flying =
+        *mode != crate::space::FlightMode::Planet && *mode != crate::space::FlightMode::Seated;
 
     // crosshair
     egui::Area::new(egui::Id::new("crosshair"))
@@ -322,7 +327,10 @@ pub fn hud_system(
     // hotbar
     let slot_px = 48.0;
     let total = slot_px * 10.0 + 11.0 * 4.0;
-    let origin = egui::pos2(screen.center().x - total / 2.0, screen.max.y - slot_px - 24.0);
+    let origin = egui::pos2(
+        screen.center().x - total / 2.0,
+        screen.max.y - slot_px - 24.0,
+    );
     egui::Area::new(egui::Id::new("hotbar"))
         .fixed_pos(origin)
         .interactable(false)
@@ -401,10 +409,30 @@ pub fn hud_system(
                 }
                 // 细条：氧气/防护/喷气/激光
                 for (label, val, color, y) in [
-                    ("氧气", p.stats.o2, egui::Color32::from_rgb(0x5b, 0xc0, 0xff), 32.0),
-                    ("防护", p.stats.haz, egui::Color32::from_rgb(0xff, 0xb3, 0x47), 44.0),
-                    ("喷气", p.stats.jet, egui::Color32::from_rgb(0xff, 0xb3, 0x47), 56.0),
-                    ("激光", p.stats.laser, egui::Color32::from_rgb(0xff, 0x6a, 0x4d), 68.0),
+                    (
+                        "氧气",
+                        p.stats.o2,
+                        egui::Color32::from_rgb(0x5b, 0xc0, 0xff),
+                        32.0,
+                    ),
+                    (
+                        "防护",
+                        p.stats.haz,
+                        egui::Color32::from_rgb(0xff, 0xb3, 0x47),
+                        44.0,
+                    ),
+                    (
+                        "喷气",
+                        p.stats.jet,
+                        egui::Color32::from_rgb(0xff, 0xb3, 0x47),
+                        56.0,
+                    ),
+                    (
+                        "激光",
+                        p.stats.laser,
+                        egui::Color32::from_rgb(0xff, 0x6a, 0x4d),
+                        68.0,
+                    ),
                 ] {
                     painter.text(
                         egui::pos2(0.0, y + 1.0),
@@ -413,12 +441,17 @@ pub fn hud_system(
                         egui::FontId::proportional(10.0),
                         egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
                     );
-                    let r = egui::Rect::from_min_size(
-                        egui::pos2(bar_x, y),
-                        egui::vec2(170.0, 6.0),
+                    let r = egui::Rect::from_min_size(egui::pos2(bar_x, y), egui::vec2(170.0, 6.0));
+                    painter.rect_filled(
+                        r,
+                        egui::CornerRadius::same(2),
+                        egui::Color32::from_rgb(0x12, 0x32, 0x4a),
                     );
-                    painter.rect_filled(r, egui::CornerRadius::same(2), egui::Color32::from_rgb(0x12, 0x32, 0x4a));
-                    let w = (170.0 * (val / 100.0).clamp(0.0, 1.0)).max(if val > 0.0 { 2.0 } else { 0.0 });
+                    let w = (170.0 * (val / 100.0).clamp(0.0, 1.0)).max(if val > 0.0 {
+                        2.0
+                    } else {
+                        0.0
+                    });
                     painter.rect_filled(
                         egui::Rect::from_min_size(r.min, egui::vec2(w, 6.0)),
                         egui::CornerRadius::same(2),
@@ -429,23 +462,28 @@ pub fn hud_system(
             ui.add_space(80.0);
             if let Some(g) = game.as_ref() {
                 ui.label(
-                    egui::RichText::new(format!(
-                        "₪ {}   ·   {}",
-                        p.credits, g.galaxy.name
-                    ))
-                    .size(14.0)
-                    .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+                    egui::RichText::new(format!("₪ {}   ·   {}", p.credits, g.galaxy.name))
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
                 );
                 if !flying {
                     ui.label(
-                        egui::RichText::new(format!("第 {} 颗星球 · 已到访 {}", g.galaxy.planets.len(), g.galaxy_count))
-                            .size(13.0),
+                        egui::RichText::new(format!(
+                            "第 {} 颗星球 · 已到访 {}",
+                            g.galaxy.planets.len(),
+                            g.galaxy_count
+                        ))
+                        .size(13.0),
                     );
                 }
             }
             if let Some(w) = world.as_ref() {
                 let b = w.biome();
-                let haz = if b.haz_name.is_empty() { "宜居" } else { b.haz_name };
+                let haz = if b.haz_name.is_empty() {
+                    "宜居"
+                } else {
+                    b.haz_name
+                };
                 ui.label(
                     egui::RichText::new(format!(
                         "{} {}  ({:.0}, {:.0}, {:.0})",
@@ -466,7 +504,11 @@ pub fn hud_system(
             ui.label(
                 egui::RichText::new(format!("⚡ {} / {:.0} kW", power.generation, power.used))
                     .size(13.0)
-                    .color(if power.sat < 0.99 { egui::Color32::from_rgb(0xff, 0x55, 0x55) } else { egui::Color32::from_rgb(0xff, 0xb3, 0x47) }),
+                    .color(if power.sat < 0.99 {
+                        egui::Color32::from_rgb(0xff, 0x55, 0x55)
+                    } else {
+                        egui::Color32::from_rgb(0xff, 0xb3, 0x47)
+                    }),
             );
         });
 
@@ -489,16 +531,18 @@ pub fn hud_system(
                     let text = if done {
                         format!("✓ {}", q.title)
                     } else if i == qs.idx {
-                        match qs.progress(&p) {
+                        match qs.progress(p) {
                             Some(pr) => format!("▸ {} · {}", q.title, pr),
                             None => format!("▸ {}", q.title),
                         }
                     } else {
                         q.title.to_string()
                     };
-                    let mut rt = egui::RichText::new(text)
-                        .size(12.0)
-                        .color(if done { egui::Color32::from_rgb(0x7d, 0xff, 0x8a) } else { egui::Color32::WHITE });
+                    let mut rt = egui::RichText::new(text).size(12.0).color(if done {
+                        egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
+                    } else {
+                        egui::Color32::WHITE
+                    });
                     if done {
                         rt = rt.strikethrough();
                     }
@@ -523,88 +567,99 @@ pub fn hud_system(
     }
 
     // 太空 HUD
-    if flying {
-        if let Some(s) = ship.as_ref() {
-            // 速度表
-            egui::Area::new(egui::Id::new("speedo"))
-                .fixed_pos(egui::pos2(screen.center().x - 60.0, screen.max.y - 96.0))
-                .interactable(false)
-                .show(ctx, |ui| {
-                    ui.label(egui::RichText::new(format!("{:.0}", s.speed)).size(38.0).strong().color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)));
-                });
-            // 高度/大气层顶
-            let alt_text = match *mode {
-                crate::space::FlightMode::Atmo | crate::space::FlightMode::AtmoLand => {
-                    let gh = world.as_ref().map(|w| w.top_at(s.pos.x.floor() as i32, s.pos.z.floor() as i32) as f32).unwrap_or(32.0);
-                    format!("高度 {:.0}m · 大气层顶 {:.0}m", (s.pos.y - gh).max(0.0), (crate::space::EXIT_Y - s.pos.y).max(0.0))
+    if flying && let Some(s) = ship.as_ref() {
+        // 速度表
+        egui::Area::new(egui::Id::new("speedo"))
+            .fixed_pos(egui::pos2(screen.center().x - 60.0, screen.max.y - 96.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{:.0}", s.speed))
+                        .size(38.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+                );
+            });
+        // 高度/大气层顶
+        let alt_text = match *mode {
+            crate::space::FlightMode::Atmo | crate::space::FlightMode::AtmoLand => {
+                let gh = world
+                    .as_ref()
+                    .map(|w| w.top_at(s.pos.x.floor() as i32, s.pos.z.floor() as i32) as f32)
+                    .unwrap_or(32.0);
+                format!(
+                    "高度 {:.0}m · 大气层顶 {:.0}m",
+                    (s.pos.y - gh).max(0.0),
+                    (crate::space::EXIT_Y - s.pos.y).max(0.0)
+                )
+            }
+            _ => {
+                let mut nearest = "—".to_string();
+                if let Some(g) = game.as_ref() {
+                    let pv = g.planet();
+                    let d = s.pos.distance(Vec3::from(pv.pos)) - pv.radius;
+                    nearest = format!("{} · {:.0}u", pv.name, d.max(0.0));
                 }
-                _ => {
-                    let mut nearest = "—".to_string();
-                    if let Some(g) = game.as_ref() {
-                        let pv = g.planet();
-                        let d = s.pos.distance(Vec3::from(pv.pos)) - pv.radius;
-                        nearest = format!("{} · {:.0}u", pv.name, d.max(0.0));
-                    }
-                    nearest
-                }
-            };
-            egui::Area::new(egui::Id::new("pulsehint"))
-                .fixed_pos(egui::pos2(screen.max.x - 280.0, screen.max.y - 96.0))
-                .interactable(false)
-                .show(ctx, |ui| {
+                nearest
+            }
+        };
+        egui::Area::new(egui::Id::new("pulsehint"))
+            .fixed_pos(egui::pos2(screen.max.x - 280.0, screen.max.y - 96.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(alt_text)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+                );
+                if s.pulse_charge > 0.0 && s.pulse_charge < 1.0 {
                     ui.label(
-                        egui::RichText::new(alt_text)
+                        egui::RichText::new(format!("脉冲充能 {:.0}%", s.pulse_charge * 100.0))
                             .size(13.0)
                             .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
                     );
-                    if s.pulse_charge > 0.0 && s.pulse_charge < 1.0 {
-                        ui.label(
-                            egui::RichText::new(format!("脉冲充能 {:.0}%", s.pulse_charge * 100.0))
-                                .size(13.0)
-                                .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
-                        );
-                    }
-                });
-            // 氚
-            egui::Area::new(egui::Id::new("tritium"))
-                .fixed_pos(egui::pos2(60.0, screen.max.y - 96.0))
+                }
+            });
+        // 氚
+        egui::Area::new(egui::Id::new("tritium"))
+            .fixed_pos(egui::pos2(60.0, screen.max.y - 96.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(format!("◇ 氚 {}", p.inv.count_item("tritium")))
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("⟠ 曲率电池 {}", p.inv.count_item("warpcell")))
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(0xb4, 0x8c, 0xff)),
+                );
+            });
+        // 跃迁锁定
+        if let Some(g) = game.as_ref()
+            && let Some(lock) = &g.warp_lock
+        {
+            egui::Area::new(egui::Id::new("warplock"))
+                .fixed_pos(egui::pos2(screen.center().x - 120.0, 70.0))
                 .interactable(false)
                 .show(ctx, |ui| {
                     ui.label(
-                        egui::RichText::new(format!("◇ 氚 {}", p.inv.count_item("tritium")))
+                        egui::RichText::new(format!("◎ 已锁定 {}", lock.name))
                             .size(14.0)
                             .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
                     );
-                    ui.label(
-                        egui::RichText::new(format!("⟠ 曲率电池 {}", p.inv.count_item("warpcell")))
-                            .size(14.0)
-                            .color(egui::Color32::from_rgb(0xb4, 0x8c, 0xff)),
-                    );
+                    if s.pulsing && s.speed >= crate::space::WARP_ENGAGE_SPEED {
+                        ui.label(
+                            egui::RichText::new("跃迁条件满足 — 对准目标星系")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
+                        );
+                    }
                 });
-            // 跃迁锁定
-            if let Some(g) = game.as_ref() {
-                if let Some(lock) = &g.warp_lock {
-                    egui::Area::new(egui::Id::new("warplock"))
-                        .fixed_pos(egui::pos2(screen.center().x - 120.0, 70.0))
-                        .interactable(false)
-                        .show(ctx, |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("◎ 已锁定 {}", lock.name))
-                                    .size(14.0)
-                                    .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
-                            );
-                            if s.pulsing && s.speed >= crate::space::WARP_ENGAGE_SPEED {
-                                ui.label(
-                                    egui::RichText::new("跃迁条件满足 — 对准目标星系")
-                                        .size(12.0)
-                                        .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
-                                );
-                            }
-                        });
-                }
-            }
-            // 操作提示
-            egui::Area::new(egui::Id::new("flighthint"))
+        }
+        // 操作提示
+        egui::Area::new(egui::Id::new("flighthint"))
                 .fixed_pos(egui::pos2(screen.center().x - 220.0, screen.max.y - 60.0))
                 .interactable(false)
                 .show(ctx, |ui| {
@@ -619,7 +674,6 @@ pub fn hud_system(
                             .color(egui::Color32::from_rgba_unmultiplied(0xc9, 0xe6, 0xee, 0xcc)),
                     );
                 });
-        }
     }
 
     // toasts top-center
@@ -642,7 +696,10 @@ pub fn hud_system(
     // prompt (interact hint) above hotbar
     if let Some(prompt) = &ui.prompt {
         egui::Area::new(egui::Id::new("prompt"))
-            .fixed_pos(egui::pos2(screen.center().x - 120.0, screen.max.y - slot_px - 52.0))
+            .fixed_pos(egui::pos2(
+                screen.center().x - 120.0,
+                screen.max.y - slot_px - 52.0,
+            ))
             .interactable(false)
             .show(ctx, |ui| {
                 ui.label(
@@ -664,15 +721,19 @@ pub fn hud_system(
     }
 
     // research progress
-    if let Some((id, prog)) = &research.active {
-        if let Some(tech) = data::TECHS.iter().find(|t| t.id == *id) {
-            egui::Area::new(egui::Id::new("research"))
-                .fixed_pos(egui::pos2(screen.center().x - 120.0, screen.max.y - 80.0))
-                .interactable(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("研究中：{} {:.0}%", tech.name, prog / tech.time * 100.0));
-                });
-        }
+    if let Some((id, prog)) = &research.active
+        && let Some(tech) = data::TECHS.iter().find(|t| t.id == *id)
+    {
+        egui::Area::new(egui::Id::new("research"))
+            .fixed_pos(egui::pos2(screen.center().x - 120.0, screen.max.y - 80.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "研究中：{} {:.0}%",
+                    tech.name,
+                    prog / tech.time * 100.0
+                ));
+            });
     }
 
     // 对话箱（主线/支线/站内）
@@ -686,13 +747,12 @@ pub fn hud_system(
             dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
         }
     }
-    if dialog.is_none() {
-        if let Some(st) = station.as_ref() {
-            if let Some(d) = &st.dlg {
-                let cur = &d.lines[d.idx];
-                dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
-            }
-        }
+    if dialog.is_none()
+        && let Some(st) = station.as_ref()
+        && let Some(d) = &st.dlg
+    {
+        let cur = &d.lines[d.idx];
+        dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
     }
     if let Some((name, text, chars, total)) = dialog {
         let shown: String = text.chars().take(chars).collect();
@@ -702,8 +762,13 @@ pub fn hud_system(
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_unmultiplied(0x06, 0x0d, 0x16, 0xf0))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x0e, 0x6d, 0x78)))
+                    .fill(egui::Color32::from_rgba_unmultiplied(
+                        0x06, 0x0d, 0x16, 0xf0,
+                    ))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(0x0e, 0x6d, 0x78),
+                    ))
                     .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
                         ui.set_min_width(616.0);
@@ -731,7 +796,10 @@ pub fn hud_system(
     // 大字提示
     if let Some((title, sub, _t)) = &ui.big {
         egui::Area::new(egui::Id::new("bigmsg"))
-            .fixed_pos(egui::pos2(screen.center().x - 300.0, screen.height() * 0.30))
+            .fixed_pos(egui::pos2(
+                screen.center().x - 300.0,
+                screen.height() * 0.30,
+            ))
             .interactable(false)
             .show(ctx, |ui| {
                 ui.set_width(600.0);
@@ -944,19 +1012,19 @@ fn slot_button_ex(
         } else {
             Some(key.to_string())
         };
-        if let Some(ik) = &item_key {
-            if let Some(it) = data::item_by_key(ik) {
-                let cat = match it.cat {
-                    "res" => "资源",
-                    "mat" => "材料",
-                    "blk" => "方块",
-                    _ => "机器",
-                };
-                resp.clone().on_hover_text(format!(
-                    "{}\n{} · 基准价 ₪{}\n{}",
-                    it.name, cat, it.price, it.desc
-                ));
-            }
+        if let Some(ik) = &item_key
+            && let Some(it) = data::item_by_key(ik)
+        {
+            let cat = match it.cat {
+                "res" => "资源",
+                "mat" => "材料",
+                "blk" => "方块",
+                _ => "机器",
+            };
+            resp.clone().on_hover_text(format!(
+                "{}\n{} · 基准价 ₪{}\n{}",
+                it.name, cat, it.price, it.desc
+            ));
         }
     }
     let shift = ui.input(|i| i.modifiers.shift);
@@ -993,13 +1061,19 @@ pub fn inventory_panel_system(
 
     // snapshot
     let credits = player.single().map(|p| p.credits).unwrap_or(0);
-    let inv_snapshot = player.single().map(|p| p.inv.slots.clone()).unwrap_or_default();
+    let inv_snapshot = player
+        .single()
+        .map(|p| p.inv.slots.clone())
+        .unwrap_or_default();
     let stats_snap = player
         .single()
         .map(|p| p.stats.clone())
         .unwrap_or_else(|_| crate::player::Stats::full());
     let cursor_snap = ui_state.cursor.clone();
-    let drop_mult = player.single().map(|p| p.difficulty.drop_mult()).unwrap_or(1.0);
+    let drop_mult = player
+        .single()
+        .map(|p| p.difficulty.drop_mult())
+        .unwrap_or(1.0);
 
     egui::Window::new("◈ 外骨骼背包")
         .default_size([760.0, 500.0])
@@ -1031,8 +1105,12 @@ pub fn inventory_panel_system(
                     .num_columns(9)
                     .spacing([4.0, 4.0])
                     .show(&mut cols[0], |ui| {
-                        for i in 0..crate::inventory::HOTBAR {
-                            let s = inv_snapshot[i].clone();
+                        for (i, s) in inv_snapshot
+                            .iter()
+                            .enumerate()
+                            .take(crate::inventory::HOTBAR)
+                        {
+                            let s = s.clone();
                             let key = s.as_ref().map(|s| s.item.as_str()).unwrap_or("");
                             let r = slot_button_ex(ui, &cache, key, &s, false, 40.0, true);
                             if r.clicked && !r.shift {
@@ -1050,8 +1128,13 @@ pub fn inventory_panel_system(
                     .num_columns(9)
                     .spacing([4.0, 4.0])
                     .show(&mut cols[0], |ui| {
-                        for i in crate::inventory::HOTBAR..36 {
-                            let s = inv_snapshot[i].clone();
+                        for (i, s) in inv_snapshot
+                            .iter()
+                            .enumerate()
+                            .take(36)
+                            .skip(crate::inventory::HOTBAR)
+                        {
+                            let s = s.clone();
                             let key = s.as_ref().map(|s| s.item.as_str()).unwrap_or("");
                             let r = slot_button_ex(ui, &cache, key, &s, false, 40.0, true);
                             if r.clicked && !r.shift {
@@ -1221,7 +1304,9 @@ pub fn inventory_panel_system(
         }
     }
     // 应用槽位操作
-    let Ok(mut p) = player.single_mut() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     for a in actions {
         match a {
             InvAction::Left(i) => {
@@ -1243,10 +1328,16 @@ pub fn inventory_panel_system(
                             let stack = data::item_by_key(&c.item).map(|i| i.stack).unwrap_or(250);
                             let add = (stack - s.n).min(c.n);
                             if add > 0 {
-                                p.inv.slots[i] = Some(Slot { item: s.item, n: s.n + add });
+                                p.inv.slots[i] = Some(Slot {
+                                    item: s.item,
+                                    n: s.n + add,
+                                });
                                 let left = c.n - add;
                                 if left > 0 {
-                                    ui_state.cursor = Some(Slot { item: c.item, n: left });
+                                    ui_state.cursor = Some(Slot {
+                                        item: c.item,
+                                        n: left,
+                                    });
                                 }
                                 audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                             } else {
@@ -1272,8 +1363,14 @@ pub fn inventory_panel_system(
                                 p.inv.slots[i] = None;
                             } else {
                                 let half = (s.n as f32 / 2.0).ceil() as i32;
-                                ui_state.cursor = Some(Slot { item: s.item.clone(), n: half });
-                                p.inv.slots[i] = Some(Slot { item: s.item, n: s.n - half });
+                                ui_state.cursor = Some(Slot {
+                                    item: s.item.clone(),
+                                    n: half,
+                                });
+                                p.inv.slots[i] = Some(Slot {
+                                    item: s.item,
+                                    n: s.n - half,
+                                });
                             }
                             audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                         }
@@ -1282,7 +1379,10 @@ pub fn inventory_panel_system(
                         None => {
                             // 放 1 个
                             let n = c.n - 1;
-                            p.inv.slots[i] = Some(Slot { item: c.item.clone(), n: 1 });
+                            p.inv.slots[i] = Some(Slot {
+                                item: c.item.clone(),
+                                n: 1,
+                            });
                             if n > 0 {
                                 ui_state.cursor = Some(Slot { item: c.item, n });
                             }
@@ -1291,10 +1391,16 @@ pub fn inventory_panel_system(
                         Some(s) if s.item == c.item => {
                             let stack = data::item_by_key(&c.item).map(|i| i.stack).unwrap_or(250);
                             if s.n < stack {
-                                p.inv.slots[i] = Some(Slot { item: s.item, n: s.n + 1 });
+                                p.inv.slots[i] = Some(Slot {
+                                    item: s.item,
+                                    n: s.n + 1,
+                                });
                                 let left = c.n - 1;
                                 if left > 0 {
-                                    ui_state.cursor = Some(Slot { item: c.item, n: left });
+                                    ui_state.cursor = Some(Slot {
+                                        item: c.item,
+                                        n: left,
+                                    });
                                 }
                                 audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                             } else {
@@ -1314,7 +1420,9 @@ pub fn inventory_panel_system(
                 } else {
                     (0..crate::inventory::HOTBAR).collect()
                 };
-                let Some(s) = p.inv.slots[i].clone() else { continue };
+                let Some(s) = p.inv.slots[i].clone() else {
+                    continue;
+                };
                 let stack = data::item_by_key(&s.item).map(|i| i.stack).unwrap_or(250);
                 // 先合并到部分堆
                 let mut moved = 0;
@@ -1322,12 +1430,13 @@ pub fn inventory_panel_system(
                     if moved >= s.n {
                         break;
                     }
-                    if let Some(ts) = &mut p.inv.slots[*t] {
-                        if ts.item == s.item && ts.n < stack {
-                            let add = (stack - ts.n).min(s.n - moved);
-                            ts.n += add;
-                            moved += add;
-                        }
+                    if let Some(ts) = &mut p.inv.slots[*t]
+                        && ts.item == s.item
+                        && ts.n < stack
+                    {
+                        let add = (stack - ts.n).min(s.n - moved);
+                        ts.n += add;
+                        moved += add;
                     }
                 }
                 // 再放入空格
@@ -1337,14 +1446,20 @@ pub fn inventory_panel_system(
                     }
                     if p.inv.slots[*t].is_none() {
                         let add = (s.n - moved).min(stack);
-                        p.inv.slots[*t] = Some(Slot { item: s.item.clone(), n: add });
+                        p.inv.slots[*t] = Some(Slot {
+                            item: s.item.clone(),
+                            n: add,
+                        });
                         moved += add;
                     }
                 }
                 if moved > 0 {
                     let left = s.n - moved;
                     if left > 0 {
-                        p.inv.slots[i] = Some(Slot { item: s.item, n: left });
+                        p.inv.slots[i] = Some(Slot {
+                            item: s.item,
+                            n: left,
+                        });
                     } else {
                         p.inv.slots[i] = None;
                     }
@@ -1397,7 +1512,9 @@ pub fn inventory_panel_system(
             audio::play(&mut commands, sfx.craft.clone(), 0.6, None);
             p.toast(format!(
                 "合成：{} ×{}",
-                data::item_by_key(r.output.0).map(|i| i.name).unwrap_or(r.output.0),
+                data::item_by_key(r.output.0)
+                    .map(|i| i.name)
+                    .unwrap_or(r.output.0),
                 crafted
             ));
         } else {
@@ -1439,7 +1556,10 @@ pub fn tech_panel_system(
     }
     let mut close = false;
     let mut start: Option<&'static str> = None;
-    let inv_snapshot = player.single().map(|p| p.inv.slots.clone()).unwrap_or_default();
+    let inv_snapshot = player
+        .single()
+        .map(|p| p.inv.slots.clone())
+        .unwrap_or_default();
 
     egui::Window::new("科技树")
         .default_size([1020.0, 520.0])
@@ -1450,13 +1570,17 @@ pub fn tech_panel_system(
             if ui.button("✕ 关闭 (T)").clicked() {
                 close = true;
             }
-            let data_n = player.single().map(|p| p.inv.count_item("data")).unwrap_or(0);
+            let data_n = player
+                .single()
+                .map(|p| p.inv.count_item("data"))
+                .unwrap_or(0);
             ui.label(
                 egui::RichText::new(format!("⬡ 研究数据 ×{data_n}"))
                     .size(14.0)
                     .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
             );
-            let (resp, painter) = ui.allocate_painter(egui::vec2(990.0, 440.0), egui::Sense::hover());
+            let (resp, painter) =
+                ui.allocate_painter(egui::vec2(990.0, 440.0), egui::Sense::hover());
             let origin = resp.rect.min + egui::vec2(30.0, 170.0);
             // 连线三态配色（JS: done #7dff8a66 / req 完成 #ffb34766 / 锁定 #24405a，非 done 虚线 6 4）
             for t in data::TECHS {
@@ -1467,9 +1591,15 @@ pub fn tech_panel_system(
                         let t_done = research.techs.iter().any(|x| x == t.id) || t.unlocked;
                         let req_done = research.techs.iter().any(|x| x == *req);
                         let (color, dash) = if t_done {
-                            (egui::Color32::from_rgba_unmultiplied(0x7d, 0xff, 0x8a, 0x40), 0.0)
+                            (
+                                egui::Color32::from_rgba_unmultiplied(0x7d, 0xff, 0x8a, 0x40),
+                                0.0,
+                            )
                         } else if req_done {
-                            (egui::Color32::from_rgba_unmultiplied(0xff, 0xb3, 0x47, 0x40), 6.0)
+                            (
+                                egui::Color32::from_rgba_unmultiplied(0xff, 0xb3, 0x47, 0x40),
+                                6.0,
+                            )
                         } else {
                             (egui::Color32::from_rgb(0x24, 0x40, 0x5a), 6.0)
                         };
@@ -1504,12 +1634,15 @@ pub fn tech_panel_system(
                     rect,
                     egui::CornerRadius::same(6),
                     egui::Stroke::new(1.5, egui::Color32::from_rgb(0x4a, 0x5a, 0x6a)),
-                egui::StrokeKind::Inside,
-            );
+                    egui::StrokeKind::Inside,
+                );
                 let tex = egui_icon(&cache, t.icon);
                 painter.image(
                     tex,
-                    egui::Rect::from_min_size(rect.min + egui::vec2(5.0, 5.0), egui::vec2(28.0, 28.0)),
+                    egui::Rect::from_min_size(
+                        rect.min + egui::vec2(5.0, 5.0),
+                        egui::vec2(28.0, 28.0),
+                    ),
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
@@ -1525,7 +1658,13 @@ pub fn tech_panel_system(
                 } else {
                     t.cost
                         .iter()
-                        .map(|(i, n)| format!("{}×{}", data::item_by_key(i).map(|i| i.name).unwrap_or(i), n))
+                        .map(|(i, n)| {
+                            format!(
+                                "{}×{}",
+                                data::item_by_key(i).map(|i| i.name).unwrap_or(i),
+                                n
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(" ")
                 };
@@ -1536,12 +1675,26 @@ pub fn tech_panel_system(
                     egui::FontId::proportional(11.0),
                     egui::Color32::from_rgb(0xca, 0xd2, 0xda),
                 );
-                let in_research = research.active.as_ref().map(|(id, _)| id == t.id).unwrap_or(false);
+                let in_research = research
+                    .active
+                    .as_ref()
+                    .map(|(id, _)| id == t.id)
+                    .unwrap_or(false);
                 if !researched && req_met && !in_research {
-                    let btn_rect =
-                        egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 46.0), egui::vec2(130.0, 18.0));
-                    let resp = ui.interact(btn_rect, egui::Id::new(("tech", t.id)), egui::Sense::click());
-                    painter.rect_filled(btn_rect, egui::CornerRadius::same(3), egui::Color32::from_rgb(0x2e, 0x55, 0x6e));
+                    let btn_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(0.0, 46.0),
+                        egui::vec2(130.0, 18.0),
+                    );
+                    let resp = ui.interact(
+                        btn_rect,
+                        egui::Id::new(("tech", t.id)),
+                        egui::Sense::click(),
+                    );
+                    painter.rect_filled(
+                        btn_rect,
+                        egui::CornerRadius::same(3),
+                        egui::Color32::from_rgb(0x2e, 0x55, 0x6e),
+                    );
                     painter.text(
                         btn_rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -1602,7 +1755,9 @@ pub fn machine_panel_system(
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
 ) {
-    let Panel::Machine(e) = ui_state.panel else { return };
+    let Panel::Machine(e) = ui_state.panel else {
+        return;
+    };
     let Some((m, _)) = q.get(e).ok() else {
         ui_state.panel = Panel::None;
         return;
@@ -1618,7 +1773,10 @@ pub fn machine_panel_system(
     let mut open = true;
 
     // 快照
-    let inv_snapshot = player.single().map(|p| p.inv.slots.clone()).unwrap_or_default();
+    let inv_snapshot = player
+        .single()
+        .map(|p| p.inv.slots.clone())
+        .unwrap_or_default();
     let sel_info = ui_state
         .selected_inv
         .and_then(|i| inv_snapshot.get(i).cloned().flatten());
@@ -1641,23 +1799,46 @@ pub fn machine_panel_system(
                 Some(MachineState::Furnace(f)) => {
                     ui.horizontal(|ui| {
                         ui.label("燃料:");
-                        draw_slot(ui, &cache, f.fuel.as_ref().map(|s| s.item.as_str()).unwrap_or(""), f.fuel.clone(), false, 40.0);
+                        draw_slot(
+                            ui,
+                            &cache,
+                            f.fuel.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
+                            f.fuel.clone(),
+                            false,
+                            40.0,
+                        );
                         ui.label(format!("{:.1}s {}", f.burn, if f.on { "🔥" } else { "" }));
                     });
                     ui.horizontal(|ui| {
                         ui.label("输入:");
-                        draw_slot(ui, &cache, f.input.as_ref().map(|s| s.item.as_str()).unwrap_or(""), f.input.clone(), false, 40.0);
+                        draw_slot(
+                            ui,
+                            &cache,
+                            f.input.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
+                            f.input.clone(),
+                            false,
+                            40.0,
+                        );
                         ui.label("输出:");
-                        draw_slot(ui, &cache, f.output.as_ref().map(|s| s.item.as_str()).unwrap_or(""), f.output.clone(), false, 40.0);
+                        draw_slot(
+                            ui,
+                            &cache,
+                            f.output.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
+                            f.output.clone(),
+                            false,
+                            40.0,
+                        );
                     });
-                    if let Some(rid) = f.recipe {
-                        if let Some(r) = data::RECIPES.iter().find(|r| r.id == rid) {
-                            ui.label(format!(
-                                "烧炼中：{} {:.0}%",
-                                data::item_by_key(r.output.0).map(|i| i.name).unwrap_or(r.output.0),
-                                f.prog / r.time * 100.0
-                            ));
-                        }
+                    if let Some(rid) = f.recipe
+                        && let Some(r) = data::RECIPES.iter().find(|r| r.id == rid)
+                    {
+                        ui.label(format!(
+                            "烧炼中：{} {:.0}%",
+                            data::item_by_key(r.output.0)
+                                .map(|i| i.name)
+                                .unwrap_or(r.output.0),
+                            f.prog / r.time * 100.0
+                        ));
                     }
                     if let Some(sel) = &sel_info {
                         ui.label(format!("选中：{} ×{}", item_name(&sel.item), sel.n));
@@ -1695,9 +1876,17 @@ pub fn machine_panel_system(
                     }
                 }
                 Some(MachineState::Miner(mn)) => {
-                    ui.label(if m.active { "⛏ 开采中" } else { "⏸ 待机" });
-                    if mn.output.is_some() {
-                        ui.label(format!("产出：{} ×{}", item_name(mn.output.as_ref().unwrap().item.as_str()), mn.output.as_ref().unwrap().n));
+                    ui.label(if m.active {
+                        "⛏ 开采中"
+                    } else {
+                        "⏸ 待机"
+                    });
+                    if let Some(output) = &mn.output {
+                        ui.label(format!(
+                            "产出：{} ×{}",
+                            item_name(output.item.as_str()),
+                            output.n
+                        ));
                     }
                     ui.label(format!("矿脉消耗：{}/300", mn.deposit));
                     if ui.button("📤 取出产出").clicked() {
@@ -1706,7 +1895,11 @@ pub fn machine_panel_system(
                 }
                 Some(MachineState::Crafter(cr)) => {
                     // 配方选择（装配机含便携配方，JS where:'both' 语义）
-                    let where_ = if kind == MachineKind::Refinery { "refinery" } else { "assembler" };
+                    let where_ = if kind == MachineKind::Refinery {
+                        "refinery"
+                    } else {
+                        "assembler"
+                    };
                     let mut current = cr.recipe.unwrap_or("");
                     let avail: Vec<&'static data::Recipe> = data::RECIPES
                         .iter()
@@ -1717,11 +1910,21 @@ pub fn machine_panel_system(
                         })
                         .collect();
                     egui::ComboBox::from_id_salt("recipe_pick")
-                        .selected_text(if current.is_empty() { "选择配方".to_string() } else { current.to_string() })
+                        .selected_text(if current.is_empty() {
+                            "选择配方".to_string()
+                        } else {
+                            current.to_string()
+                        })
                         .show_ui(ui, |ui| {
                             for r in &avail {
-                                let out_name = data::item_by_key(r.output.0).map(|i| i.name).unwrap_or(r.output.0);
-                                ui.selectable_value(&mut current, r.id, format!("{} → {} ×{}", recipe_in_str(r), out_name, r.output.1));
+                                let out_name = data::item_by_key(r.output.0)
+                                    .map(|i| i.name)
+                                    .unwrap_or(r.output.0);
+                                ui.selectable_value(
+                                    &mut current,
+                                    r.id,
+                                    format!("{} → {} ×{}", recipe_in_str(r), out_name, r.output.1),
+                                );
                             }
                         });
                     if current != cr.recipe.unwrap_or("") {
@@ -1734,23 +1937,40 @@ pub fn machine_panel_system(
                         }
                         ui.label(format!("原料：{}", parts.join(" ")));
                     }
-                    ui.label(format!("进度 {:.0}% · {}", cr.prog * 100.0, if m.active { "⚙ 运行中" } else { "⏸ 待机" }));
-                    if cr.output.is_some() {
-                        ui.label(format!("产出：{} ×{}", item_name(cr.output.as_ref().unwrap().item.as_str()), cr.output.as_ref().unwrap().n));
-                    }
-                    if let Some(sel) = &sel_info {
-                        if ui.button("📥 投入选中物品").clicked() {
-                            actions.push(MachinePanelAction::InsertInput);
+                    ui.label(format!(
+                        "进度 {:.0}% · {}",
+                        cr.prog * 100.0,
+                        if m.active {
+                            "⚙ 运行中"
+                        } else {
+                            "⏸ 待机"
                         }
+                    ));
+                    if let Some(output) = &cr.output {
+                        ui.label(format!(
+                            "产出：{} ×{}",
+                            item_name(output.item.as_str()),
+                            output.n
+                        ));
+                    }
+                    if let Some(_sel) = &sel_info
+                        && ui.button("📥 投入选中物品").clicked()
+                    {
+                        actions.push(MachinePanelAction::InsertInput);
                     }
                     if ui.button("📤 取出产出").clicked() {
                         actions.push(MachinePanelAction::TakeOutput);
                     }
                 }
                 Some(MachineState::Reactor(r)) => {
-                    ui.label(format!("铀燃料余量：{:.1}s {}", r.fuel, if m.active { "☢ 发电中" } else { "" }));
+                    ui.label(format!(
+                        "铀燃料余量：{:.1}s {}",
+                        r.fuel,
+                        if m.active { "☢ 发电中" } else { "" }
+                    ));
                     if let Some(sel) = &sel_info {
-                        if sel.item == "uranium" && ui.button("☢ 投料铀-235（+60s）").clicked() {
+                        if sel.item == "uranium" && ui.button("☢ 投料铀-235（+60s）").clicked()
+                        {
                             actions.push(MachinePanelAction::InsertInput);
                         }
                     } else {
@@ -1760,13 +1980,24 @@ pub fn machine_panel_system(
                 Some(MachineState::Burner(b)) => {
                     ui.horizontal(|ui| {
                         ui.label("燃料:");
-                        draw_slot(ui, &cache, b.fuel.as_ref().map(|s| s.item.as_str()).unwrap_or(""), b.fuel.clone(), false, 40.0);
-                        ui.label(format!("{:.1}s {}", b.burn, if m.active { "⚡ 发电中" } else { "" }));
+                        draw_slot(
+                            ui,
+                            &cache,
+                            b.fuel.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
+                            b.fuel.clone(),
+                            false,
+                            40.0,
+                        );
+                        ui.label(format!(
+                            "{:.1}s {}",
+                            b.burn,
+                            if m.active { "⚡ 发电中" } else { "" }
+                        ));
                     });
-                    if let Some(sel) = &sel_info {
-                        if ui.button("⛽ 放入燃料").clicked() {
-                            actions.push(MachinePanelAction::InsertFuel);
-                        }
+                    if let Some(_sel) = &sel_info
+                        && ui.button("⛽ 放入燃料").clicked()
+                    {
+                        actions.push(MachinePanelAction::InsertFuel);
                     }
                 }
                 Some(MachineState::Belt(b)) => {
@@ -1790,15 +2021,26 @@ pub fn machine_panel_system(
                     if lb.deliver_t > 0.0 {
                         ui.label(format!("返航中… {:.1}s", lb.deliver_t));
                     } else {
-                        ui.label(if m.active { "⛏ 巡林伐木中" } else { "⏸ 待机" });
+                        ui.label(if m.active {
+                            "⛏ 巡林伐木中"
+                        } else {
+                            "⏸ 待机"
+                        });
                     }
                 }
                 Some(MachineState::Medbay(_)) => {
-                    ui.label(if m.active { "✚ 治疗中" } else { "⏸ 待机" });
+                    ui.label(if m.active {
+                        "✚ 治疗中"
+                    } else {
+                        "⏸ 待机"
+                    });
                     ui.label("站近自动治疗：每消耗 1 钠 + 1 氧气回复 3 生命");
                 }
                 _ => {
-                    if matches!(kind, MachineKind::Solar | MachineKind::Wind | MachineKind::Launchpad) {
+                    if matches!(
+                        kind,
+                        MachineKind::Solar | MachineKind::Wind | MachineKind::Launchpad
+                    ) {
                         ui.label("该机器自动运行，无需操作。");
                     } else {
                         ui.label("该机器暂无面板。");
@@ -1808,9 +2050,18 @@ pub fn machine_panel_system(
             ui.add_space(6.0);
             ui.separator();
             ui.label(
-                egui::RichText::new(format!("⚡ 电网：发电 {} kW / 用电 {:.1} kW / 满足率 {:.0}%", power.generation, power.used, power.sat * 100.0))
-                    .size(13.0)
-                    .color(if power.sat < 0.99 { egui::Color32::from_rgb(0xff, 0x55, 0x55) } else { egui::Color32::from_rgb(0xff, 0xb3, 0x47) }),
+                egui::RichText::new(format!(
+                    "⚡ 电网：发电 {} kW / 用电 {:.1} kW / 满足率 {:.0}%",
+                    power.generation,
+                    power.used,
+                    power.sat * 100.0
+                ))
+                .size(13.0)
+                .color(if power.sat < 0.99 {
+                    egui::Color32::from_rgb(0xff, 0x55, 0x55)
+                } else {
+                    egui::Color32::from_rgb(0xff, 0xb3, 0x47)
+                }),
             );
             // 外骨骼背包（JS：机器面板内嵌 36 格背包；Shift+点击 直接放入机器）
             ui.separator();
@@ -1823,8 +2074,8 @@ pub fn machine_panel_system(
                 .num_columns(9)
                 .spacing([4.0, 4.0])
                 .show(ui, |ui| {
-                    for i in 0..36 {
-                        let s = inv_snapshot[i].clone();
+                    for (i, s) in inv_snapshot.iter().enumerate().take(36) {
+                        let s = s.clone();
                         let key = s.as_ref().map(|s| s.item.as_str()).unwrap_or("");
                         let is_sel = ui_state.selected_inv == Some(i);
                         let (rect, resp) =
@@ -1852,7 +2103,10 @@ pub fn machine_panel_system(
                                     rect.min + egui::vec2(3.0, 3.0),
                                     rect.max - egui::vec2(3.0, 3.0),
                                 ),
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
                                 egui::Color32::WHITE,
                             );
                         }
@@ -1889,34 +2143,38 @@ pub fn machine_panel_system(
     if actions.is_empty() {
         return;
     }
-    let Ok(mut p) = player.single_mut() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     let mclone = q.get(e).map(|(m, _)| m.clone()).unwrap();
-    let Ok((_m, mut st)) = q.get_mut(e) else { return };
+    let Ok((_m, mut st)) = q.get_mut(e) else {
+        return;
+    };
     for a in actions {
         match a {
             MachinePanelAction::InsertFuel => {
-                if let Some(i) = ui_state.selected_inv {
-                    if let Some(s) = p.inv.slots[i].clone() {
-                        if data::fuel_value(&s.item) > 0.0 {
-                            if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
-                                p.inv.remove_item(&s.item, 1);
-                                audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-                            }
-                        } else {
-                            p.toast("不是燃料");
+                if let Some(i) = ui_state.selected_inv
+                    && let Some(s) = p.inv.slots[i].clone()
+                {
+                    if data::fuel_value(&s.item) > 0.0 {
+                        if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
+                            p.inv.remove_item(&s.item, 1);
+                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                         }
+                    } else {
+                        p.toast("不是燃料");
                     }
                 }
             }
             MachinePanelAction::InsertInput => {
-                if let Some(i) = ui_state.selected_inv {
-                    if let Some(s) = p.inv.slots[i].clone() {
-                        if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
-                            p.inv.remove_item(&s.item, 1);
-                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-                        } else {
-                            p.toast("机器不接受该物品");
-                        }
+                if let Some(i) = ui_state.selected_inv
+                    && let Some(s) = p.inv.slots[i].clone()
+                {
+                    if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
+                        p.inv.remove_item(&s.item, 1);
+                        audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+                    } else {
+                        p.toast("机器不接受该物品");
                     }
                 }
             }
@@ -1978,13 +2236,12 @@ pub fn machine_panel_system(
                 }
             }
             MachinePanelAction::ChestPut => {
-                if let Some(i) = ui_state.selected_inv {
-                    if let Some(s) = p.inv.slots[i].clone() {
-                        if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
-                            p.inv.remove_item(&s.item, 1);
-                            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-                        }
-                    }
+                if let Some(i) = ui_state.selected_inv
+                    && let Some(s) = p.inv.slots[i].clone()
+                    && crate::factory::machine_insert(&mclone, &mut st, &s.item)
+                {
+                    p.inv.remove_item(&s.item, 1);
+                    audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                 }
             }
             MachinePanelAction::SetRecipe(id) => {
@@ -1996,25 +2253,32 @@ pub fn machine_panel_system(
                         mclone.pos[1] as f32 + 1.2,
                         mclone.pos[2] as f32 + 0.5,
                     );
-                    let mut refund_one = |p: &mut Player, commands: &mut Commands, item: String, n: i32| {
-                        let added = p.inv.add_item(&item, n);
-                        let left = n - added;
-                        if left > 0 {
-                            crate::creatures::spawn_drop(
-                                commands, &world, &icons, drop_pos, Vec3::ZERO, item, left, 0.4,
-                            );
-                        }
-                    };
+                    let refund_one =
+                        |p: &mut Player, commands: &mut Commands, item: String, n: i32| {
+                            let added = p.inv.add_item(&item, n);
+                            let left = n - added;
+                            if left > 0 {
+                                crate::creatures::spawn_drop(
+                                    commands,
+                                    &world,
+                                    &icons,
+                                    drop_pos,
+                                    Vec3::ZERO,
+                                    item,
+                                    left,
+                                    0.4,
+                                );
+                            }
+                        };
                     for (k, v) in cr.input.drain() {
                         refund_one(&mut p, &mut commands, k, v);
                     }
-                    if cr.prog > 0.0 {
-                        if let Some(rid) = cr.recipe {
-                            if let Some(r) = data::RECIPES.iter().find(|r| r.id == rid) {
-                                for (i, n) in r.inputs {
-                                    refund_one(&mut p, &mut commands, i.to_string(), *n);
-                                }
-                            }
+                    if cr.prog > 0.0
+                        && let Some(rid) = cr.recipe
+                        && let Some(r) = data::RECIPES.iter().find(|r| r.id == rid)
+                    {
+                        for (i, n) in r.inputs {
+                            refund_one(&mut p, &mut commands, i.to_string(), *n);
                         }
                     }
                     if let Some(o) = cr.output.take() {
@@ -2067,9 +2331,16 @@ fn chest_grid(
         .num_columns(6)
         .spacing([4.0, 4.0])
         .show(ui, |ui| {
-            for i in 0..slots.len() {
-                let s = slots[i].clone();
-                if slot_button(ui, cache, s.as_ref().map(|s| s.item.as_str()).unwrap_or(""), &s, false, 42.0) {
+            for (i, s) in slots.iter().enumerate() {
+                let s = s.clone();
+                if slot_button(
+                    ui,
+                    cache,
+                    s.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
+                    &s,
+                    false,
+                    42.0,
+                ) {
                     actions.push(MachinePanelAction::ChestTake(i));
                 }
                 if (i + 1) % 6 == 0 {
@@ -2198,7 +2469,11 @@ pub fn pause_panel_system(
     egui::CentralPanel::default().show(&mut root, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.label(egui::RichText::new("STARFORGE · 星穹熔炉").size(32.0).strong());
+            ui.label(
+                egui::RichText::new("STARFORGE · 星穹熔炉")
+                    .size(32.0)
+                    .strong(),
+            );
             ui.label(egui::RichText::new("Bevy 移植版").size(16.0));
             ui.add_space(24.0);
             if ui.button("▶ 继续游戏 (Esc)").clicked() {
@@ -2210,10 +2485,12 @@ pub fn pause_panel_system(
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("渲染距离 (区块)");
-                if ui.add(egui::Slider::new(&mut settings.view_dist, 3..=16)).changed() {
-                    if let Some(mut w) = world {
-                        w.view_dist = settings.view_dist;
-                    }
+                if ui
+                    .add(egui::Slider::new(&mut settings.view_dist, 3..=16))
+                    .changed()
+                    && let Some(mut w) = world
+                {
+                    w.view_dist = settings.view_dist;
                 }
             });
             ui.horizontal(|ui| {
@@ -2222,13 +2499,25 @@ pub fn pause_panel_system(
             });
             ui.horizontal(|ui| {
                 ui.label("音量");
-                if ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0)).changed() {
+                if ui
+                    .add(egui::Slider::new(&mut settings.volume, 0.0..=1.0))
+                    .changed()
+                {
                     crate::audio::set_master_volume(settings.volume);
                     let _ = crate::save::save_settings(&settings);
                 }
             });
             ui.checkbox(&mut settings.show_fps, "显示 FPS");
-            if ui.checkbox(&mut settings.pixelated, "像素风渲染（重启生效）").changed() {
+            if ui
+                .checkbox(&mut settings.pixelated, "像素风渲染（重启生效）")
+                .changed()
+            {
+                let _ = crate::save::save_settings(&settings);
+            }
+            let mut climate_changed = false;
+            climate_changed |= ui.checkbox(&mut settings.clouds, "体积云层").changed();
+            climate_changed |= ui.checkbox(&mut settings.weather, "生态天气粒子").changed();
+            if climate_changed {
                 let _ = crate::save::save_settings(&settings);
             }
             ui.add_space(8.0);
@@ -2240,7 +2529,11 @@ pub fn pause_panel_system(
                 pos.z,
                 (day.0).floor() as i32 + 1
             ));
-            ui.label(format!("已解锁科技：{} / {}", research.techs.len(), data::TECHS.len()));
+            ui.label(format!(
+                "已解锁科技：{} / {}",
+                research.techs.len(),
+                data::TECHS.len()
+            ));
             ui.add_space(16.0);
             if ui.button("🏠 保存并返回主菜单").clicked() {
                 do_save = true;
@@ -2269,10 +2562,7 @@ pub struct SaveEvent;
 pub struct QuitToMenuEvent;
 
 /// Handle F5 quicksave（JS：任意时刻可存档）。
-pub fn quicksave_system(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut save_ev: MessageWriter<SaveEvent>,
-) {
+pub fn quicksave_system(keys: Res<ButtonInput<KeyCode>>, mut save_ev: MessageWriter<SaveEvent>) {
     if keys.just_pressed(KeyCode::F5) {
         save_ev.write(SaveEvent);
     }
@@ -2325,11 +2615,11 @@ pub fn panel_hotkeys_system(
                 return;
             }
         }
-        if let Some(st) = station.as_deref_mut() {
-            if st.dlg.is_some() {
-                st.dlg = None;
-                return;
-            }
+        if let Some(st) = station.as_deref_mut()
+            && st.dlg.is_some()
+        {
+            st.dlg = None;
+            return;
         }
         let was_locked = ui_state.locked();
         match ui_state.panel {
@@ -2364,21 +2654,31 @@ pub fn panel_hotkeys_system(
             audio::play(&mut commands, sfx.click.clone(), 0.5, None);
         }
     }
-    if keys.just_pressed(KeyCode::KeyT) && !ui_state.locked() && *mode == crate::space::FlightMode::Planet {
+    if keys.just_pressed(KeyCode::KeyT)
+        && !ui_state.locked()
+        && *mode == crate::space::FlightMode::Planet
+    {
         ui_state.panel = Panel::Tech;
+    }
+    // O：Bevy 原生联机面板
+    if keys.just_pressed(KeyCode::KeyO) && !ui_state.locked() {
+        ui_state.panel = Panel::Network;
+        ui_state.selected_inv = None;
+        audio::play(&mut commands, sfx.click.clone(), 0.5, None);
     }
     // P：创造物品库（JS: creative && (planet|space)）
     if keys.just_pressed(KeyCode::KeyP)
         && !ui_state.locked()
-        && matches!(*mode, crate::space::FlightMode::Planet | crate::space::FlightMode::Space)
+        && matches!(
+            *mode,
+            crate::space::FlightMode::Planet | crate::space::FlightMode::Space
+        )
+        && let Ok(p) = player.single()
+        && p.creative()
     {
-        if let Ok(p) = player.single() {
-            if p.creative() {
-                ui_state.panel = Panel::Creative;
-                ui_state.selected_inv = None;
-                audio::play(&mut commands, sfx.click.clone(), 0.5, None);
-            }
-        }
+        ui_state.panel = Panel::Creative;
+        ui_state.selected_inv = None;
+        audio::play(&mut commands, sfx.click.clone(), 0.5, None);
     }
     // M：星球地图（planet/seated/atmo）
     if keys.just_pressed(KeyCode::KeyM)
@@ -2394,32 +2694,32 @@ pub fn panel_hotkeys_system(
         ui_state.selected_inv = None;
         audio::play(&mut commands, sfx.click.clone(), 0.5, None);
     }
-    if keys.just_pressed(KeyCode::KeyE) && !ui_state.locked() && *mode == crate::space::FlightMode::Planet {
-        let Ok(mut p) = player.single_mut() else { return };
+    if keys.just_pressed(KeyCode::KeyE)
+        && !ui_state.locked()
+        && *mode == crate::space::FlightMode::Planet
+    {
+        let Ok(mut p) = player.single_mut() else {
+            return;
+        };
         let origin = p.eye();
         let dir = p.look_dir();
-        if p.stats.haz < 95.0 && p.inv.count_item("sodium") > 0 {
-            if p.charge("haz") {
-                p.toast("防护已充能");
-                audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
-                return;
-            }
+        if p.stats.haz < 95.0 && p.inv.count_item("sodium") > 0 && p.charge("haz") {
+            p.toast("防护已充能");
+            audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+            return;
         }
-        if p.stats.o2 < 95.0 && p.inv.count_item("oxygen") > 0 {
-            if p.charge("o2") {
-                p.toast("氧气已充能");
-                audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
-                return;
-            }
+        if p.stats.o2 < 95.0 && p.inv.count_item("oxygen") > 0 && p.charge("o2") {
+            p.toast("氧气已充能");
+            audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+            return;
         }
-        if let Some((cell, _n, dist)) = world.raycast(origin, dir, 5.0) {
-            if dist <= 5.0 {
-                if let Some((e, _)) = machines.iter().find(|(_, m)| m.pos == cell) {
-                    ui_state.panel = Panel::Machine(e);
-                    audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-                    return;
-                }
-            }
+        if let Some((cell, _n, dist)) = world.raycast(origin, dir, 5.0)
+            && dist <= 5.0
+            && let Some((e, _)) = machines.iter().find(|(_, m)| m.pos == cell)
+        {
+            ui_state.panel = Panel::Machine(e);
+            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
+            return;
         }
         p.toast("附近没有可交互的机器");
     }
@@ -2526,7 +2826,11 @@ pub fn scan_system(
                         let target = def.ore
                             || matches!(
                                 def.key,
-                                "sodium_plant" | "oxygen_plant" | "glow_shroom" | "crystal" | "amber"
+                                "sodium_plant"
+                                    | "oxygen_plant"
+                                    | "glow_shroom"
+                                    | "crystal"
+                                    | "amber"
                             );
                         if !target {
                             continue;
@@ -2651,27 +2955,33 @@ pub fn trade_panel_system(
                     .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
             );
             ui.separator();
-            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                egui::Grid::new("trade_grid").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
-                    for item in data::TRADE_GOODS {
-                        let buy = data::trade_buy_price(item, game.market(), has_trade_ai);
-                        let sell = data::trade_sell_price(item, game.market());
-                        let have = player.single().map(|p| p.inv.count_item(item)).unwrap_or(0);
-                        ui.label(item_name(item));
-                        ui.label(format!("买 ₪{buy} / 卖 ₪{sell}"));
-                        ui.label(format!("持有 {have}"));
-                        ui.horizontal(|ui| {
-                            if ui.button("买").clicked() {
-                                buy_req.push((item.to_string(), buy, 1));
-                            }
-                            if ui.button("卖").clicked() {
-                                sell_req.push((item.to_string(), sell, 1));
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("trade_grid")
+                        .num_columns(4)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            for item in data::TRADE_GOODS {
+                                let buy = data::trade_buy_price(item, game.market(), has_trade_ai);
+                                let sell = data::trade_sell_price(item, game.market());
+                                let have =
+                                    player.single().map(|p| p.inv.count_item(item)).unwrap_or(0);
+                                ui.label(item_name(item));
+                                ui.label(format!("买 ₪{buy} / 卖 ₪{sell}"));
+                                ui.label(format!("持有 {have}"));
+                                ui.horizontal(|ui| {
+                                    if ui.button("买").clicked() {
+                                        buy_req.push((item.to_string(), buy, 1));
+                                    }
+                                    if ui.button("卖").clicked() {
+                                        sell_req.push((item.to_string(), sell, 1));
+                                    }
+                                });
+                                ui.end_row();
                             }
                         });
-                        ui.end_row();
-                    }
                 });
-            });
             ui.separator();
             ui.label(
                 egui::RichText::new("◈ 科技蓝图")
@@ -2696,7 +3006,9 @@ pub fn trade_panel_system(
         ui_state.panel = Panel::None;
         return;
     }
-    let Ok(mut p) = player.single_mut() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     let mut traded = false;
     for (item, price, n) in buy_req {
         if p.credits >= price * n {
@@ -2727,12 +3039,29 @@ pub fn trade_panel_system(
         }
     }
     if let Some(tech) = blueprint_req {
-        if p.credits >= data::STATION_BLUEPRINTS.iter().find(|b| b.tech == tech).map(|b| b.price).unwrap_or(i32::MAX) {
-            p.credits -= data::STATION_BLUEPRINTS.iter().find(|b| b.tech == tech).map(|b| b.price).unwrap_or(0);
+        if p.credits
+            >= data::STATION_BLUEPRINTS
+                .iter()
+                .find(|b| b.tech == tech)
+                .map(|b| b.price)
+                .unwrap_or(i32::MAX)
+        {
+            p.credits -= data::STATION_BLUEPRINTS
+                .iter()
+                .find(|b| b.tech == tech)
+                .map(|b| b.price)
+                .unwrap_or(0);
             if !research.techs.iter().any(|t| t == tech) {
                 research.techs.push(tech.to_string());
             }
-            p.toast(format!("蓝图已获取：{}", data::TECHS.iter().find(|t| t.id == tech).map(|t| t.name).unwrap_or(tech)));
+            p.toast(format!(
+                "蓝图已获取：{}",
+                data::TECHS
+                    .iter()
+                    .find(|t| t.id == tech)
+                    .map(|t| t.name)
+                    .unwrap_or(tech)
+            ));
             traded = true;
             audio::play(&mut commands, sfx.craft.clone(), 0.6, None);
         } else {
@@ -2741,7 +3070,9 @@ pub fn trade_panel_system(
         }
     }
     if traded {
-        flag_ev.write(crate::quests::FlagEvent { flag: "traded".into() });
+        flag_ev.write(crate::quests::FlagEvent {
+            flag: "traded".into(),
+        });
     }
 }
 
@@ -2784,17 +3115,27 @@ pub fn garage_panel_system(
             );
             ui.label(format!("货仓（{} 格）：", cls.slots));
             let n = cls.slots;
-            egui::Grid::new("cargo_grid").num_columns(6).spacing([4.0, 4.0]).show(ui, |ui| {
-                for i in 0..n {
-                    let s = game.ship_inv.get(i).cloned().flatten();
-                    if slot_button(ui, &cache, s.as_ref().map(|s| s.item.as_str()).unwrap_or(""), &s, false, 40.0) {
-                        cargo_take = Some(i);
+            egui::Grid::new("cargo_grid")
+                .num_columns(6)
+                .spacing([4.0, 4.0])
+                .show(ui, |ui| {
+                    for i in 0..n {
+                        let s = game.ship_inv.get(i).cloned().flatten();
+                        if slot_button(
+                            ui,
+                            &cache,
+                            s.as_ref().map(|s| s.item.as_str()).unwrap_or(""),
+                            &s,
+                            false,
+                            40.0,
+                        ) {
+                            cargo_take = Some(i);
+                        }
+                        if (i + 1) % 6 == 0 {
+                            ui.end_row();
+                        }
                     }
-                    if (i + 1) % 6 == 0 {
-                        ui.end_row();
-                    }
-                }
-            });
+                });
             ui.label("（点击舱内物品取出到背包）");
             ui.separator();
             ui.label(
@@ -2820,7 +3161,9 @@ pub fn garage_panel_system(
         return;
     }
     if let Some(i) = switch_req {
-        let Some(s) = game.garage.get(i).cloned() else { return };
+        let Some(s) = game.garage.get(i).cloned() else {
+            return;
+        };
         switch_ev.write(crate::station::ShipSwitchEvent {
             cls: s.cls.clone(),
             model: s.model.clone(),
@@ -2828,7 +3171,9 @@ pub fn garage_panel_system(
         });
     }
     if let Some(i) = cargo_take {
-        let Ok(mut p) = player.single_mut() else { return };
+        let Ok(mut p) = player.single_mut() else {
+            return;
+        };
         if let Some(s) = game.ship_inv.get_mut(i).and_then(|s| s.take()) {
             p.inv.add_item(&s.item, s.n);
         }
@@ -2873,55 +3218,66 @@ pub fn creative_panel_system(
                 });
             });
             ui.separator();
-            egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-                egui::Grid::new("creative_grid")
-                    .num_columns(8)
-                    .spacing([4.0, 4.0])
-                    .show(ui, |ui| {
-                        for item in data::ITEMS {
-                            let (rect, resp) =
-                                ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::click());
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::CornerRadius::same(3),
-                                egui::Color32::from_rgba_unmultiplied(0x10, 0x14, 0x1a, 0xCC),
-                            );
-                            ui.painter().rect_stroke(
-                                rect,
-                                egui::CornerRadius::same(3),
-                                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x35, 0x46, 0x55)),
-                                egui::StrokeKind::Inside,
-                            );
-                            let tex = egui_icon(&cache, item.key);
-                            ui.painter().image(
-                                tex,
-                                egui::Rect::from_min_max(
-                                    rect.min + egui::vec2(4.0, 4.0),
-                                    rect.max - egui::vec2(4.0, 4.0),
-                                ),
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                egui::Color32::WHITE,
-                            );
-                            resp.clone().on_hover_text(format!("{}\n{}", item.name, item.desc));
-                            if resp.clicked() {
-                                give.push((item.key.to_string(), 64));
-                            } else if resp.secondary_clicked() {
-                                give.push((item.key.to_string(), 1));
+            egui::ScrollArea::vertical()
+                .max_height(480.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("creative_grid")
+                        .num_columns(8)
+                        .spacing([4.0, 4.0])
+                        .show(ui, |ui| {
+                            for item in data::ITEMS {
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(48.0, 48.0),
+                                    egui::Sense::click(),
+                                );
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(3),
+                                    egui::Color32::from_rgba_unmultiplied(0x10, 0x14, 0x1a, 0xCC),
+                                );
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    egui::CornerRadius::same(3),
+                                    egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgb(0x35, 0x46, 0x55),
+                                    ),
+                                    egui::StrokeKind::Inside,
+                                );
+                                let tex = egui_icon(&cache, item.key);
+                                ui.painter().image(
+                                    tex,
+                                    egui::Rect::from_min_max(
+                                        rect.min + egui::vec2(4.0, 4.0),
+                                        rect.max - egui::vec2(4.0, 4.0),
+                                    ),
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                                resp.clone()
+                                    .on_hover_text(format!("{}\n{}", item.name, item.desc));
+                                if resp.clicked() {
+                                    give.push((item.key.to_string(), 64));
+                                } else if resp.secondary_clicked() {
+                                    give.push((item.key.to_string(), 1));
+                                }
                             }
-                        }
-                    });
-            });
+                        });
+                });
         });
     if close {
         ui_state.close_panel();
     }
-    if !give.is_empty() {
-        if let Ok(mut p) = player.single_mut() {
-            for (item, n) in give {
-                p.inv.add_item(&item, n);
-            }
-            audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+    if !give.is_empty()
+        && let Ok(mut p) = player.single_mut()
+    {
+        for (item, n) in give {
+            p.inv.add_item(&item, n);
         }
+        audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
     }
 }
 
@@ -2969,15 +3325,12 @@ pub fn planet_map_system(
     let sx = cw / (MAP_X1 - MAP_X0) as f32;
     let sz = ch / (MAP_Z1 - MAP_Z0) as f32;
     let to_canvas = |wx: f32, wz: f32| -> egui::Pos2 {
-        egui::pos2(
-            (wx - MAP_X0 as f32) * sx,
-            ch - (wz - MAP_Z0 as f32) * sz,
-        )
+        egui::pos2((wx - MAP_X0 as f32) * sx, ch - (wz - MAP_Z0 as f32) * sz)
     };
     let to_world = |px: f32, py: f32| -> (i32, i32) {
         (
             ((px / sx) as i32 + MAP_X0).clamp(MAP_X0, MAP_X1),
-            (( (ch - py) / sz) as i32 + MAP_Z0).clamp(MAP_Z0, MAP_Z1),
+            (((ch - py) / sz) as i32 + MAP_Z0).clamp(MAP_Z0, MAP_Z1),
         )
     };
     egui::Window::new("◈ 星球全息地图")
@@ -3003,28 +3356,48 @@ pub fn planet_map_system(
                     }
                 });
             });
-            let (resp, painter) = ui.allocate_painter(egui::vec2(cw, ch), egui::Sense::click_and_drag());
+            let (resp, painter) =
+                ui.allocate_painter(egui::vec2(cw, ch), egui::Sense::click_and_drag());
             let rect = resp.rect;
             // 底图
-            painter.rect_filled(rect, egui::CornerRadius::same(4), egui::Color32::from_rgb(0x07, 0x10, 0x1a));
+            painter.rect_filled(
+                rect,
+                egui::CornerRadius::same(4),
+                egui::Color32::from_rgb(0x07, 0x10, 0x1a),
+            );
             // 网格
             for gx in (MAP_X0..=MAP_X1).step_by(130) {
                 let a = to_canvas(gx as f32, MAP_Z0 as f32);
                 let b = to_canvas(gx as f32, MAP_Z1 as f32);
                 painter.line_segment(
-                    [rect.min + egui::vec2(a.x, a.y), rect.min + egui::vec2(b.x, b.y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0x1d, 0x3a, 0x52, 0x80)),
+                    [
+                        rect.min + egui::vec2(a.x, a.y),
+                        rect.min + egui::vec2(b.x, b.y),
+                    ],
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(0x1d, 0x3a, 0x52, 0x80),
+                    ),
                 );
             }
             for gz in (MAP_Z0..=MAP_Z1).step_by(110) {
                 let a = to_canvas(MAP_X0 as f32, gz as f32);
                 let b = to_canvas(MAP_X1 as f32, gz as f32);
                 painter.line_segment(
-                    [rect.min + egui::vec2(a.x, a.y), rect.min + egui::vec2(b.x, b.y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0x1d, 0x3a, 0x52, 0x80)),
+                    [
+                        rect.min + egui::vec2(a.x, a.y),
+                        rect.min + egui::vec2(b.x, b.y),
+                    ],
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(0x1d, 0x3a, 0x52, 0x80),
+                    ),
                 );
             }
-            let pin = |painter: &egui::Painter, pos: egui::Pos2, color: egui::Color32, label: Option<&str>| {
+            let pin = |painter: &egui::Painter,
+                       pos: egui::Pos2,
+                       color: egui::Color32,
+                       label: Option<&str>| {
                 let r = egui::Rect::from_center_size(pos, egui::vec2(7.0, 7.0));
                 painter.circle_filled(pos, 4.0, color);
                 if let Some(l) = label {
@@ -3042,10 +3415,20 @@ pub fn planet_map_system(
             for s in &world.g.structures {
                 match s {
                     crate::world::Structure::Village { x, z, .. } => {
-                        pin(&painter, rect.min + to_canvas(*x as f32, *z as f32).to_vec2(), egui::Color32::from_rgb(0x4d, 0xc8, 0x6a), None);
+                        pin(
+                            &painter,
+                            rect.min + to_canvas(*x as f32, *z as f32).to_vec2(),
+                            egui::Color32::from_rgb(0x4d, 0xc8, 0x6a),
+                            None,
+                        );
                     }
                     crate::world::Structure::Ruin { x, z, .. } => {
-                        pin(&painter, rect.min + to_canvas(*x as f32, *z as f32).to_vec2(), egui::Color32::from_rgb(0xd8, 0xb0, 0x38), None);
+                        pin(
+                            &painter,
+                            rect.min + to_canvas(*x as f32, *z as f32).to_vec2(),
+                            egui::Color32::from_rgb(0xd8, 0xb0, 0x38),
+                            None,
+                        );
                     }
                 }
             }
@@ -3054,22 +3437,35 @@ pub fn planet_map_system(
                 if let crate::factory::MachineState::Beacon(bc) = bs {
                     pin(
                         &painter,
-                        rect.min + to_canvas(m.pos[0] as f32 + 0.5, m.pos[2] as f32 + 0.5).to_vec2(),
+                        rect.min
+                            + to_canvas(m.pos[0] as f32 + 0.5, m.pos[2] as f32 + 0.5).to_vec2(),
                         egui::Color32::from_rgb(0xff, 0xa0, 0x30),
                         Some(&bc.label),
                     );
                 }
             }
             // 飞船
-            pin(&painter, rect.min + to_canvas(game.ship_pos.x, game.ship_pos.z).to_vec2(), egui::Color32::from_rgb(0x35, 0xe0, 0xe8), Some("🚀"));
+            pin(
+                &painter,
+                rect.min + to_canvas(game.ship_pos.x, game.ship_pos.z).to_vec2(),
+                egui::Color32::from_rgb(0x35, 0xe0, 0xe8),
+                Some("🚀"),
+            );
             // 玩家箭头（按朝向）
             {
                 let pp = rect.min + to_canvas(p.pos.x, p.pos.z).to_vec2();
                 let ang = -p.yaw;
                 let dir = egui::vec2(ang.sin(), -ang.cos()) * 10.0;
-                let mut pts = vec![pp + dir, pp + egui::vec2(-dir.y, dir.x) * 0.6, pp + egui::vec2(dir.y, -dir.x) * 0.6];
+                let mut pts = vec![
+                    pp + dir,
+                    pp + egui::vec2(-dir.y, dir.x) * 0.6,
+                    pp + egui::vec2(dir.y, -dir.x) * 0.6,
+                ];
                 pts.push(pp + dir);
-                painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, egui::Color32::from_rgb(0x7d, 0xff, 0x8a))));
+                painter.add(egui::Shape::line(
+                    pts,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
+                ));
             }
             // 用户标记
             for (i, m) in game.marks.iter().enumerate() {
@@ -3091,14 +3487,19 @@ pub fn planet_map_system(
             }
             // 待添加点
             if let Some((mx, mz)) = map.pending {
-                pin(&painter, rect.min + to_canvas(mx as f32, mz as f32).to_vec2(), egui::Color32::from_rgb(0xff, 0x44, 0x44), None);
+                pin(
+                    &painter,
+                    rect.min + to_canvas(mx as f32, mz as f32).to_vec2(),
+                    egui::Color32::from_rgb(0xff, 0x44, 0x44),
+                    None,
+                );
             }
             // 点击拾取
-            if resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let (wx, wz) = to_world(pos.x - rect.min.x, pos.y - rect.min.y);
-                    map.pending = Some((wx, wz));
-                }
+            if resp.clicked()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                let (wx, wz) = to_world(pos.x - rect.min.x, pos.y - rect.min.y);
+                map.pending = Some((wx, wz));
             }
             ui.separator();
             ui.horizontal(|ui| {
@@ -3106,7 +3507,10 @@ pub fn planet_map_system(
                 ui.add(egui::TextEdit::singleline(&mut map.name).desired_width(160.0));
                 ui.checkbox(&mut map.gal, "✦ 全星系显示");
                 let can_add = map.pending.is_some() && !map.name.trim().is_empty();
-                if ui.add_enabled(can_add, egui::Button::new("⚑ 添加标记")).clicked() {
+                if ui
+                    .add_enabled(can_add, egui::Button::new("⚑ 添加标记"))
+                    .clicked()
+                {
                     add_req = true;
                 }
                 if let Some((mx, mz)) = map.pending {
@@ -3129,11 +3533,21 @@ pub fn planet_map_system(
             for (i, m) in game.marks.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let sel = map.sel == Some(i);
-                    if ui.selectable_label(sel, format!("{} ({}, {})", m.label, m.x, m.z)).clicked() {
+                    if ui
+                        .selectable_label(sel, format!("{} ({}, {})", m.label, m.x, m.z))
+                        .clicked()
+                    {
                         map.sel = if sel { None } else { Some(i) };
                         map.pending = None;
                     }
-                    if ui.button(if m.gal { "✦ 全星系" } else { "⚑ 本星球" }).clicked() {
+                    if ui
+                        .button(if m.gal {
+                            "✦ 全星系"
+                        } else {
+                            "⚑ 本星球"
+                        })
+                        .clicked()
+                    {
                         toggle_req = Some(i);
                     }
                     if ui.button("🗑").clicked() {
@@ -3147,31 +3561,29 @@ pub fn planet_map_system(
         map.pending = None;
         map.sel = None;
     }
-    if add_req {
-        if let Some((mx, mz)) = map.pending.take() {
-            game.marks.push(crate::space::Mark {
-                x: mx,
-                z: mz,
-                y: world.top_at(mx, mz) + 1,
-                label: map.name.trim().to_string(),
-                gal: map.gal,
-            });
-            map.name.clear();
-            audio::play(&mut commands, sfx.click.clone(), 0.5, None);
-        }
+    if add_req && let Some((mx, mz)) = map.pending.take() {
+        game.marks.push(crate::space::Mark {
+            x: mx,
+            z: mz,
+            y: world.top_at(mx, mz) + 1,
+            label: map.name.trim().to_string(),
+            gal: map.gal,
+        });
+        map.name.clear();
+        audio::play(&mut commands, sfx.click.clone(), 0.5, None);
     }
-    if let Some(i) = del_req {
-        if i < game.marks.len() {
-            game.marks.remove(i);
-            map.sel = None;
-            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-        }
+    if let Some(i) = del_req
+        && i < game.marks.len()
+    {
+        game.marks.remove(i);
+        map.sel = None;
+        audio::play(&mut commands, sfx.click.clone(), 0.4, None);
     }
-    if let Some(i) = toggle_req {
-        if let Some(m) = game.marks.get_mut(i) {
-            m.gal = !m.gal;
-            audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-        }
+    if let Some(i) = toggle_req
+        && let Some(m) = game.marks.get_mut(i)
+    {
+        m.gal = !m.gal;
+        audio::play(&mut commands, sfx.click.clone(), 0.4, None);
     }
 }
 
@@ -3181,6 +3593,7 @@ pub fn galaxy_map_system(
     mut game: ResMut<crate::space::SpaceGame>,
     mut ship: ResMut<crate::space::ShipState>,
     mode: Res<crate::space::FlightMode>,
+    time: Res<Time>,
 ) {
     if ui_state.panel != Panel::GalaxyMap {
         return;
@@ -3195,22 +3608,30 @@ pub fn galaxy_map_system(
     }
     let mut close = false;
     let mut lock_req: Option<u32> = None;
+    let mut selected: Option<u32> = game.warp_lock.as_ref().map(|lock| lock.seed);
     egui::Window::new("◈ 星系地图")
-        .default_size([560.0, 480.0])
+        .default_size([600.0, 540.0])
         .resizable(false)
         .show(ctx, |ui| {
             if ui.button("✕ 关闭 (M / Esc)").clicked() {
                 close = true;
             }
             ui.label(
-                egui::RichText::new(format!("当前星系：{}（种子 {}）", game.galaxy.name, game.galaxy.seed))
-                    .size(16.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+                egui::RichText::new(format!(
+                    "当前星系：{}（种子 {}）",
+                    game.galaxy.name, game.galaxy.seed
+                ))
+                .size(16.0)
+                .strong()
+                .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
             );
             ui.label(
-                egui::RichText::new(format!("星球 {} 颗 · 已访问星系 {}", game.galaxy.planets.len(), game.galaxy_count))
-                    .size(13.0),
+                egui::RichText::new(format!(
+                    "星球 {} 颗 · 已访问星系 {}",
+                    game.galaxy.planets.len(),
+                    game.galaxy_count
+                ))
+                .size(13.0),
             );
             if let Some(lock) = &game.warp_lock {
                 ui.label(
@@ -3221,25 +3642,120 @@ pub fn galaxy_map_system(
             }
             ui.label("对准锁定星系方向 + 按住 J 脉冲冲刺至 700 u/s 即自动跃迁（需曲率电池×1）");
             ui.separator();
-            egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                let cur = game.galaxy.seed;
-                let mut seeds = crate::space::neighbor_seeds(cur);
-                seeds.sort();
-                for seed in seeds {
-                    let name = data::galaxy_name(seed);
-                    let visited = game.archives.contains_key(&seed);
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "{}{}",
-                            name,
-                            if visited { " · 已到访" } else { "" }
-                        ));
-                        if ui.button("锁定").clicked() {
-                            lock_req = Some(seed);
-                        }
-                    });
-                }
+            let (response, painter) =
+                ui.allocate_painter(egui::vec2(565.0, 340.0), egui::Sense::click_and_drag());
+            let rect = response.rect;
+            painter.rect_filled(rect, 5.0, egui::Color32::from_rgb(3, 8, 20));
+            let center = rect.center();
+            for radius in [55.0, 110.0, 160.0] {
+                painter.circle_stroke(
+                    center,
+                    radius,
+                    egui::Stroke::new(0.7, egui::Color32::from_rgba_unmultiplied(53, 224, 232, 35)),
+                );
+            }
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), center.y),
+                    egui::pos2(rect.right(), center.y),
+                ],
+                egui::Stroke::new(0.6, egui::Color32::from_rgba_unmultiplied(53, 224, 232, 28)),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, rect.top()),
+                    egui::pos2(center.x, rect.bottom()),
+                ],
+                egui::Stroke::new(0.6, egui::Color32::from_rgba_unmultiplied(53, 224, 232, 28)),
+            );
+
+            let rot =
+                Quat::from_rotation_y(time.elapsed_secs() * 0.075) * Quat::from_rotation_x(-0.38);
+            let mut stars: Vec<(u32, egui::Pos2, f32, bool)> =
+                crate::space::neighbor_seeds(game.galaxy.seed)
+                    .into_iter()
+                    .map(|seed| {
+                        let h = seed.wrapping_mul(0x9E37_79B9);
+                        let radius = 0.42 + (h & 0xff) as f32 / 255.0 * 0.56;
+                        let p = rot * (crate::space::galaxy_dir(seed) * radius);
+                        let perspective = 1.0 / (1.35 - p.z * 0.42);
+                        let screen = center + egui::vec2(p.x, -p.y) * (192.0 * perspective);
+                        (seed, screen, p.z, game.archives.contains_key(&seed))
+                    })
+                    .collect();
+            stars.sort_by(|a, b| a.2.total_cmp(&b.2));
+            let pointer = response.hover_pos();
+            let hovered = pointer.and_then(|pos| {
+                stars
+                    .iter()
+                    .filter_map(|star| {
+                        let d = star.1.distance(pos);
+                        (d < 11.0).then_some((star.0, d))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|entry| entry.0)
             });
+            for (seed, pos, depth, visited) in &stars {
+                let is_selected = selected == Some(*seed);
+                let is_hovered = hovered == Some(*seed);
+                painter.line_segment(
+                    [center, *pos],
+                    egui::Stroke::new(
+                        if is_selected { 1.2 } else { 0.35 },
+                        if is_selected {
+                            egui::Color32::from_rgba_unmultiplied(125, 255, 138, 125)
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(53, 224, 232, 18)
+                        },
+                    ),
+                );
+                let size = (2.2 + (*depth + 1.0) * 1.8)
+                    + if is_selected || is_hovered { 2.2 } else { 0.0 };
+                let color = if is_selected {
+                    egui::Color32::from_rgb(125, 255, 138)
+                } else if *visited {
+                    egui::Color32::from_rgb(255, 209, 102)
+                } else {
+                    egui::Color32::from_rgb(103, 207, 255)
+                };
+                painter.circle_filled(*pos, size, color);
+                if is_selected || is_hovered {
+                    painter.text(
+                        *pos + egui::vec2(8.0, -8.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        data::galaxy_name(*seed),
+                        egui::FontId::proportional(12.0),
+                        color,
+                    );
+                }
+            }
+            painter.circle_filled(center, 7.0, egui::Color32::WHITE);
+            painter.circle_stroke(
+                center,
+                12.0,
+                egui::Stroke::new(1.2, egui::Color32::from_rgb(53, 224, 232)),
+            );
+            painter.text(
+                center + egui::vec2(14.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                "当前位置",
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+            if response.clicked()
+                && let Some(seed) = hovered
+            {
+                selected = Some(seed);
+            }
+            ui.small("星域会缓慢自转；金色为已到访星系，绿色为当前锁定目标。");
+            if let Some(seed) = selected {
+                ui.horizontal(|ui| {
+                    ui.label(format!("目标：{} · 种子 {}", data::galaxy_name(seed), seed));
+                    if ui.button("◎ 锁定跃迁目标").clicked() {
+                        lock_req = Some(seed);
+                    }
+                });
+            }
         });
     if close {
         ui_state.panel = Panel::None;

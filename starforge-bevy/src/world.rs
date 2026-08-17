@@ -1,8 +1,8 @@
 //! Voxel world: chunk storage, deterministic terrain generation, meshing, raycasting.
 //! Faithful port of js/world.js per SPEC_world.md.
 
-use crate::data::{self, ids, Biome, CHUNK, SEA, WORLD_H};
-use crate::rng::{hash2, vnoise3, Noise2, Rng};
+use crate::data::{self, Biome, CHUNK, SEA, WORLD_H, ids};
+use crate::rng::{Noise2, Rng, hash2, vnoise3};
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -98,7 +98,17 @@ impl WorldGen {
         )
     }
 
-    fn crater_field(&self, wx: f32, wz: f32, cell: i32, chance: f32, r0: f32, r1: f32, rim: f32, floor: f32) -> f32 {
+    fn crater_field(
+        &self,
+        wx: f32,
+        wz: f32,
+        cell: i32,
+        chance: f32,
+        r0: f32,
+        r1: f32,
+        rim: f32,
+        floor: f32,
+    ) -> f32 {
         let cx = (wx / cell as f32).floor();
         let cz = (wz / cell as f32).floor();
         let mut rnd = hash2(cx as i32, cz as i32, 0xCEA7, self.seed);
@@ -127,11 +137,14 @@ impl WorldGen {
     }
 
     fn hex_dome(&self, wx: f32, wz: f32, cell: f32) -> f32 {
-        let q = (0.577350269 * wx - wz / 3.0) / cell;
-        let r = (0.666666667 * wz) / cell;
+        let q = (0.577_350_26 * wx - wz / 3.0) / cell;
+        let r = (0.666_666_7 * wz) / cell;
         let hq = q.round();
         let hr = r.round();
-        let d = (q - hq).abs().max((r - hr).abs()).max(((q - hq) + (r - hr)).abs());
+        let d = (q - hq)
+            .abs()
+            .max((r - hr).abs())
+            .max(((q - hq) + (r - hr)).abs());
         let b = (1.0 - d * 1.35).max(0.0);
         b * b * 18.0
     }
@@ -139,7 +152,7 @@ impl WorldGen {
     fn float_island_at(&self, wx: f32, wz: f32) -> Option<(i32, i32)> {
         let n = &self.noise;
         let mask = n.fbm2(wx * 0.0045, wz * 0.0045, 4, 2.0, 0.5) * 0.5 + 0.5;
-        if mask < 0.62 || mask > 0.78 {
+        if !(0.62..=0.78).contains(&mask) {
             return None;
         }
         let body = n.fbm2(wx * 0.011 + 31.0, wz * 0.011 - 17.0, 4, 2.0, 0.5) * 0.5 + 0.5;
@@ -158,20 +171,26 @@ impl WorldGen {
                 let (q0, q1) = self.warp_xz(wx, wz, 210.0);
                 let base = n.fbm2(q0 * 0.0052, q1 * 0.0052, 5, 2.0, 0.5) * 0.5 + 0.5;
                 let ripple = (wx * 0.016 + n.fbm2(wx * 0.004, wz * 0.004, 3, 2.0, 0.5) * 2.6).sin();
-                SEA as f32 - 2.0 + base * 24.0 * rugged + ripple * ripple * 7.0 * rugged
+                SEA as f32 - 2.0
+                    + base * 24.0 * rugged
+                    + ripple * ripple * 7.0 * rugged
                     + self.crater_field(wx, wz, 90, 0.12, 0.16, 0.38, 10.0, 10.0)
             }
             "mesa" => {
                 let (q0, q1) = self.warp_xz(wx, wz, 150.0);
-                let steps = (3.0 + (ch.temp * 2.0).floor()) as f32;
+                let steps = 3.0 + (ch.temp * 2.0).floor();
                 let mut v = n.fbm2(q0 * 0.0042, q1 * 0.0042, 5, 2.0, 0.5) * 0.5 + 0.5;
                 v = (v * steps).round() / steps;
-                SEA as f32 - 8.0 + v * 44.0 * rugged + n.fbm2(wx * 0.05, wz * 0.05, 3, 2.0, 0.5) * 2.0
+                SEA as f32 - 8.0
+                    + v * 44.0 * rugged
+                    + n.fbm2(wx * 0.05, wz * 0.05, 3, 2.0, 0.5) * 2.0
             }
             "volcanic" => {
                 let (q0, q1) = self.warp_xz(wx, wz, 130.0);
                 let b = n.fbm2(q0 * 0.0065, q1 * 0.0065, 5, 2.0, 0.5);
-                let ridge = (1.0 - n.fbm2(q0 * 0.0105 + 40.0, q1 * 0.0105, 4, 2.0, 0.5).abs() * 1.7 - 0.18).max(0.0);
+                let ridge =
+                    (1.0 - n.fbm2(q0 * 0.0105 + 40.0, q1 * 0.0105, 4, 2.0, 0.5).abs() * 1.7 - 0.18)
+                        .max(0.0);
                 let basin = n.fbm2(wx * 0.006 + 55.0, wz * 0.006 - 21.0, 2, 2.0, 0.5) * 0.5 + 0.5;
                 SEA as f32 - 10.0
                     + ridge * 52.0 * rugged
@@ -184,7 +203,9 @@ impl WorldGen {
                 let (q0, q1) = self.warp_xz(wx, wz, 240.0);
                 let v = n.fbm2(q0 * 0.0065, q1 * 0.0065, 3, 2.0, 0.5) * 0.5 + 0.5;
                 let m = ((v - 0.47) / 0.17).max(0.0);
-                SEA as f32 - 12.0 + m.powf(1.5) * 60.0 * rugged + n.fbm2(wx * 0.03, wz * 0.03, 3, 2.0, 0.5) * 2.5
+                SEA as f32 - 12.0
+                    + m.powf(1.5) * 60.0 * rugged
+                    + n.fbm2(wx * 0.03, wz * 0.03, 3, 2.0, 0.5) * 2.5
             }
             "glacial" => {
                 let b = n.fbm2(wx * 0.0042, wz * 0.0042, 4, 2.0, 0.5) * 0.5 + 0.5;
@@ -193,7 +214,8 @@ impl WorldGen {
             }
             "flats" => {
                 let b = n.fbm2(wx * 0.004, wz * 0.004, 4, 2.0, 0.5) * 0.5 + 0.5;
-                SEA as f32 - 1.0 + (b - 0.5) * 10.0 * rugged
+                SEA as f32 - 1.0
+                    + (b - 0.5) * 10.0 * rugged
                     + self.crater_field(wx, wz, 120, 0.22, 0.12, 0.3, 7.0, 9.0)
             }
             "swamp" => {
@@ -215,19 +237,25 @@ impl WorldGen {
             }
             "hive" => {
                 let b = n.fbm2(wx * 0.004, wz * 0.004, 4, 2.0, 0.5) * 0.5 + 0.5;
-                SEA as f32 - 2.0 + (b - 0.5) * 12.0 * rugged + self.hex_dome(wx, wz, 34.0) * (0.8 + ch.wet * 0.5)
+                SEA as f32 - 2.0
+                    + (b - 0.5) * 12.0 * rugged
+                    + self.hex_dome(wx, wz, 34.0) * (0.8 + ch.wet * 0.5)
             }
             "alien" => {
                 let (q0, q1) = self.warp_xz(wx, wz, 160.0);
                 let b = n.fbm2(q0 * 0.0055, q1 * 0.0055, 5, 2.0, 0.5);
-                let spire = (n.fbm2(q0 * 0.012, q1 * 0.012, 4, 2.0, 0.5) - 0.45).max(0.0).powf(1.6);
+                let spire = (n.fbm2(q0 * 0.012, q1 * 0.012, 4, 2.0, 0.5) - 0.45)
+                    .max(0.0)
+                    .powf(1.6);
                 SEA as f32 - 6.0 + (b * 0.5 + 0.5) * 18.0 * rugged + spire * 44.0 * rugged
             }
             _ => {
                 // continental
                 let (q0, q1) = self.warp_xz(wx, wz, 190.0);
                 let b = n.fbm2(q0 * 0.005, q1 * 0.005, 5, 2.0, 0.5);
-                SEA as f32 - 5.0 + (b * 0.5 + 0.5) * 30.0 * rugged + n.fbm2(wx * 0.05, wz * 0.05, 3, 2.0, 0.5) * 3.5
+                SEA as f32 - 5.0
+                    + (b * 0.5 + 0.5) * 30.0 * rugged
+                    + n.fbm2(wx * 0.05, wz * 0.05, 3, 2.0, 0.5) * 3.5
             }
         };
         let amp: f32 = match t {
@@ -255,7 +283,14 @@ impl WorldGen {
             return None;
         }
         let ch = self.axes;
-        let m = self.noise.fbm2(wx * 0.0016 + ch.temp * 91.0, wz * 0.0016 - ch.wet * 57.0, 3, 2.0, 0.5) * 0.5 + 0.5;
+        let m = self.noise.fbm2(
+            wx * 0.0016 + ch.temp * 91.0,
+            wz * 0.0016 - ch.wet * 57.0,
+            3,
+            2.0,
+            0.5,
+        ) * 0.5
+            + 0.5;
         let idx = ((m * sub.len() as f32) as usize).clamp(0, sub.len() - 1);
         let s = sub[idx];
         if s.0.is_empty() && s.1 == 0.0 && s.2 == 0.0 {
@@ -331,7 +366,10 @@ impl WorldGen {
         let x0 = cx * CHUNK;
         let z0 = cz * CHUNK;
         let seab = self.sea();
-        let no_beach = matches!(b.grass, "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber");
+        let no_beach = matches!(
+            b.grass,
+            "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
+        );
         let flora_list: &[&str] = match b.key {
             "murk" => &["glow_shroom", "glow_shroom", "oxygen_plant"],
             "salt" => &["sodium_plant", "sodium_plant", "fern"],
@@ -354,7 +392,11 @@ impl WorldGen {
                     let mut id = if y == 0 {
                         ids::BARRIER
                     } else if y == h {
-                        if h < seab + 1 && !no_beach { ids::SAND } else { surf_id }
+                        if h < seab + 1 && !no_beach {
+                            ids::SAND
+                        } else {
+                            surf_id
+                        }
                     } else if y > h - 3 {
                         dirt_id
                     } else if y < 10 {
@@ -362,8 +404,16 @@ impl WorldGen {
                     } else {
                         stone_id
                     };
-                    if can_cave && y >= 3 && y <= h - 3 && self.is_cave(wx as f32, y as f32, wz as f32) {
-                        id = if b.key == "crystal" && cr.next() < 0.12 { ids::CRYSTAL } else { ids::AIR };
+                    if can_cave
+                        && y >= 3
+                        && y <= h - 3
+                        && self.is_cave(wx as f32, y as f32, wz as f32)
+                    {
+                        id = if b.key == "crystal" && cr.next() < 0.12 {
+                            ids::CRYSTAL
+                        } else {
+                            ids::AIR
+                        };
                     }
                     data[lidx(lx, y, lz)] = id;
                 }
@@ -376,7 +426,11 @@ impl WorldGen {
                 if h > seab {
                     let rv = cr.next();
                     if rv < 0.0015 {
-                        let oid = if cr.next() < 0.5 { ids::IRON_ORE } else { ids::COPPER_ORE };
+                        let oid = if cr.next() < 0.5 {
+                            ids::IRON_ORE
+                        } else {
+                            ids::COPPER_ORE
+                        };
                         data[lidx(lx, h, lz)] = oid;
                         if cr.next() < 0.6 && h > 1 {
                             data[lidx(lx, h - 1, lz)] = oid;
@@ -390,49 +444,50 @@ impl WorldGen {
                         }
                     } else {
                         let flower_mul = sd.map(|s| s.2).unwrap_or(1.0);
-                        let has_tree = self.tree_at(wx, wz, sd.map(|s| s.1).unwrap_or(1.0)).is_some();
+                        let has_tree = self
+                            .tree_at(wx, wz, sd.map(|s| s.1).unwrap_or(1.0))
+                            .is_some();
                         if rv < 0.0015 + b.flowers * flower_mul
                             && !has_tree
                             && data[lidx(lx, h, lz)] == surf_id
                         {
-                            let pick = flora_list[((cr.next() * flora_list.len() as f32) as usize).min(flora_list.len() - 1)];
+                            let pick = flora_list[((cr.next() * flora_list.len() as f32) as usize)
+                                .min(flora_list.len() - 1)];
                             data[lidx(lx, h + 1, lz)] = data::block_by_key(pick).id;
                         }
                     }
                     decor_column(self, &mut data, lx, h, lz, &mut cr);
-                } else if b.key == "ocean" {
-                    if cr.next() < 0.045 && h + 1 < WORLD_H {
-                        let pick = if cr.next() < 0.5 {
-                            "glow_shroom"
-                        } else if cr.next() < 0.5 {
-                            "sodium_plant"
-                        } else {
-                            "fern"
-                        };
-                        data[lidx(lx, h + 1, lz)] = data::block_by_key(pick).id;
-                    }
+                } else if b.key == "ocean" && cr.next() < 0.045 && h + 1 < WORLD_H {
+                    let pick = if cr.next() < 0.5 {
+                        "glow_shroom"
+                    } else if cr.next() < 0.5 {
+                        "sodium_plant"
+                    } else {
+                        "fern"
+                    };
+                    data[lidx(lx, h + 1, lz)] = data::block_by_key(pick).id;
                 }
                 // floating islands (alien only)
-                if b.key == "alien" {
-                    if let Some((base, thick)) = self.float_island_at(wx as f32, wz as f32) {
-                        let gh = self.height_at(wx as f32, wz as f32);
-                        if gh + 6 <= base {
-                            for y in base..base + thick {
-                                if y >= WORLD_H {
-                                    break;
-                                }
-                                let id = if y == base {
-                                    ids::ALIEN
-                                } else if y < base + 3 {
-                                    dirt_id
-                                } else {
-                                    stone_id
-                                };
-                                data[lidx(lx, y, lz)] = id;
+                if b.key == "alien"
+                    && let Some((base, thick)) = self.float_island_at(wx as f32, wz as f32)
+                {
+                    let gh = self.height_at(wx as f32, wz as f32);
+                    if gh + 6 <= base {
+                        for y in base..base + thick {
+                            if y >= WORLD_H {
+                                break;
                             }
-                            if base + thick < WORLD_H && hash2(wx, wz, 0xF10A, self.seed).next() < 0.4 {
-                                data[lidx(lx, base + thick, lz)] = ids::ALIEN;
-                            }
+                            let id = if y == base {
+                                ids::ALIEN
+                            } else if y < base + 3 {
+                                dirt_id
+                            } else {
+                                stone_id
+                            };
+                            data[lidx(lx, y, lz)] = id;
+                        }
+                        if base + thick < WORLD_H && hash2(wx, wz, 0xF10A, self.seed).next() < 0.4 {
+                            data[lidx(lx, base + thick, lz)] = ids::ALIEN;
                         }
                     }
                 }
@@ -462,7 +517,10 @@ impl WorldGen {
                 let mut y = y_min + (rng.next() * (y_max - y_min) as f32) as i32;
                 let vein = 3 + (rng.next() * size) as i32;
                 for _ in 0..vein {
-                    if (0..CHUNK).contains(&lx) && (0..CHUNK).contains(&lz) && (0..WORLD_H).contains(&y) {
+                    if (0..CHUNK).contains(&lx)
+                        && (0..CHUNK).contains(&lz)
+                        && (0..WORLD_H).contains(&y)
+                    {
                         let idx = lidx(lx, y, lz);
                         let cur = data[idx];
                         if cur == stone_id || cur == deep_id {
@@ -510,7 +568,13 @@ impl WorldGen {
                                     if dist > 3 || tr.next() < 0.15 {
                                         continue;
                                     }
-                                    set_local_if_air(&mut data, lx + ox, h + ly, lz + oz, ids::LEAVES);
+                                    set_local_if_air(
+                                        &mut data,
+                                        lx + ox,
+                                        h + ly,
+                                        lz + oz,
+                                        ids::LEAVES,
+                                    );
                                 }
                             }
                         }
@@ -649,7 +713,14 @@ fn set_local_if_air(data: &mut [u8; CHUNK_CELLS], lx: i32, y: i32, lz: i32, id: 
     }
 }
 
-fn decor_column(g: &WorldGen, data: &mut [u8; CHUNK_CELLS], lx: i32, h: i32, lz: i32, cr: &mut Rng) {
+fn decor_column(
+    g: &WorldGen,
+    data: &mut [u8; CHUNK_CELLS],
+    lx: i32,
+    h: i32,
+    lz: i32,
+    cr: &mut Rng,
+) {
     let b = g.biome;
     let place = |data: &mut [u8; CHUNK_CELLS], dy: i32, id: u8| set_local(data, lx, h + dy, lz, id);
     match b.key {
@@ -657,7 +728,15 @@ fn decor_column(g: &WorldGen, data: &mut [u8; CHUNK_CELLS], lx: i32, h: i32, lz:
             if cr.next() < 0.006 {
                 let n = 1 + (cr.next() * 3.0) as i32;
                 for i in 1..=n {
-                    place(data, i, if b.key == "amber" && i == 1 { ids::AMBER } else { ids::STONE });
+                    place(
+                        data,
+                        i,
+                        if b.key == "amber" && i == 1 {
+                            ids::AMBER
+                        } else {
+                            ids::STONE
+                        },
+                    );
                 }
             }
         }
@@ -706,12 +785,10 @@ fn decor_column(g: &WorldGen, data: &mut [u8; CHUNK_CELLS], lx: i32, h: i32, lz:
                 }
             }
         }
-        "crystal" => {
-            if cr.next() < 0.008 {
-                let n = 2 + (cr.next() * 4.0) as i32;
-                for i in 1..=n {
-                    place(data, i, ids::CRYSTAL);
-                }
+        "crystal" if cr.next() < 0.008 => {
+            let n = 2 + (cr.next() * 4.0) as i32;
+            for i in 1..=n {
+                place(data, i, ids::CRYSTAL);
             }
         }
         _ => {}
@@ -737,7 +814,13 @@ fn stamp_structure(g: &WorldGen, st: &Structure, cx: i32, cz: i32, data: &mut [u
                 stamp_hut(g, data, x0, z0, hx, hz, hh, b);
             }
         }
-        Structure::Ruin { x, z, kind, h, seed } => {
+        Structure::Ruin {
+            x,
+            z,
+            kind,
+            h,
+            seed,
+        } => {
             for wx in x - 10..=x + 10 {
                 for wz in z - 10..=z + 10 {
                     if !in_chunk_abs(wx, wz, x0, z0) {
@@ -754,9 +837,15 @@ fn stamp_structure(g: &WorldGen, st: &Structure, cx: i32, cz: i32, data: &mut [u
                             let dist = ((dx * dx + dz * dz) as f32).sqrt();
                             if (dist - 7.0).abs() < 0.7 && hr.next() < 0.7 {
                                 // JS: hash2(wx, wz, st.seed + 7) —— 结构种子派生柱高
-                                let hh2 = 2 + (hash2(wx, wz, seed.wrapping_add(7), g.seed).next() * 3.0) as i32;
+                                let hh2 = 2
+                                    + (hash2(wx, wz, seed.wrapping_add(7), g.seed).next() * 3.0)
+                                        as i32;
                                 for dy in 1..=hh2 {
-                                    let id = if dy == hh2 { data::block_by_key(b.deep).id } else { ids::STONE };
+                                    let id = if dy == hh2 {
+                                        data::block_by_key(b.deep).id
+                                    } else {
+                                        ids::STONE
+                                    };
                                     set_local(data, lx, gh + dy, lz, id);
                                 }
                             }
@@ -789,12 +878,17 @@ fn stamp_structure(g: &WorldGen, st: &Structure, cx: i32, cz: i32, data: &mut [u
                         _ => {
                             let interior = dx.abs() <= 8 && dz.abs() <= 6;
                             if interior {
-                                let edge = (dx.abs() == 8 && dz.abs() <= 6) || (dz.abs() == 6 && dx.abs() <= 8);
+                                let edge = (dx.abs() == 8 && dz.abs() <= 6)
+                                    || (dz.abs() == 6 && dx.abs() <= 8);
                                 if edge {
                                     let hh2 = (hr.next() * 4.0) as i32;
                                     // JS: for y = 1; y <= hh; y++（含端点）
                                     for dy in 1..=hh2 {
-                                        let id = if hr.next() < 0.25 { data::block_by_key(b.deep).id } else { ids::STONE };
+                                        let id = if hr.next() < 0.25 {
+                                            data::block_by_key(b.deep).id
+                                        } else {
+                                            ids::STONE
+                                        };
                                         set_local(data, lx, gh + dy, lz, id);
                                     }
                                 } else if hr.next() < 0.3 {
@@ -814,7 +908,16 @@ fn in_chunk_abs(wx: i32, wz: i32, x0: i32, z0: i32) -> bool {
 }
 
 /// 5×5 hut. `s` = 2, floor `f = hut_h + 1`.
-fn stamp_hut(g: &WorldGen, data: &mut [u8; CHUNK_CELLS], x0: i32, z0: i32, hx: i32, hz: i32, hut_h: i32, b: &Biome) {
+fn stamp_hut(
+    g: &WorldGen,
+    data: &mut [u8; CHUNK_CELLS],
+    x0: i32,
+    z0: i32,
+    hx: i32,
+    hz: i32,
+    hut_h: i32,
+    b: &Biome,
+) {
     let s = 2;
     let f = hut_h + 1;
     let dirt_id = data::block_by_key(b.dirt).id;
@@ -840,7 +943,11 @@ fn stamp_hut(g: &WorldGen, data: &mut [u8; CHUNK_CELLS], x0: i32, z0: i32, hx: i
             if edge {
                 // 外墙（JS: f..=f+2 三层）
                 for y in f..=f + 2 {
-                    let id = if dx.abs() == s && dz.abs() == s { ids::LOG } else { ids::PLANKS };
+                    let id = if dx.abs() == s && dz.abs() == s {
+                        ids::LOG
+                    } else {
+                        ids::PLANKS
+                    };
                     set_abs(data, wx, y, wz, id);
                 }
                 // door
@@ -918,10 +1025,10 @@ impl World {
             self.gen_count += 1;
             let mut data = self.g.gen_chunk_data(cx, cz);
             let mut from_save = false;
-            if let Some(mods) = self.saved_mods.get(&strkey(cx, cz)) {
-                if WorldGen::rle_decode(data.as_mut_slice(), mods) {
-                    from_save = true;
-                }
+            if let Some(mods) = self.saved_mods.get(&strkey(cx, cz))
+                && WorldGen::rle_decode(data.as_mut_slice(), mods)
+            {
+                from_save = true;
             }
             self.chunks.insert(
                 key,
@@ -939,11 +1046,11 @@ impl World {
             );
             // JS markNeighborsDirty：新块生成后，已网格化的 4 邻需重算边界面
             for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
-                if let Some(c) = self.chunks.get_mut(&ckey(nx, nz)) {
-                    if c.mesh.is_some() || c.water_mesh.is_some() {
-                        c.dirty = true;
-                        self.stream_dirty = true;
-                    }
+                if let Some(c) = self.chunks.get_mut(&ckey(nx, nz))
+                    && (c.mesh.is_some() || c.water_mesh.is_some())
+                {
+                    c.dirty = true;
+                    self.stream_dirty = true;
                 }
             }
         }
@@ -1059,28 +1166,75 @@ impl World {
     }
 
     /// Voxel DDA raycast（JS 语义：命中=非空气且非液体，穿水、中植物；零分量轴不移动）。
-    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<([i32; 3], [i32; 3], f32)> {
+    pub fn raycast(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_dist: f32,
+    ) -> Option<([i32; 3], [i32; 3], f32)> {
         let mut x = origin.x.floor() as i32;
         let mut y = origin.y.floor() as i32;
         let mut z = origin.z.floor() as i32;
-        let step_x = if dir.x > 0.0 { 1 } else if dir.x < 0.0 { -1 } else { 0 };
-        let step_y = if dir.y > 0.0 { 1 } else if dir.y < 0.0 { -1 } else { 0 };
-        let step_z = if dir.z > 0.0 { 1 } else if dir.z < 0.0 { -1 } else { 0 };
-        let t_delta_x = if step_x != 0 { (1.0 / dir.x).abs() } else { f32::INFINITY };
-        let t_delta_y = if step_y != 0 { (1.0 / dir.y).abs() } else { f32::INFINITY };
-        let t_delta_z = if step_z != 0 { (1.0 / dir.z).abs() } else { f32::INFINITY };
+        let step_x = if dir.x > 0.0 {
+            1
+        } else if dir.x < 0.0 {
+            -1
+        } else {
+            0
+        };
+        let step_y = if dir.y > 0.0 {
+            1
+        } else if dir.y < 0.0 {
+            -1
+        } else {
+            0
+        };
+        let step_z = if dir.z > 0.0 {
+            1
+        } else if dir.z < 0.0 {
+            -1
+        } else {
+            0
+        };
+        let t_delta_x = if step_x != 0 {
+            (1.0 / dir.x).abs()
+        } else {
+            f32::INFINITY
+        };
+        let t_delta_y = if step_y != 0 {
+            (1.0 / dir.y).abs()
+        } else {
+            f32::INFINITY
+        };
+        let t_delta_z = if step_z != 0 {
+            (1.0 / dir.z).abs()
+        } else {
+            f32::INFINITY
+        };
         let mut t_max_x = if step_x != 0 {
-            if step_x > 0 { (x as f32 + 1.0 - origin.x) * t_delta_x } else { (origin.x - x as f32) * t_delta_x }
+            if step_x > 0 {
+                (x as f32 + 1.0 - origin.x) * t_delta_x
+            } else {
+                (origin.x - x as f32) * t_delta_x
+            }
         } else {
             f32::INFINITY
         };
         let mut t_max_y = if step_y != 0 {
-            if step_y > 0 { (y as f32 + 1.0 - origin.y) * t_delta_y } else { (origin.y - y as f32) * t_delta_y }
+            if step_y > 0 {
+                (y as f32 + 1.0 - origin.y) * t_delta_y
+            } else {
+                (origin.y - y as f32) * t_delta_y
+            }
         } else {
             f32::INFINITY
         };
         let mut t_max_z = if step_z != 0 {
-            if step_z > 0 { (z as f32 + 1.0 - origin.z) * t_delta_z } else { (origin.z - z as f32) * t_delta_z }
+            if step_z > 0 {
+                (z as f32 + 1.0 - origin.z) * t_delta_z
+            } else {
+                (origin.z - z as f32) * t_delta_z
+            }
         } else {
             f32::INFINITY
         };
@@ -1158,11 +1312,22 @@ impl VoxelMesh {
 }
 
 /// Face table: dir, shade. Order: +X, -X, +Y, -Y, +Z, -Z.
-const FACE_DIRS: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const FACE_DIRS: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
 const FACE_SHADE: [f32; 6] = [0.80, 0.80, 1.00, 0.50, 0.65, 0.65];
 
 /// Build solid + water meshes for one chunk. Neighbors must exist.
-pub fn build_chunk_meshes(world: &World, c: &Chunk, atlas: &crate::textures::Atlas) -> (Option<VoxelMesh>, Option<VoxelMesh>) {
+pub fn build_chunk_meshes(
+    world: &World,
+    c: &Chunk,
+    atlas: &crate::textures::Atlas,
+) -> (Option<VoxelMesh>, Option<VoxelMesh>) {
     let mut solid = VoxelMesh::new();
     let mut water = VoxelMesh::new();
     let cx = c.cx;
@@ -1194,8 +1359,18 @@ pub fn build_chunk_meshes(world: &World, c: &Chunk, atlas: &crate::textures::Atl
                     let (x, z) = (wx as f32, wz as f32);
                     let (y0, y1) = (y as f32, y as f32 + 1.0);
                     let quads = [
-                        [(x, y0, z + 1.0), (x + 1.0, y0, z), (x, y1, z + 1.0), (x + 1.0, y1, z)],
-                        [(x, y0, z), (x + 1.0, y0, z + 1.0), (x, y1, z), (x + 1.0, y1, z + 1.0)],
+                        [
+                            (x, y0, z + 1.0),
+                            (x + 1.0, y0, z),
+                            (x, y1, z + 1.0),
+                            (x + 1.0, y1, z),
+                        ],
+                        [
+                            (x, y0, z),
+                            (x + 1.0, y0, z + 1.0),
+                            (x, y1, z),
+                            (x + 1.0, y1, z + 1.0),
+                        ],
                     ];
                     let uv = [[u0, v1], [u1, v1], [u0, v0], [u1, v0]];
                     for q in quads {
@@ -1217,7 +1392,10 @@ pub fn build_chunk_meshes(world: &World, c: &Chunk, atlas: &crate::textures::Atl
                     } else if def.lowbox.is_some() && f == 3 {
                         !(n_def.solid && !n_def.transparent)
                     } else {
-                        !(n_def.solid && !n_def.transparent && !n_def.cross && n_def.machine.is_none())
+                        !(n_def.solid
+                            && !n_def.transparent
+                            && !n_def.cross
+                            && n_def.machine.is_none())
                             && !(n_id == id && def.transparent && !def.fancy)
                     };
                     if !emit {
@@ -1237,8 +1415,8 @@ pub fn build_chunk_meshes(world: &World, c: &Chunk, atlas: &crate::textures::Atl
                     let uv = face_uvs(f, [u0, v0, u1, v1]);
                     if def.liquid {
                         let mut cols = [[0f32; 4]; 4];
-                        for i in 0..4 {
-                            cols[i] = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 1.0];
+                        for col in &mut cols {
+                            *col = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 1.0];
                         }
                         emit_quad_col(&mut water, corners, uv, cols, dir.map(|v| v as f32));
                     } else {
@@ -1257,12 +1435,32 @@ pub fn build_chunk_meshes(world: &World, c: &Chunk, atlas: &crate::textures::Atl
 /// Corners for a face (4 positions). y0/y1 already account for lowbox height.
 fn face_corners(x: f32, z: f32, y0: f32, y1: f32, face: usize) -> [(f32, f32, f32); 4] {
     match face {
-        0 => [(x + 1.0, y0, z), (x + 1.0, y0, z + 1.0), (x + 1.0, y1, z), (x + 1.0, y1, z + 1.0)],     // +X
-        1 => [(x, y0, z + 1.0), (x, y0, z), (x, y1, z + 1.0), (x, y1, z)],                             // -X
-        2 => [(x, y1, z), (x + 1.0, y1, z), (x, y1, z + 1.0), (x + 1.0, y1, z + 1.0)],                 // +Y
-        3 => [(x, y0, z), (x + 1.0, y0, z), (x, y0, z + 1.0), (x + 1.0, y0, z + 1.0)],                 // -Y
-        4 => [(x + 1.0, y0, z + 1.0), (x, y0, z + 1.0), (x + 1.0, y1, z + 1.0), (x, y1, z + 1.0)],     // +Z
-        _ => [(x, y0, z), (x + 1.0, y0, z), (x, y1, z), (x + 1.0, y1, z)],                             // -Z
+        0 => [
+            (x + 1.0, y0, z),
+            (x + 1.0, y0, z + 1.0),
+            (x + 1.0, y1, z),
+            (x + 1.0, y1, z + 1.0),
+        ], // +X
+        1 => [(x, y0, z + 1.0), (x, y0, z), (x, y1, z + 1.0), (x, y1, z)], // -X
+        2 => [
+            (x, y1, z),
+            (x + 1.0, y1, z),
+            (x, y1, z + 1.0),
+            (x + 1.0, y1, z + 1.0),
+        ], // +Y
+        3 => [
+            (x, y0, z),
+            (x + 1.0, y0, z),
+            (x, y0, z + 1.0),
+            (x + 1.0, y0, z + 1.0),
+        ], // -Y
+        4 => [
+            (x + 1.0, y0, z + 1.0),
+            (x, y0, z + 1.0),
+            (x + 1.0, y1, z + 1.0),
+            (x, y1, z + 1.0),
+        ], // +Z
+        _ => [(x, y0, z), (x + 1.0, y0, z), (x, y1, z), (x + 1.0, y1, z)], // -Z
     }
 }
 
@@ -1276,7 +1474,13 @@ fn face_uvs(face: usize, rect: [f32; 4]) -> [[f32; 2]; 4] {
     }
 }
 
-fn emit_quad(m: &mut VoxelMesh, q: [(f32, f32, f32); 4], uv: [[f32; 2]; 4], bright: f32, n: [f32; 3]) {
+fn emit_quad(
+    m: &mut VoxelMesh,
+    q: [(f32, f32, f32); 4],
+    uv: [[f32; 2]; 4],
+    bright: f32,
+    n: [f32; 3],
+) {
     let base = m.positions.len() as u32;
     for i in 0..4 {
         m.positions.push([q[i].0, q[i].1, q[i].2]);
@@ -1331,7 +1535,7 @@ pub fn far_row_order(i: usize) -> usize {
     if i == 0 {
         mid
     } else if i % 2 == 1 {
-        mid + (i + 1) / 2
+        mid + i.div_ceil(2)
     } else {
         mid - i / 2
     }
@@ -1399,7 +1603,8 @@ pub fn fill_far_rows(
             other => other,
         }
     }
-    let mut tile_cache: std::collections::HashMap<&'static str, [f32; 3]> = std::collections::HashMap::new();
+    let mut tile_cache: std::collections::HashMap<&'static str, [f32; 3]> =
+        std::collections::HashMap::new();
     let sand_avg = far_tile_avg(atlas, "sand");
     let half = (FAR_N as f32 - 1.0) / 2.0 * FAR_STEP;
     let to = to.min(FAR_N);
@@ -1411,18 +1616,20 @@ pub fn fill_far_rows(
             let mut h = g.height_at(wx.floor(), wz.floor()) as f32;
             // alien 浮岛（JS mapHeightAt：h+6 <= fl.base → fl.base+fl.thick）
             let mut island_h = None;
-            if b.key == "alien" {
-                if let Some((base, thick)) = g.float_island_at(wx, wz) {
-                    if h + 6.0 <= base as f32 {
-                        island_h = Some((base, thick));
-                        h = base as f32 + thick as f32;
-                    }
-                }
+            if b.key == "alien"
+                && let Some((base, thick)) = g.float_island_at(wx, wz)
+                && h + 6.0 <= base as f32
+            {
+                island_h = Some((base, thick));
+                h = base as f32 + thick as f32;
             }
             let (y, col) = if h < seab && (!b.dry || b.lava) && island_h.is_none() {
                 let depth = (seab - h).max(0.0);
                 let sh = (0.78 - depth * 0.008).clamp(0.0, 1.0);
-                (seab, [water_rgb[0] * sh, water_rgb[1] * sh, water_rgb[2] * sh, 1.0])
+                (
+                    seab,
+                    [water_rgb[0] * sh, water_rgb[1] * sh, water_rgb[2] * sh, 1.0],
+                )
             } else {
                 let ground_key = g
                     .sub_at(wx.floor(), wz.floor())
@@ -1430,8 +1637,14 @@ pub fn fill_far_rows(
                     .filter(|k| !k.is_empty())
                     .unwrap_or(b.grass);
                 let tk = tile_key(ground_key);
-                let avg = *tile_cache.entry(tk).or_insert_with(|| far_tile_avg(atlas, tk));
-                let avg = if h < seab + 1.0 && !no_beach && island_h.is_none() { sand_avg } else { avg };
+                let avg = *tile_cache
+                    .entry(tk)
+                    .or_insert_with(|| far_tile_avg(atlas, tk));
+                let avg = if h < seab + 1.0 && !no_beach && island_h.is_none() {
+                    sand_avg
+                } else {
+                    avg
+                };
                 let sh = (0.72 + (h - 14.0) * 0.012).clamp(0.0, 1.35);
                 (
                     h,
@@ -1456,10 +1669,26 @@ pub fn fill_far_rows(
     let y_at = |ix: usize, iz: usize| positions[iz * FAR_N + ix][1];
     for iz in 0..FAR_N {
         for ix in 0..FAR_N {
-            let h_l = if ix > 0 { y_at(ix - 1, iz) } else { y_at(ix, iz) };
-            let h_r = if ix + 1 < FAR_N { y_at(ix + 1, iz) } else { y_at(ix, iz) };
-            let h_d = if iz > 0 { y_at(ix, iz - 1) } else { y_at(ix, iz) };
-            let h_u = if iz + 1 < FAR_N { y_at(ix, iz + 1) } else { y_at(ix, iz) };
+            let h_l = if ix > 0 {
+                y_at(ix - 1, iz)
+            } else {
+                y_at(ix, iz)
+            };
+            let h_r = if ix + 1 < FAR_N {
+                y_at(ix + 1, iz)
+            } else {
+                y_at(ix, iz)
+            };
+            let h_d = if iz > 0 {
+                y_at(ix, iz - 1)
+            } else {
+                y_at(ix, iz)
+            };
+            let h_u = if iz + 1 < FAR_N {
+                y_at(ix, iz + 1)
+            } else {
+                y_at(ix, iz)
+            };
             let norm = Vec3::new(h_l - h_r, 2.0 * FAR_STEP, h_d - h_u).normalize();
             normals[iz * FAR_N + ix] = [norm.x, norm.y, norm.z];
         }
@@ -1522,7 +1751,7 @@ mod tests {
         let b = g2.gen_chunk_data(0, 0);
         assert_eq!(&*a, &*b);
         // chunk 0,0 of a lush world must have terrain: some stone and grass
-        assert!(a.iter().any(|&v| v == ids::STONE));
+        assert!(a.contains(&ids::STONE));
         assert!(a.iter().any(|&v| v == ids::GRASS || v == ids::SAND));
         // bedrock floor
         assert!(a[lidx(0, 0, 0)] == ids::BARRIER);
@@ -1545,7 +1774,7 @@ mod tests {
         let biome = data::biome_by_key("ocean");
         let g = WorldGen::new(4242, biome);
         let d = g.gen_chunk_data(0, 0);
-        assert!(d.iter().any(|&v| v == ids::WATER));
+        assert!(d.contains(&ids::WATER));
     }
 
     #[test]
@@ -1554,7 +1783,7 @@ mod tests {
         let g = WorldGen::new(99, biome);
         let d = g.gen_chunk_data(2, 2);
         // volcanic: dry+lava → water id present (as lava)
-        assert!(d.iter().any(|&v| v == ids::WATER));
+        assert!(d.contains(&ids::WATER));
     }
 
     #[test]
@@ -1584,7 +1813,11 @@ mod tests {
                 "z {:?} outside chunk 5 world footprint [80,96]",
                 p
             );
-            assert!((0.0..=96.0).contains(&p[1]), "y {:?} outside world height", p);
+            assert!(
+                (0.0..=96.0).contains(&p[1]),
+                "y {:?} outside world height",
+                p
+            );
         }
     }
 }

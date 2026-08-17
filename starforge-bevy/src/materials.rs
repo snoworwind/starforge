@@ -19,9 +19,9 @@ pub struct CurveUniform {
     pub edge_r: f32,    // radial edge fade radius (blocks)
     pub pad: f32,
     pub scan_r: f32,  // scan pulse radius
-    pub scan_cx: f32,  // scan center x
-    pub scan_cz: f32,  // scan center z
-    pub scan_a: f32,   // scan alpha
+    pub scan_cx: f32, // scan center x
+    pub scan_cz: f32, // scan center z
+    pub scan_a: f32,  // scan alpha
     // 远景挖空环（far_hole_on=1 时在片元着色器里按到 far_hole_cx/cz 的距离淡出，
     // 替代旧实现每帧在 CPU 上改写 129×129 顶点 alpha——JS farMesh 用 shader uniform 同口径）
     pub far_hole_on: f32,
@@ -178,17 +178,14 @@ pub fn curve_system(
     let cam_y = p.eye().y;
     let amt = ((cam_y - 62.0) / (150.0 - 62.0)).clamp(0.0, 1.0);
     // 出大气过渡：最后 60 格地形/远景淡出（球面 LOD 无缝接棒，避免飞出大气瞬间贴图突变）
-    let fade = if *mode == crate::space::FlightMode::Atmo
-        || *mode == crate::space::FlightMode::AtmoLand
-    {
-        ((crate::space::EXIT_Y - ship.pos.y) / 60.0).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
+    let fade =
+        if *mode == crate::space::FlightMode::Atmo || *mode == crate::space::FlightMode::AtmoLand {
+            ((crate::space::EXIT_Y - ship.pos.y) / 60.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
     // 远景挖空环半径随区块视距联动（JS farHoleU 同口径），片元着色器按玩家距离计算
-    let (r0, r1) = crate::far_hole_radii(
-        world.map(|w| w.view_dist).unwrap_or(10),
-    );
+    let (r0, r1) = crate::far_hole_radii(world.map(|w| w.view_dist).unwrap_or(10));
     for handle in [&mats.solid, &mats.water, &mats.far] {
         if let Some(mut m) = materials.get_mut(handle) {
             let c = &mut m.extension.curve;
@@ -264,10 +261,16 @@ pub fn lamp_pool_system(
         _ => (0xff as f32, 0xd9 as f32, 0xa0 as f32),
     };
     for (i, e) in pool.entities.iter().enumerate() {
-        let Ok((mut l, mut tf)) = lights.get_mut(*e) else { continue };
+        let Ok((mut l, mut tf)) = lights.get_mut(*e) else {
+            continue;
+        };
         if let Some((_, cell, id)) = found.get(i) {
             // JS: l.position.set(x+0.5, y+0.9, z+0.5) —— 光必须跟随灯块
-            tf.translation = Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.9, cell[2] as f32 + 0.5);
+            tf.translation = Vec3::new(
+                cell[0] as f32 + 0.5,
+                cell[1] as f32 + 0.9,
+                cell[2] as f32 + 0.5,
+            );
             let (r, g, b) = glow_color(crate::data::block_by_id(*id).key);
             l.color = Color::srgb(r / 255.0, g / 255.0, b / 255.0);
             l.intensity = 220.0;

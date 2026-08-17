@@ -2,8 +2,8 @@
 //! placement, hotbar, drops, survival stats).
 
 use crate::audio;
-use crate::creatures::{spawn_drop, Creature};
-use crate::data::{self, ids, Difficulty, DropEntry, CHARGE_DEFS};
+use crate::creatures::{Creature, spawn_drop};
+use crate::data::{self, CHARGE_DEFS, Difficulty, DropEntry, ids};
 use crate::inventory::{Inventory, Slot};
 use crate::ui::{Ghost, UiState};
 use crate::world::World;
@@ -148,11 +148,7 @@ impl Player {
         let fx = -self.yaw.sin();
         let fz = -self.yaw.cos();
         if fx.abs() > fz.abs() {
-            if fx > 0.0 {
-                0
-            } else {
-                2
-            }
+            if fx > 0.0 { 0 } else { 2 }
         } else if fz > 0.0 {
             1
         } else {
@@ -250,16 +246,13 @@ pub fn look_system(
         // soft clamp 1.35, hard asymptote toward 1.55
         let soft = 1.35f32;
         let hard = 1.55f32;
-        let clamp_pitch = |v: f32| {
-            if v > soft {
-                soft + (hard - soft) * (1.0 - (-(v - soft) * 3.0).exp())
-            } else if v < -soft {
-                -soft - (hard - soft) * (1.0 - (-(-v - soft) * 3.0).exp())
-            } else {
-                v
-            }
+        p.pitch = if p.pitch > soft {
+            soft + (hard - soft) * (1.0 - (-(p.pitch - soft) * 3.0).exp())
+        } else if p.pitch < -soft {
+            -soft - (hard - soft) * (1.0 - (-(-p.pitch - soft) * 3.0).exp())
+        } else {
+            p.pitch
         };
-        p.pitch = clamp_pitch(p.pitch);
         p.pitch = p.pitch.clamp(-hard - 0.01, hard + 0.01);
     }
 }
@@ -348,10 +341,8 @@ pub fn movement_system(
         if jetting && p.jet_entity.is_none() {
             let e = audio::play_loop(&mut commands, sfx.jet.clone(), 0.35);
             p.jet_entity = Some(e);
-        } else if !jetting {
-            if let Some(e) = p.jet_entity.take() {
-                commands.entity(e).despawn();
-            }
+        } else if !jetting && let Some(e) = p.jet_entity.take() {
+            commands.entity(e).despawn();
         }
         if p.on_ground {
             p.stats.jet = (p.stats.jet + 40.0 * dt).min(100.0);
@@ -387,10 +378,10 @@ pub fn collision_system(time: Res<Time>, mut q: Query<&mut Player>, world: Res<W
                         if !def.solid {
                             continue;
                         }
-                        if let Some(lb) = def.lowbox {
-                            if py > y as f32 + lb {
-                                continue; // step over
-                            }
+                        if let Some(lb) = def.lowbox
+                            && py > y as f32 + lb
+                        {
+                            continue; // step over
                         }
                         return true;
                     }
@@ -545,10 +536,7 @@ pub fn mining_system(
     mouse: Res<ButtonInput<MouseButton>>,
     mut commands: Commands,
     mut q: Query<(Entity, &mut Player)>,
-    mut creatures: ParamSet<(
-        Query<(Entity, &Creature, &Transform)>,
-        Query<&mut Creature>,
-    )>,
+    mut creatures: ParamSet<(Query<(Entity, &Creature, &Transform)>, Query<&mut Creature>)>,
     world: Res<World>,
     sfx: Res<audio::Sfx>,
     ui: Res<UiState>,
@@ -695,6 +683,7 @@ pub fn placement_system(
     ghost: Query<Entity, With<Ghost>>,
     machines: Query<(&crate::factory::Machine, Entity)>,
     mut placed_ev: MessageWriter<crate::quests::PlacedEvent>,
+    mut net_ev: MessageWriter<crate::network::BlockChanged>,
 ) {
     for mut p in &mut q {
         if p.dead || ui.locked() {
@@ -722,7 +711,11 @@ pub fn placement_system(
         let dir = p.look_dir();
         let hit = world.raycast(origin, dir, 6.0);
         let target: Option<[i32; 3]> = hit.and_then(|(cell, normal, _)| {
-            let t = [cell[0] + normal[0], cell[1] + normal[1], cell[2] + normal[2]];
+            let t = [
+                cell[0] + normal[0],
+                cell[1] + normal[1],
+                cell[2] + normal[2],
+            ];
             if !(0..data::WORLD_H).contains(&t[1]) {
                 return None;
             }
@@ -735,34 +728,52 @@ pub fn placement_system(
             let by1 = (p.pos.y + H).floor() as i32;
             let bz0 = (p.pos.z - W).floor() as i32;
             let bz1 = (p.pos.z + W).floor() as i32;
-            if t[0] >= bx0 && t[0] <= bx1 && t[1] >= by0 && t[1] <= by1 && t[2] >= bz0 && t[2] <= bz1 {
+            if t[0] >= bx0
+                && t[0] <= bx1
+                && t[1] >= by0
+                && t[1] <= by1
+                && t[2] >= bz0
+                && t[2] <= bz1
+            {
                 return None;
             }
             Some(t)
         });
-        if mouse.just_pressed(MouseButton::Right) {
-            if let Some(t) = target {
-                let ok = p.inv.count_item(&slot.item) > 0 || p.creative();
-                if ok {
-                    world.set(t[0], t[1], t[2], b_def.id);
-                    if b_def.machine.is_some() {
-                        // avoid duplicates
-                        let exists = machines.iter().any(|(m, _)| m.pos == t);
-                        if !exists {
-                            crate::factory::spawn_machine(&mut commands, t, block_key, p.effective_dir());
-                        }
+        if mouse.just_pressed(MouseButton::Right)
+            && let Some(t) = target
+        {
+            let ok = p.inv.count_item(&slot.item) > 0 || p.creative();
+            if ok {
+                world.set(t[0], t[1], t[2], b_def.id);
+                net_ev.write(crate::network::BlockChanged {
+                    x: t[0],
+                    y: t[1],
+                    z: t[2],
+                    id: b_def.id,
+                    dir: p.effective_dir(),
+                });
+                if b_def.machine.is_some() {
+                    // avoid duplicates
+                    let exists = machines.iter().any(|(m, _)| m.pos == t);
+                    if !exists {
+                        crate::factory::spawn_machine(
+                            &mut commands,
+                            t,
+                            block_key,
+                            p.effective_dir(),
+                        );
                     }
-                    if !p.creative() {
-                        p.inv.remove_item(&slot.item, 1);
-                    }
-                    placed_ev.write(crate::quests::PlacedEvent {
-                        block: block_key.to_string(),
-                    });
-                    audio::play(&mut commands, sfx.place.clone(), 0.7, None);
-                } else {
-                    audio::play(&mut commands, sfx.error.clone(), 0.5, None);
-                    p.toast("物品不足");
                 }
+                if !p.creative() {
+                    p.inv.remove_item(&slot.item, 1);
+                }
+                placed_ev.write(crate::quests::PlacedEvent {
+                    block: block_key.to_string(),
+                });
+                audio::play(&mut commands, sfx.place.clone(), 0.7, None);
+            } else {
+                audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+                p.toast("物品不足");
             }
         }
         if let Ok(e) = ghost.single() {
@@ -771,7 +782,11 @@ pub fn placement_system(
                 let lb = b_def.lowbox.unwrap_or(1.0);
                 commands.entity(e).insert((
                     Ghost {
-                        pos: Vec3::new(t[0] as f32 + 0.5, t[1] as f32 + lb * 0.5, t[2] as f32 + 0.5),
+                        pos: Vec3::new(
+                            t[0] as f32 + 0.5,
+                            t[1] as f32 + lb * 0.5,
+                            t[2] as f32 + 0.5,
+                        ),
                         scale: Vec3::new(1.0, lb, 1.0),
                         ok,
                         active: true,
@@ -797,7 +812,7 @@ pub fn placement_system(
 
 pub fn hotbar_system(
     keys: Res<ButtonInput<KeyCode>>,
-    mut wheel: Res<AccumulatedMouseScroll>,
+    wheel: Res<AccumulatedMouseScroll>,
     mut q: Query<&mut Player>,
     mut commands: Commands,
     world: Res<World>,
@@ -829,7 +844,13 @@ pub fn hotbar_system(
         }
         let mut scroll = 0i32;
         let wy = wheel.delta.y;
-        scroll += if wy > 0.0 { 1 } else if wy < 0.0 { -1 } else { 0 };
+        scroll += if wy > 0.0 {
+            1
+        } else if wy < 0.0 {
+            -1
+        } else {
+            0
+        };
         if scroll != 0 {
             let cur = if p.hot_idx == -1 { 9 } else { p.hot_idx };
             let next = (cur + scroll + 10) % 10;
@@ -839,16 +860,25 @@ pub fn hotbar_system(
         // G: drop item
         if keys.just_pressed(KeyCode::KeyG) {
             let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-            if let Some(i) = p.hot_slot() {
-                if let Some(s) = p.inv.slots[i].clone() {
-                    let n = if shift { s.n } else { 1 };
-                    let dir = p.look_dir();
-                    let drop_pos = p.pos + Vec3::new(dir.x * 0.7, -0.15 + dir.y * 0.5, dir.z * 0.7);
-                    let vel = Vec3::new(dir.x * 6.0, dir.y * 6.0 + 2.2, dir.z * 6.0);
-                    spawn_drop(&mut commands, &world, &icons, drop_pos, vel, s.item.clone(), n, 1.2);
-                    p.inv.remove_item(&s.item, n);
-                    audio::play(&mut commands, sfx.click.clone(), 0.4, None);
-                }
+            if let Some(i) = p.hot_slot()
+                && let Some(s) = p.inv.slots[i].clone()
+            {
+                let n = if shift { s.n } else { 1 };
+                let dir = p.look_dir();
+                let drop_pos = p.pos + Vec3::new(dir.x * 0.7, -0.15 + dir.y * 0.5, dir.z * 0.7);
+                let vel = Vec3::new(dir.x * 6.0, dir.y * 6.0 + 2.2, dir.z * 6.0);
+                spawn_drop(
+                    &mut commands,
+                    &world,
+                    &icons,
+                    drop_pos,
+                    vel,
+                    s.item.clone(),
+                    n,
+                    1.2,
+                );
+                p.inv.remove_item(&s.item, n);
+                audio::play(&mut commands, sfx.click.clone(), 0.4, None);
             }
         }
     }
@@ -859,9 +889,14 @@ pub fn break_system(
     mut queue: ResMut<BreakQueue>,
     mut world: ResMut<World>,
     mut q: Query<&mut Player>,
-    machines: Query<(Entity, &crate::factory::Machine, &crate::factory::MachineState)>,
+    machines: Query<(
+        Entity,
+        &crate::factory::Machine,
+        &crate::factory::MachineState,
+    )>,
     mut commands: Commands,
     icons: Res<crate::ui::IconMaterials>,
+    mut net_ev: MessageWriter<crate::network::BlockChanged>,
 ) {
     for (player_e, cell, drops, mult) in queue.0.drain(..) {
         let mut rng = crate::rng::Rng::new(
@@ -876,7 +911,11 @@ pub fn break_system(
                     &mut commands,
                     &world,
                     &icons,
-                    Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5),
+                    Vec3::new(
+                        cell[0] as f32 + 0.5,
+                        cell[1] as f32 + 0.5,
+                        cell[2] as f32 + 0.5,
+                    ),
                     Vec3::new((rng.next() - 0.5) * 2.2, 2.6, (rng.next() - 0.5) * 2.2),
                     item,
                     n,
@@ -886,6 +925,13 @@ pub fn break_system(
             commands.entity(e).despawn();
         }
         world.set(cell[0], cell[1], cell[2], ids::AIR);
+        net_ev.write(crate::network::BlockChanged {
+            x: cell[0],
+            y: cell[1],
+            z: cell[2],
+            id: ids::AIR,
+            dir: 0,
+        });
         let above = world.get(cell[0], cell[1] + 1, cell[2]);
         if data::block_by_id(above).cross {
             // 上方十字植物一并掉落（JS player.js:968-972）
@@ -898,7 +944,11 @@ pub fn break_system(
                             &mut commands,
                             &world,
                             &icons,
-                            Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 1.5, cell[2] as f32 + 0.5),
+                            Vec3::new(
+                                cell[0] as f32 + 0.5,
+                                cell[1] as f32 + 1.5,
+                                cell[2] as f32 + 0.5,
+                            ),
                             Vec3::new((rng.next() - 0.5) * 2.2, 2.6, (rng.next() - 0.5) * 2.2),
                             d.item.to_string(),
                             n,
@@ -908,6 +958,13 @@ pub fn break_system(
                 }
             }
             world.set(cell[0], cell[1] + 1, cell[2], ids::AIR);
+            net_ev.write(crate::network::BlockChanged {
+                x: cell[0],
+                y: cell[1] + 1,
+                z: cell[2],
+                id: ids::AIR,
+                dir: 0,
+            });
         }
         for d in drops {
             if rng.next() <= d.chance {
@@ -917,7 +974,11 @@ pub fn break_system(
                         &mut commands,
                         &world,
                         &icons,
-                        Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5),
+                        Vec3::new(
+                            cell[0] as f32 + 0.5,
+                            cell[1] as f32 + 0.5,
+                            cell[2] as f32 + 0.5,
+                        ),
                         Vec3::new((rng.next() - 0.5) * 2.2, 2.6, (rng.next() - 0.5) * 2.2),
                         d.item.to_string(),
                         n,

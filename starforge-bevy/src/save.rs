@@ -4,8 +4,8 @@
 use crate::inventory::Slot;
 use crate::player::Player;
 use crate::world::World;
-use serde::{Deserialize, Serialize};
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -34,27 +34,59 @@ pub struct Appearance {
     pub visor: String,
 }
 
-fn d_skin() -> String { "#e8c49a".into() }
-fn d_hair_style() -> String { "short".into() }
-fn d_hair() -> String { "#4a3018".into() }
-fn d_suit() -> String { "#4a5a6e".into() }
-fn d_trim() -> String { "#35e0e8".into() }
-fn d_pants() -> String { "#33404c".into() }
-fn d_boots() -> String { "#1e262e".into() }
-fn d_helmet() -> bool { true }
-fn d_visor() -> String { "#ffb347".into() }
+fn d_skin() -> String {
+    "#e8c49a".into()
+}
+fn d_hair_style() -> String {
+    "short".into()
+}
+fn d_hair() -> String {
+    "#4a3018".into()
+}
+fn d_suit() -> String {
+    "#4a5a6e".into()
+}
+fn d_trim() -> String {
+    "#35e0e8".into()
+}
+fn d_pants() -> String {
+    "#33404c".into()
+}
+fn d_boots() -> String {
+    "#1e262e".into()
+}
+fn d_helmet() -> bool {
+    true
+}
+fn d_visor() -> String {
+    "#ffb347".into()
+}
 
 impl Appearance {
     pub fn random(seed: u32) -> Self {
         let mut r = crate::rng::Rng::new(seed);
-        let skins = ["#e8c49a", "#d8b48a", "#c89878", "#8d5a3c", "#6b4630", "#f0d8b8", "#b98e6a", "#e8d0b0"];
-        let hairs = ["#4a3018", "#2e2620", "#5a4632", "#7a5a8a", "#a86a3a", "#d8c8a8", "#c23a3a", "#1e2e4a"];
+        let skins = [
+            "#e8c49a", "#d8b48a", "#c89878", "#8d5a3c", "#6b4630", "#f0d8b8", "#b98e6a", "#e8d0b0",
+        ];
+        let hairs = [
+            "#4a3018", "#2e2620", "#5a4632", "#7a5a8a", "#a86a3a", "#d8c8a8", "#c23a3a", "#1e2e4a",
+        ];
         let styles = ["short", "long", "pony", "mohawk", "bun"];
-        let suits = ["#4a5a6e", "#3fa8c9", "#5a3e3e", "#6e6a2a", "#3e5a6e", "#4a4258", "#5a6a3a", "#7a3a2a"];
-        let trims = ["#35e0e8", "#ffb347", "#ff6a5e", "#b58aff", "#7dff8a", "#ffd94d", "#f0f0f0", "#35b0ff"];
-        let pants = ["#33404c", "#4a3c2e", "#2e3a44", "#3a3248", "#3e3a2e", "#443430"];
-        let boots = ["#1e262e", "#2e2620", "#26221a", "#241e2e", "#2a221e", "#33261a"];
-        let visors = ["#ffb347", "#35e0e8", "#ff6a5e", "#b58aff", "#7dff8a", "#f0f0f0"];
+        let suits = [
+            "#4a5a6e", "#3fa8c9", "#5a3e3e", "#6e6a2a", "#3e5a6e", "#4a4258", "#5a6a3a", "#7a3a2a",
+        ];
+        let trims = [
+            "#35e0e8", "#ffb347", "#ff6a5e", "#b58aff", "#7dff8a", "#ffd94d", "#f0f0f0", "#35b0ff",
+        ];
+        let pants = [
+            "#33404c", "#4a3c2e", "#2e3a44", "#3a3248", "#3e3a2e", "#443430",
+        ];
+        let boots = [
+            "#1e262e", "#2e2620", "#26221a", "#241e2e", "#2a221e", "#33261a",
+        ];
+        let visors = [
+            "#ffb347", "#35e0e8", "#ff6a5e", "#b58aff", "#7dff8a", "#f0f0f0",
+        ];
         Self {
             skin: skins[r.range(skins.len())].into(),
             hair_style: styles[r.range(styles.len())].into(),
@@ -94,9 +126,15 @@ pub struct ShipSave {
     pub inv: Vec<Option<Slot>>,
 }
 
-fn d_model() -> String { "ship".into() }
-fn d_cls() -> String { "C".into() }
-fn d_ship_name() -> String { "拓荒者号".into() }
+fn d_model() -> String {
+    "ship".into()
+}
+fn d_cls() -> String {
+    "C".into()
+}
+fn d_ship_name() -> String {
+    "拓荒者号".into()
+}
 
 /// 太空船位置/姿态（world record shipState）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -193,9 +231,15 @@ pub struct WorldData {
     pub creature_cells: Vec<crate::creatures::CellSave>,
 }
 
-fn d_state() -> String { "planet".into() }
-fn d_galaxy_seed() -> u32 { crate::data::HOME_GALAXY_SEED }
-fn d_galaxy_count() -> u32 { 1 }
+fn d_state() -> String {
+    "planet".into()
+}
+fn d_galaxy_seed() -> u32 {
+    crate::data::HOME_GALAXY_SEED
+}
+fn d_galaxy_count() -> u32 {
+    1
+}
 
 pub fn saves_dir() -> PathBuf {
     std::env::current_dir()
@@ -208,7 +252,9 @@ pub fn char_path(name: &str) -> PathBuf {
 }
 
 pub fn world_path(name: &str) -> PathBuf {
-    saves_dir().join("worlds").join(format!("{name}.world.json"))
+    saves_dir()
+        .join("worlds")
+        .join(format!("{name}.world.json"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -386,8 +432,7 @@ pub fn world_summaries() -> Vec<(String, u32, String)> {
 }
 
 /// Settings persisted to saves/settings.json.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[derive(Resource)]
+#[derive(Serialize, Deserialize, Clone, Debug, Resource)]
 pub struct Settings {
     pub view_dist: i32,
     pub mouse_sens: f32,
@@ -395,6 +440,14 @@ pub struct Settings {
     pub show_fps: bool,
     #[serde(default)]
     pub pixelated: bool,
+    #[serde(default = "default_enabled")]
+    pub clouds: bool,
+    #[serde(default = "default_enabled")]
+    pub weather: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -405,6 +458,8 @@ impl Default for Settings {
             volume: 0.8,
             show_fps: false,
             pixelated: false,
+            clouds: true,
+            weather: true,
         }
     }
 }

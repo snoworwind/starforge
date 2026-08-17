@@ -1,5 +1,7 @@
 # STARFORGE `player.js` — 1:1 Porting Specification (Rust target)
 
+> Repository note (2026-08-17): all legacy paths named below now live under `legacy-web/`.
+
 **Source file:** `js/player.js` (1108 lines). **External data referenced at runtime:** block/`hard` & machine flags in `js/data.js` (`BLOCKS`), item `stack` sizes in `js/data.js` (`ITEMS`), biome `hazRate`/`lava` flags in `js/data.js` (`BIOMES`), `Game.dropMult` / `Game.creative` / `Game.state` in `js/main.js`, `World.getDef/set/raycast/topAt/inBounds/findSpawn/biome` in `js/world.js`, `Creatures.rayHit/damage` in `js/creatures.js`, `Factory.at/place/remove` in `js/factory.js`. All numbers below are the exact values from the code. Values **not** defined in `player.js` are marked **[ext]**.
 
 All units: meters (world units = 1 block), seconds (`dt` in seconds), radians for angles, "HP/shield" are integer segments ("段" = pip/segment).

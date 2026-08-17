@@ -1,5 +1,7 @@
 # STARFORGE — Technical Specification for a Rust/Bevy Port
 
+> Repository note (2026-08-17): all legacy paths named below now live under `legacy-web/` (for example, `js/main.js` is `legacy-web/js/main.js`).
+
 Source files analyzed: `js/savestore.js`, `js/ui.js`, `js/main.js` (game-state machine / save / key-bindings / main-loop portions), plus `js/player.js`, `js/factory.js`, `js/world.js`, `js/creatures.js`, `js/data.js`, `index.html`, `css/style.css`.
 
 > Version markers observed in source: `build v186`, `window.__V_MAIN = 'v187'`; save format is **v4** (older v≤3 saves are incompatible and are exported/deleted, not migrated).

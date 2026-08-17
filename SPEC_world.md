@@ -1,5 +1,7 @@
 # STARFORGE `world.js` — Technical Specification for 1:1 Rust Port
 
+> Repository note (2026-08-17): all legacy paths named below now live under `legacy-web/`.
+
 Scope: `js/world.js` (the voxel terrain/world module). It depends on three external definitions reproduced here because they are required for a faithful port: `mulberry32` (`textures.js:7`), the block table `BLOCKS` (`data.js:10`), the biome table `BIOMES` (`data.js:201`), and the texture atlas `Tex` (`textures.js`).
 
 ---

@@ -6,24 +6,34 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: 自动化测试（无头浏览器）
+  bevy:
+    name: Bevy 严格检查与测试
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 24
-          cache: npm
+          components: rustfmt, clippy
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install Linux audio and device dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
 
-      # 测试运行器用 playwright-core 驱动系统浏览器；ubuntu-latest 预装了 Google Chrome。
-      # 本机开发默认走 Edge（--browser=edge），CI 无 Edge，故显式指定 chrome。
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: starforge-bevy
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets --all-features
+        working-directory: starforge-bevy
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        working-directory: starforge-bevy
+
       - name: Run tests
-        run: npm test -- --browser=chrome
+        run: cargo test --locked --all-targets --all-features
+        working-directory: starforge-bevy

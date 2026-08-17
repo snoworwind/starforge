@@ -1696,7 +1696,8 @@ pub fn machine_sync_system(
                 continue;
             }
             for (i, &id) in chunk.data.iter().enumerate() {
-                if !data::block_by_id(id).machine.is_some() {
+                let def = data::block_by_id(id);
+                if def.machine.is_none() {
                     continue;
                 }
                 let pos = [
@@ -1706,7 +1707,7 @@ pub fn machine_sync_system(
                         + ((i / data::CHUNK as usize) % data::CHUNK as usize) as i32,
                 ];
                 if !existing.contains(&pos) {
-                    to_spawn.push((pos, data::block_by_id(id).key));
+                    to_spawn.push((pos, def.key));
                 }
             }
             // Avoid rescanning this chunk on unrelated stream updates.

@@ -47,12 +47,13 @@ impl Inventory {
             if remaining <= 0 {
                 break;
             }
-            if let Some(s) = slot {
-                if s.item == item && s.n < max_stack {
-                    let add = (max_stack - s.n).min(remaining);
-                    s.n += add;
-                    remaining -= add;
-                }
+            if let Some(s) = slot
+                && s.item == item
+                && s.n < max_stack
+            {
+                let add = (max_stack - s.n).min(remaining);
+                s.n += add;
+                remaining -= add;
             }
         }
         // empty slots
@@ -82,14 +83,14 @@ impl Inventory {
             if remaining <= 0 {
                 break;
             }
-            if let Some(s) = &mut self.slots[i] {
-                if s.item == item {
-                    let take = s.n.min(remaining);
-                    s.n -= take;
-                    remaining -= take;
-                    if s.n <= 0 {
-                        self.slots[i] = None;
-                    }
+            if let Some(s) = &mut self.slots[i]
+                && s.item == item
+            {
+                let take = s.n.min(remaining);
+                s.n -= take;
+                remaining -= take;
+                if s.n <= 0 {
+                    self.slots[i] = None;
                 }
             }
         }

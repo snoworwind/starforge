@@ -196,7 +196,10 @@ pub struct BeaconState {
 
 impl Default for BeaconState {
     fn default() -> Self {
-        Self { label: "标记点".into(), gal: false }
+        Self {
+            label: "标记点".into(),
+            gal: false,
+        }
     }
 }
 
@@ -270,13 +273,19 @@ impl MachineState {
             MachineKind::Furnace => Self::Furnace(FurnaceState::default()),
             MachineKind::Miner => Self::Miner(MinerState::default()),
             MachineKind::Belt => Self::Belt(BeltState::default()),
-            MachineKind::Assembler | MachineKind::Refinery => Self::Crafter(CrafterState::default()),
-            MachineKind::Chest => Self::Chest(ChestState { slots: vec![None; 24] }),
+            MachineKind::Assembler | MachineKind::Refinery => {
+                Self::Crafter(CrafterState::default())
+            }
+            MachineKind::Chest => Self::Chest(ChestState {
+                slots: vec![None; 24],
+            }),
             MachineKind::Reactor => Self::Reactor(ReactorState::default()),
             MachineKind::Burner => Self::Burner(BurnerState::default()),
             MachineKind::Beacon => Self::Beacon(BeaconState::default()),
             MachineKind::Lumberbot => Self::Lumberbot(LumberbotState::default()),
-            MachineKind::Collector => Self::Collector(CollectorState { slots: vec![None; 12] }),
+            MachineKind::Collector => Self::Collector(CollectorState {
+                slots: vec![None; 12],
+            }),
             MachineKind::Medbay => Self::Medbay(MedbayState::default()),
             _ => Self::Plain,
         }
@@ -288,8 +297,17 @@ pub fn spawn_machine(commands: &mut Commands, pos: [i32; 3], key: &str, dir: u8)
     let kind = MachineKind::from_block_key(key);
     commands
         .spawn((
-            Transform::from_xyz(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-            Machine { pos, kind, dir, active: false },
+            Transform::from_xyz(
+                pos[0] as f32 + 0.5,
+                pos[1] as f32 + 0.5,
+                pos[2] as f32 + 0.5,
+            ),
+            Machine {
+                pos,
+                kind,
+                dir,
+                active: false,
+            },
             MachineState::for_kind(kind),
             crate::InGame,
         ))
@@ -321,7 +339,7 @@ pub fn machine_drop(block_key: &str) -> &'static str {
 /// 拆机内容返还（JS Factory.remove 退款：in/fuel/out/槽位/皮带/碳 cargo/铀/进行中配方原料）。
 pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
     let mut out: Vec<(String, i32)> = Vec::new();
-    let mut push = |out: &mut Vec<(String, i32)>, item: &str, n: i32| {
+    let push = |out: &mut Vec<(String, i32)>, item: &str, n: i32| {
         if n > 0 {
             out.push((item.to_string(), n));
         }
@@ -356,14 +374,13 @@ pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
                 push(&mut out, &s.item, s.n);
             }
             // 进行中配方：退还一组原料（JS: prog>0 && recipe）
-            if c.prog > 0.0 {
-                if let Some(r) = c
+            if c.prog > 0.0
+                && let Some(r) = c
                     .recipe
                     .and_then(|rid| data::RECIPES.iter().find(|r| r.id == rid))
-                {
-                    for (i, n) in r.inputs {
-                        push(&mut out, i, *n);
-                    }
+            {
+                for (i, n) in r.inputs {
+                    push(&mut out, i, *n);
                 }
             }
         }
@@ -498,18 +515,38 @@ impl MachineState {
                 input_map: c.input.clone(),
                 ..default()
             },
-            Self::Chest(c) => MachineDataSave { slots: c.slots.clone(), ..default() },
-            Self::Reactor(r) => MachineDataSave { fuel_s: r.fuel, ..default() },
+            Self::Chest(c) => MachineDataSave {
+                slots: c.slots.clone(),
+                ..default()
+            },
+            Self::Reactor(r) => MachineDataSave {
+                fuel_s: r.fuel,
+                ..default()
+            },
             Self::Burner(b) => MachineDataSave {
                 fuel: b.fuel.clone(),
                 burn: b.burn,
                 burn_max: b.burn_max,
                 ..default()
             },
-            Self::Beacon(b) => MachineDataSave { label: Some(b.label.clone()), gal: b.gal, ..default() },
-            Self::Lumberbot(l) => MachineDataSave { cargo: l.cargo, bot_pos: Some(l.pos), ..default() },
-            Self::Collector(c) => MachineDataSave { slots: c.slots.clone(), ..default() },
-            Self::Medbay(m) => MachineDataSave { heal_acc: m.heal_acc, ..default() },
+            Self::Beacon(b) => MachineDataSave {
+                label: Some(b.label.clone()),
+                gal: b.gal,
+                ..default()
+            },
+            Self::Lumberbot(l) => MachineDataSave {
+                cargo: l.cargo,
+                bot_pos: Some(l.pos),
+                ..default()
+            },
+            Self::Collector(c) => MachineDataSave {
+                slots: c.slots.clone(),
+                ..default()
+            },
+            Self::Medbay(m) => MachineDataSave {
+                heal_acc: m.heal_acc,
+                ..default()
+            },
             Self::Plain => MachineDataSave::default(),
         }
     }
@@ -532,7 +569,14 @@ impl MachineState {
                 deposit: d.deposit,
             }),
             MachineKind::Belt => Self::Belt(BeltState {
-                items: d.items.iter().map(|(i, t)| BeltItem { item: i.clone(), t: *t }).collect(),
+                items: d
+                    .items
+                    .iter()
+                    .map(|(i, t)| BeltItem {
+                        item: i.clone(),
+                        t: *t,
+                    })
+                    .collect(),
             }),
             MachineKind::Assembler | MachineKind::Refinery => Self::Crafter(CrafterState {
                 // 配方 id 以字符串存档，读档时解析回 &'static str
@@ -545,7 +589,11 @@ impl MachineState {
                 prog: d.prog,
             }),
             MachineKind::Chest => Self::Chest(ChestState {
-                slots: if d.slots.is_empty() { vec![None; 24] } else { d.slots.clone() },
+                slots: if d.slots.is_empty() {
+                    vec![None; 24]
+                } else {
+                    d.slots.clone()
+                },
             }),
             MachineKind::Reactor => Self::Reactor(ReactorState { fuel: d.fuel_s }),
             MachineKind::Burner => Self::Burner(BurnerState {
@@ -563,9 +611,15 @@ impl MachineState {
                 ..default()
             }),
             MachineKind::Collector => Self::Collector(CollectorState {
-                slots: if d.slots.is_empty() { vec![None; 12] } else { d.slots.clone() },
+                slots: if d.slots.is_empty() {
+                    vec![None; 12]
+                } else {
+                    d.slots.clone()
+                },
             }),
-            MachineKind::Medbay => Self::Medbay(MedbayState { heal_acc: d.heal_acc }),
+            MachineKind::Medbay => Self::Medbay(MedbayState {
+                heal_acc: d.heal_acc,
+            }),
             _ => Self::Plain,
         }
     }
@@ -581,11 +635,14 @@ fn belt_insert(b: &mut BeltState, item: &str, t_start: f32) -> bool {
     if !belt_can_accept(b, t_start) {
         return false;
     }
-    b.items.push(BeltItem { item: item.to_string(), t: t_start });
+    b.items.push(BeltItem {
+        item: item.to_string(),
+        t: t_start,
+    });
     true
 }
 
-pub fn can_machine_accept(m: &Machine, item: &str, state: &MachineState) -> bool {
+pub fn can_machine_accept(_m: &Machine, item: &str, state: &MachineState) -> bool {
     match state {
         MachineState::Furnace(f) => {
             if data::fuel_value(item) > 0.0
@@ -610,11 +667,18 @@ pub fn can_machine_accept(m: &Machine, item: &str, state: &MachineState) -> bool
         MachineState::Collector(c) => slots_accept(&c.slots, item),
         MachineState::Crafter(c) => {
             let Some(rid) = c.recipe else { return false };
-            let Some(r) = data::RECIPES.iter().find(|r| r.id == rid) else { return false };
+            let Some(r) = data::RECIPES.iter().find(|r| r.id == rid) else {
+                return false;
+            };
             if !r.inputs.iter().any(|(i, _)| *i == item) {
                 return false;
             }
-            let need = r.inputs.iter().find(|(i, _)| *i == item).map(|(_, n)| *n).unwrap_or(1);
+            let need = r
+                .inputs
+                .iter()
+                .find(|(i, _)| *i == item)
+                .map(|(_, n)| *n)
+                .unwrap_or(1);
             c.input.get(item).copied().unwrap_or(0) < need * 3
         }
         MachineState::Belt(b) => belt_can_accept(b, 0.0),
@@ -655,7 +719,12 @@ pub fn machine_insert(m: &Machine, state: &mut MachineState, item: &str) -> bool
             {
                 match &mut f.fuel {
                     Some(s) if s.item == item => s.n += 1,
-                    None => f.fuel = Some(Slot { item: item.to_string(), n: 1 }),
+                    None => {
+                        f.fuel = Some(Slot {
+                            item: item.to_string(),
+                            n: 1,
+                        })
+                    }
                     _ => return false,
                 }
                 return true;
@@ -663,14 +732,24 @@ pub fn machine_insert(m: &Machine, state: &mut MachineState, item: &str) -> bool
             if recipe_match {
                 match &mut f.input {
                     Some(s) if s.item == item => s.n += 1,
-                    None => f.input = Some(Slot { item: item.to_string(), n: 1 }),
+                    None => {
+                        f.input = Some(Slot {
+                            item: item.to_string(),
+                            n: 1,
+                        })
+                    }
                     _ => return false,
                 }
                 return true;
             }
             match &mut f.fuel {
                 Some(s) if s.item == item => s.n += 1,
-                None => f.fuel = Some(Slot { item: item.to_string(), n: 1 }),
+                None => {
+                    f.fuel = Some(Slot {
+                        item: item.to_string(),
+                        n: 1,
+                    })
+                }
                 _ => return false,
             }
             true
@@ -689,7 +768,12 @@ pub fn machine_insert(m: &Machine, state: &mut MachineState, item: &str) -> bool
         MachineState::Burner(b) => {
             match &mut b.fuel {
                 Some(s) if s.item == item => s.n += 1,
-                None => b.fuel = Some(Slot { item: item.to_string(), n: 1 }),
+                None => {
+                    b.fuel = Some(Slot {
+                        item: item.to_string(),
+                        n: 1,
+                    })
+                }
                 _ => return false,
             }
             true
@@ -701,16 +785,20 @@ pub fn machine_insert(m: &Machine, state: &mut MachineState, item: &str) -> bool
 fn insert_into_slots(slots: &mut [Option<Slot>], item: &str) -> bool {
     let stack = data::item_by_key(item).map(|i| i.stack).unwrap_or(250);
     for s in slots.iter_mut() {
-        if let Some(sl) = s {
-            if sl.item == item && sl.n < stack {
-                sl.n += 1;
-                return true;
-            }
+        if let Some(sl) = s
+            && sl.item == item
+            && sl.n < stack
+        {
+            sl.n += 1;
+            return true;
         }
     }
     for s in slots.iter_mut() {
         if s.is_none() {
-            *s = Some(Slot { item: item.to_string(), n: 1 });
+            *s = Some(Slot {
+                item: item.to_string(),
+                n: 1,
+            });
             return true;
         }
     }
@@ -766,19 +854,15 @@ fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
 }
 
 /// 机器输出一个物品：输出面皮带/机器优先，其余面仅入机器。
-fn try_output(
-    m: &Machine,
-    item: &str,
-    snap: &mut Snapshot,
-) -> bool {
+fn try_output(m: &Machine, item: &str, snap: &mut Snapshot) -> bool {
     let crafter = matches!(m.kind, MachineKind::Assembler | MachineKind::Refinery);
     let (fdx, fdz) = DIRS[m.dir as usize];
     let mut targets: Vec<Entity> = Vec::new();
     let front = [m.pos[0] + fdx, m.pos[1], m.pos[2] + fdz];
-    if let Some(e) = snap.pos_index.get(&front) {
-        if !(crafter && is_input_face(m, m.dir, snap)) {
-            targets.push(*e);
-        }
+    if let Some(e) = snap.pos_index.get(&front)
+        && !(crafter && is_input_face(m, m.dir, snap))
+    {
+        targets.push(*e);
     }
     for (d, (dx, dz)) in DIRS.iter().enumerate() {
         if d == m.dir as usize {
@@ -793,16 +877,20 @@ fn try_output(
         }
     }
     for t in targets {
-        let Some(tm) = snap.machines.get(&t).cloned() else { continue };
-        let Some(ts) = snap.states.get_mut(&t) else { continue };
+        let Some(tm) = snap.machines.get(&t).cloned() else {
+            continue;
+        };
+        let Some(ts) = snap.states.get_mut(&t) else {
+            continue;
+        };
         if matches!(tm.kind, MachineKind::Belt) {
             if crafter {
                 continue; // 装配/精炼不从侧面输出到皮带
             }
-            if let MachineState::Belt(bs) = ts {
-                if belt_insert(bs, item, 0.1) {
-                    return true;
-                }
+            if let MachineState::Belt(bs) = ts
+                && belt_insert(bs, item, 0.1)
+            {
+                return true;
             }
         } else if can_machine_accept(&tm, item, ts) && machine_insert(&tm, ts, item) {
             return true;
@@ -814,7 +902,14 @@ fn try_output(
 
 // ---------- per-tick logic ----------
 
-fn furnace_tick(m: &mut Machine, f: &mut FurnaceState, snap: &mut Snapshot, drops: &mut Vec<(String, i32)>, commands: &mut Commands, sfx: &crate::audio::Sfx) {
+fn furnace_tick(
+    m: &mut Machine,
+    f: &mut FurnaceState,
+    snap: &mut Snapshot,
+    drops: &mut Vec<(String, i32)>,
+    commands: &mut Commands,
+    sfx: &crate::audio::Sfx,
+) {
     let input_item = f.input.as_ref().map(|s| s.item.clone());
     let r = input_item.as_deref().and_then(|it| {
         data::RECIPES
@@ -827,16 +922,16 @@ fn furnace_tick(m: &mut Machine, f: &mut FurnaceState, snap: &mut Snapshot, drop
             .and_then(|it| r.inputs.iter().find(|(i, _)| *i == it).map(|(_, n)| *n))
     });
     let can_work = r.is_some() && f.input.as_ref().map(|s| s.n).unwrap_or(0) >= need.unwrap_or(1);
-    if f.burn <= 0.0 && can_work {
-        if let Some(fuel) = f.fuel.as_mut() {
-            if fuel.n > 0 {
-                f.burn = data::fuel_value(&fuel.item).max(4.0);
-                f.burn_max = f.burn;
-                fuel.n -= 1;
-                if fuel.n <= 0 {
-                    f.fuel = None;
-                }
-            }
+    if f.burn <= 0.0
+        && can_work
+        && let Some(fuel) = f.fuel.as_mut()
+        && fuel.n > 0
+    {
+        f.burn = data::fuel_value(&fuel.item).max(4.0);
+        f.burn_max = f.burn;
+        fuel.n -= 1;
+        if fuel.n <= 0 {
+            f.fuel = None;
         }
     }
     m.active = false;
@@ -854,14 +949,17 @@ fn furnace_tick(m: &mut Machine, f: &mut FurnaceState, snap: &mut Snapshot, drop
                     }
                 }
                 let out_item = r.output.0;
-                if let Some(o) = f.output.as_mut() {
-                    if o.item != out_item {
-                        drops.push((o.item.clone(), o.n));
-                        f.output = None;
-                    }
+                if let Some(o) = f.output.as_mut()
+                    && o.item != out_item
+                {
+                    drops.push((o.item.clone(), o.n));
+                    f.output = None;
                 }
                 if f.output.is_none() {
-                    f.output = Some(Slot { item: out_item.to_string(), n: 0 });
+                    f.output = Some(Slot {
+                        item: out_item.to_string(),
+                        n: 0,
+                    });
                 }
                 if let Some(o) = f.output.as_mut() {
                     o.n += r.output.1;
@@ -872,14 +970,14 @@ fn furnace_tick(m: &mut Machine, f: &mut FurnaceState, snap: &mut Snapshot, drop
     } else {
         f.prog = (f.prog - TICK * 0.3).max(0.0);
     }
-    if let Some(o) = f.output.clone() {
-        if o.n > 0 && try_output(m, &o.item, snap) {
-            if let Some(o2) = f.output.as_mut() {
-                o2.n -= 1;
-                if o2.n <= 0 {
-                    f.output = None;
-                }
-            }
+    if let Some(o) = f.output.clone()
+        && o.n > 0
+        && try_output(m, &o.item, snap)
+        && let Some(o2) = f.output.as_mut()
+    {
+        o2.n -= 1;
+        if o2.n <= 0 {
+            f.output = None;
         }
     }
 }
@@ -894,14 +992,14 @@ fn miner_tick(
 ) {
     m.active = false;
     let below = data::block_by_id(world.get(m.pos[0], m.pos[1] - 1, m.pos[2]));
-    if let Some(o) = s.output.clone() {
-        if o.n > 0 && try_output(m, &o.item, snap) {
-            if let Some(o2) = s.output.as_mut() {
-                o2.n -= 1;
-                if o2.n <= 0 {
-                    s.output = None;
-                }
-            }
+    if let Some(o) = s.output.clone()
+        && o.n > 0
+        && try_output(m, &o.item, snap)
+        && let Some(o2) = s.output.as_mut()
+    {
+        o2.n -= 1;
+        if o2.n <= 0 {
+            s.output = None;
         }
     }
     if !below.ore {
@@ -914,7 +1012,10 @@ fn miner_tick(
         s.prog = 0.0;
         let drop = below.drops.first().map(|d| d.item).unwrap_or("stone");
         if s.output.is_none() {
-            s.output = Some(Slot { item: drop.to_string(), n: 0 });
+            s.output = Some(Slot {
+                item: drop.to_string(),
+                n: 0,
+            });
         }
         if let Some(o) = s.output.as_mut() {
             if o.item != drop {
@@ -937,7 +1038,8 @@ fn crafter_tick(
     where_: &str,
     snap: &mut Snapshot,
     drops: &mut Vec<(String, i32)>,
-) {    m.active = false;
+) {
+    m.active = false;
     let Some(rid) = c.recipe else { return };
     // 装配机可制作 station=="hand" 的便携配方（JS where:'both' 语义）
     let Some(r) = data::RECIPES.iter().find(|r| {
@@ -948,7 +1050,10 @@ fn crafter_tick(
     }) else {
         return;
     };
-    let has_all = r.inputs.iter().all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n);
+    let has_all = r
+        .inputs
+        .iter()
+        .all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n);
     if c.prog > 0.0 || (has_all && sat > 0.05) {
         if c.prog == 0.0 {
             for (i, n) in r.inputs {
@@ -961,28 +1066,31 @@ fn crafter_tick(
         if c.prog >= 1.0 {
             c.prog = 0.0;
             let out_item = r.output.0;
-            if let Some(o) = c.output.as_mut() {
-                if o.item != out_item {
-                    drops.push((o.item.clone(), o.n));
-                    c.output = None;
-                }
+            if let Some(o) = c.output.as_mut()
+                && o.item != out_item
+            {
+                drops.push((o.item.clone(), o.n));
+                c.output = None;
             }
             if c.output.is_none() {
-                c.output = Some(Slot { item: out_item.to_string(), n: 0 });
+                c.output = Some(Slot {
+                    item: out_item.to_string(),
+                    n: 0,
+                });
             }
             if let Some(o) = c.output.as_mut() {
                 o.n += r.output.1;
             }
         }
     }
-    if let Some(o) = c.output.clone() {
-        if o.n > 0 && try_output(m, &o.item, snap) {
-            if let Some(o2) = c.output.as_mut() {
-                o2.n -= 1;
-                if o2.n <= 0 {
-                    c.output = None;
-                }
-            }
+    if let Some(o) = c.output.clone()
+        && o.n > 0
+        && try_output(m, &o.item, snap)
+        && let Some(o2) = c.output.as_mut()
+    {
+        o2.n -= 1;
+        if o2.n <= 0 {
+            c.output = None;
         }
     }
 }
@@ -992,7 +1100,11 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
     b.items.sort_by(|a, c| c.t.partial_cmp(&a.t).unwrap());
     let mut i = 0;
     while i < b.items.len() {
-        let max_t = if i == 0 { 1.0 } else { (b.items[i - 1].t - BELT_GAP).max(0.0) };
+        let max_t = if i == 0 {
+            1.0
+        } else {
+            (b.items[i - 1].t - BELT_GAP).max(0.0)
+        };
         let t = b.items[i].t;
         b.items[i].t = (t + BELT_SPEED * TICK).min(max_t.max(t));
         if b.items[i].t >= 0.999 {
@@ -1003,15 +1115,21 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
             let mut moved = false;
             for y in [m.pos[1], m.pos[1] - 1, m.pos[1] + 1] {
                 let tp = [nx, y, nz];
-                let Some(te) = snap.pos_index.get(&tp).copied() else { continue };
-                let Some(tm) = snap.machines.get(&te).cloned() else { continue };
-                let Some(ts) = snap.states.get_mut(&te) else { continue };
+                let Some(te) = snap.pos_index.get(&tp).copied() else {
+                    continue;
+                };
+                let Some(tm) = snap.machines.get(&te).cloned() else {
+                    continue;
+                };
+                let Some(ts) = snap.states.get_mut(&te) else {
+                    continue;
+                };
                 if matches!(tm.kind, MachineKind::Belt) {
-                    if let MachineState::Belt(bs) = ts {
-                        if belt_insert(bs, &item, 0.0) {
-                            moved = true;
-                            break;
-                        }
+                    if let MachineState::Belt(bs) = ts
+                        && belt_insert(bs, &item, 0.0)
+                    {
+                        moved = true;
+                        break;
                     }
                 } else {
                     // 禁止向正面输入侧的装配/精炼推入（belt→machine 回流防护，
@@ -1019,7 +1137,10 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
                     let blocked = matches!(tm.kind, MachineKind::Assembler | MachineKind::Refinery)
                         && (m.dir + 2) % 4 == tm.dir
                         && (m.pos[0] + dx == tm.pos[0] && m.pos[2] + dz == tm.pos[2]);
-                    if !blocked && can_machine_accept(&tm, &item, ts) && machine_insert(&tm, ts, &item) {
+                    if !blocked
+                        && can_machine_accept(&tm, &item, ts)
+                        && machine_insert(&tm, ts, &item)
+                    {
                         moved = true;
                         break;
                     }
@@ -1037,7 +1158,9 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
 fn collector_tick(m: &mut Machine, c: &mut CollectorState, snap: &mut Snapshot) {
     m.active = c.slots.iter().any(|s| s.is_some());
     for i in 0..c.slots.len() {
-        let Some(s) = c.slots[i].clone() else { continue };
+        let Some(s) = c.slots[i].clone() else {
+            continue;
+        };
         if s.n > 0 && try_output(m, &s.item, snap) {
             if let Some(sl) = c.slots[i].as_mut() {
                 sl.n -= 1;
@@ -1062,7 +1185,11 @@ fn lumberbot_tick(
     const BOT_RANGE: i32 = 32;
     const BOT_CARGO_FULL: i32 = 40;
     m.active = true;
-    let home = [m.pos[0] as f32 + 0.5, m.pos[1] as f32 + 0.5, m.pos[2] as f32 + 0.5];
+    let home = [
+        m.pos[0] as f32 + 0.5,
+        m.pos[1] as f32 + 0.5,
+        m.pos[2] as f32 + 0.5,
+    ];
     if lb.pos == [0.0, 0.0, 0.0] {
         lb.pos = home;
     }
@@ -1192,22 +1319,26 @@ fn lumberbot_tick(
             }
             match best {
                 Some((cpos, ce)) => {
-                    let cp = [cpos[0] as f32 + 0.5, cpos[1] as f32 + 0.5, cpos[2] as f32 + 0.5];
+                    let cp = [
+                        cpos[0] as f32 + 0.5,
+                        cpos[1] as f32 + 0.5,
+                        cpos[2] as f32 + 0.5,
+                    ];
                     let d = ((cp[0] - lb.pos[0]).powi(2) + (cp[2] - lb.pos[2]).powi(2)).sqrt();
                     if d < 1.6 {
                         // 卸货（CollectorState 临时包装调用 machine_insert）
-                        if let Some(ts) = snap.states.get_mut(&ce) {
-                            if let MachineState::Collector(cs) = ts {
-                                let mut wrap = MachineState::Collector(cs.clone());
-                                while lb.cargo > 0 {
-                                    if !machine_insert(m, &mut wrap, "carbon") {
-                                        break;
-                                    }
-                                    lb.cargo -= 1;
+                        if let Some(ts) = snap.states.get_mut(&ce)
+                            && let MachineState::Collector(cs) = ts
+                        {
+                            let mut wrap = MachineState::Collector(cs.clone());
+                            while lb.cargo > 0 {
+                                if !machine_insert(m, &mut wrap, "carbon") {
+                                    break;
                                 }
-                                if let MachineState::Collector(nc) = &wrap {
-                                    *cs = nc.clone();
-                                }
+                                lb.cargo -= 1;
+                            }
+                            if let MachineState::Collector(nc) = &wrap {
+                                *cs = nc.clone();
                             }
                         }
                         if lb.cargo <= 0 {
@@ -1279,14 +1410,14 @@ pub fn lumberbot_visual_system(
         })
         .clone();
     for (e, _m, st) in &q {
-        if let MachineState::Lumberbot(lb) = st {
-            if lb.cargo > 0 || lb.phase != BotPhase::Scan {
-                commands.entity(e).try_insert((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(mat.clone()),
-                    BotVis,
-                ));
-            }
+        if let MachineState::Lumberbot(lb) = st
+            && (lb.cargo > 0 || lb.phase != BotPhase::Scan)
+        {
+            commands.entity(e).try_insert((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                BotVis,
+            ));
         }
     }
     let t = time.elapsed_secs();
@@ -1359,23 +1490,24 @@ pub fn factory_system(
                     }
                     if m.kind == MachineKind::Wind {
                         let alt = (m.pos[1] as f32 - data::SEA_Y).max(0.0) * 0.18;
-                        let gust = (wind_t * 0.5 + m.pos[0] as f32 * 0.7 + m.pos[2] as f32 * 1.3).sin() * 3.0
+                        let gust = (wind_t * 0.5 + m.pos[0] as f32 * 0.7 + m.pos[2] as f32 * 1.3)
+                            .sin()
+                            * 3.0
                             + (wind_t * 0.13).sin() * 2.0;
                         gen_total += (6.0 + alt + gust).clamp(2.0, 16.0);
                         m.active = true;
                     }
                 }
                 MachineState::Burner(b) => {
-                    if b.burn <= 0.0 {
-                        if let Some(fuel) = b.fuel.as_mut() {
-                            if fuel.n > 0 {
-                                b.burn = data::fuel_value(&fuel.item).max(4.0) * 1.5;
-                                b.burn_max = b.burn;
-                                fuel.n -= 1;
-                                if fuel.n <= 0 {
-                                    b.fuel = None;
-                                }
-                            }
+                    if b.burn <= 0.0
+                        && let Some(fuel) = b.fuel.as_mut()
+                        && fuel.n > 0
+                    {
+                        b.burn = data::fuel_value(&fuel.item).max(4.0) * 1.5;
+                        b.burn_max = b.burn;
+                        fuel.n -= 1;
+                        if fuel.n <= 0 {
+                            b.fuel = None;
                         }
                     }
                     if b.burn > 0.0 {
@@ -1401,25 +1533,22 @@ pub fn factory_system(
                     }
                 }
                 MachineState::Crafter(c) => {
-                    if let Some(rid) = c.recipe {
-                        if let Some(r) = data::RECIPES.iter().find(|r| r.id == rid) {
-                            if c.prog > 0.0
-                                || r.inputs
-                                    .iter()
-                                    .all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n)
-                            {
-                                used += power_use(m.kind);
-                            }
-                        }
+                    if let Some(rid) = c.recipe
+                        && let Some(r) = data::RECIPES.iter().find(|r| r.id == rid)
+                        && (c.prog > 0.0
+                            || r.inputs
+                                .iter()
+                                .all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n))
+                    {
+                        used += power_use(m.kind);
                     }
                 }
                 MachineState::Medbay(_) => {
-                    if let Some(pq) = player.as_ref() {
-                        if let Ok(p) = pq.single() {
-                            if medbay_wants(&m, p) {
-                                used += power_use(MachineKind::Medbay);
-                            }
-                        }
+                    if let Some(pq) = player.as_ref()
+                        && let Ok(p) = pq.single()
+                        && medbay_wants(&m, p)
+                    {
+                        used += power_use(MachineKind::Medbay);
                     }
                 }
                 _ => {}
@@ -1429,8 +1558,16 @@ pub fn factory_system(
             snap.machines.insert(e, m.clone());
         }
     }
-    let sat = if used > 0.0 { (gen_total / used).min(1.0) } else { 1.0 };
-    *power = Power { generation: gen_total.round(), used, sat };
+    let sat = if used > 0.0 {
+        (gen_total / used).min(1.0)
+    } else {
+        1.0
+    };
+    *power = Power {
+        generation: gen_total.round(),
+        used,
+        sat,
+    };
 
     // 阶段 B：快照逻辑
     let mut drops: Vec<(String, i32)> = Vec::new();
@@ -1438,16 +1575,26 @@ pub fn factory_system(
     let mut order: Vec<Entity> = snap.machines.keys().copied().collect();
     order.sort();
     for e in order {
-        let Some(mut m) = snap.machines.get(&e).cloned() else { continue };
-        let Some(mut st) = snap.states.remove(&e) else { continue };
+        let Some(mut m) = snap.machines.get(&e).cloned() else {
+            continue;
+        };
+        let Some(mut st) = snap.states.remove(&e) else {
+            continue;
+        };
         match &mut st {
-            MachineState::Furnace(f) => furnace_tick(&mut m, f, &mut snap, &mut drops, &mut commands, &sfx),
+            MachineState::Furnace(f) => {
+                furnace_tick(&mut m, f, &mut snap, &mut drops, &mut commands, &sfx)
+            }
             MachineState::Miner(ms) => {
                 miner_tick(&mut m, ms, sat, &world, &mut snap, &mut world_writes)
             }
             MachineState::Belt(bs) => belt_tick(&mut m, bs, &mut snap),
             MachineState::Crafter(cs) => {
-                let where_ = if m.kind == MachineKind::Refinery { "refinery" } else { "assembler" };
+                let where_ = if m.kind == MachineKind::Refinery {
+                    "refinery"
+                } else {
+                    "assembler"
+                };
                 crafter_tick(&mut m, cs, sat, where_, &mut snap, &mut drops);
             }
             MachineState::Collector(cs) => collector_tick(&mut m, cs, &mut snap),
@@ -1456,18 +1603,18 @@ pub fn factory_system(
             }
             MachineState::Medbay(ms) => {
                 m.active = false;
-                if let Some(pq) = player.as_mut() {
-                    if let Ok(mut p) = pq.single_mut() {
-                        if medbay_wants(&m, &p) && sat > 0.05 {
-                            m.active = true;
-                            ms.heal_acc += TICK * sat;
-                            while ms.heal_acc >= 1.0 {
-                                ms.heal_acc -= 1.0;
-                                if p.inv.remove_item("sodium", 1) && p.inv.remove_item("oxygen", 1) {
-                                    p.stats.hp = (p.stats.hp + 3.0).min(8.0);
-                                    p.toast("医疗站：生命 +3");
-                                }
-                            }
+                if let Some(pq) = player.as_mut()
+                    && let Ok(mut p) = pq.single_mut()
+                    && medbay_wants(&m, &p)
+                    && sat > 0.05
+                {
+                    m.active = true;
+                    ms.heal_acc += TICK * sat;
+                    while ms.heal_acc >= 1.0 {
+                        ms.heal_acc -= 1.0;
+                        if p.inv.remove_item("sodium", 1) && p.inv.remove_item("oxygen", 1) {
+                            p.stats.hp = (p.stats.hp + 3.0).min(8.0);
+                            p.toast("医疗站：生命 +3");
                         }
                     }
                 }
@@ -1489,19 +1636,19 @@ pub fn factory_system(
     }
     // 掉落物（产出无处可送时洒在机器上方）
     for (item, n) in drops {
-        if let Some(pq) = player.as_ref() {
-            if let Ok(p) = pq.single() {
-                crate::creatures::spawn_drop(
-                    &mut commands,
-                    &world,
-                    &icons,
-                    p.pos + Vec3::Y,
-                    Vec3::ZERO,
-                    item,
-                    n,
-                    0.4,
-                );
-            }
+        if let Some(pq) = player.as_ref()
+            && let Ok(p) = pq.single()
+        {
+            crate::creatures::spawn_drop(
+                &mut commands,
+                &world,
+                &icons,
+                p.pos + Vec3::Y,
+                Vec3::ZERO,
+                item,
+                n,
+                0.4,
+            );
         }
     }
     // 世界改块（矿脉耗尽）
@@ -1551,7 +1698,12 @@ pub fn deserialize_machines(
         let e = commands
             .spawn((
                 Transform::from_xyz(s.x as f32 + 0.5, s.y as f32 + 0.5, s.z as f32 + 0.5),
-                Machine { pos: [s.x, s.y, s.z], kind, dir: s.dir, active: false },
+                Machine {
+                    pos: [s.x, s.y, s.z],
+                    kind,
+                    dir: s.dir,
+                    active: false,
+                },
                 MachineState::from_save(kind, &s.data),
                 crate::InGame,
             ))
@@ -1566,7 +1718,12 @@ mod tests {
     use super::*;
 
     fn machine(kind: MachineKind, pos: [i32; 3], dir: u8) -> Machine {
-        Machine { pos, kind, dir, active: false }
+        Machine {
+            pos,
+            kind,
+            dir,
+            active: false,
+        }
     }
 
     #[test]
@@ -1643,14 +1800,22 @@ mod tests {
             let st2 = MachineState::from_save(kind, &back);
             // 往返后结构一致（槽位数量等）
             match (st, st2) {
-                (MachineState::Chest(a), MachineState::Chest(b)) => assert_eq!(a.slots.len(), b.slots.len()),
-                (MachineState::Collector(a), MachineState::Collector(b)) => assert_eq!(a.slots.len(), b.slots.len()),
-                (MachineState::Belt(a), MachineState::Belt(b)) => assert_eq!(a.items.len(), b.items.len()),
+                (MachineState::Chest(a), MachineState::Chest(b)) => {
+                    assert_eq!(a.slots.len(), b.slots.len())
+                }
+                (MachineState::Collector(a), MachineState::Collector(b)) => {
+                    assert_eq!(a.slots.len(), b.slots.len())
+                }
+                (MachineState::Belt(a), MachineState::Belt(b)) => {
+                    assert_eq!(a.items.len(), b.items.len())
+                }
                 (MachineState::Furnace(a), MachineState::Furnace(b)) => {
                     assert_eq!(a.input.is_some(), b.input.is_some());
                     assert_eq!(a.fuel.is_some(), b.fuel.is_some());
                 }
-                (MachineState::Reactor(a), MachineState::Reactor(b)) => assert!((a.fuel - b.fuel).abs() < 0.01),
+                (MachineState::Reactor(a), MachineState::Reactor(b)) => {
+                    assert!((a.fuel - b.fuel).abs() < 0.01)
+                }
                 (MachineState::Burner(a), MachineState::Burner(b)) => {
                     assert_eq!(a.fuel.is_some(), b.fuel.is_some());
                 }

@@ -10,7 +10,10 @@ use std::sync::Arc;
 static MASTER_VOL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
 
 pub fn set_master_volume(v: f32) {
-    MASTER_VOL.store(v.clamp(0.0, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    MASTER_VOL.store(
+        v.clamp(0.0, 1.0).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub fn master_volume() -> f32 {
@@ -104,12 +107,7 @@ impl Sfx {
 }
 
 /// Play a one-shot sound（音量受主音量缩放）。
-pub fn play(
-    commands: &mut Commands,
-    handle: Handle<AudioSource>,
-    volume: f32,
-    pitch: Option<f32>,
-) {
+pub fn play(commands: &mut Commands, handle: Handle<AudioSource>, volume: f32, pitch: Option<f32>) {
     commands.spawn((
         AudioPlayer(handle),
         PlaybackSettings {
@@ -126,11 +124,7 @@ pub fn play(
 pub struct LoopSound;
 
 /// 启动一个循环音。
-pub fn play_loop(
-    commands: &mut Commands,
-    handle: Handle<AudioSource>,
-    volume: f32,
-) -> Entity {
+pub fn play_loop(commands: &mut Commands, handle: Handle<AudioSource>, volume: f32) -> Entity {
     commands
         .spawn((
             AudioPlayer(handle),

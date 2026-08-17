@@ -1,6 +1,8 @@
 # STARFORGE `js/data.js` — Complete Technical Specification for Rust Port
 
-Source: `C:\Users\admin1zhanghu\wrsk\js\data.js` (431 lines). Header comment: *"方块 / 物品 / 配方 / 科技树 / 任务 / 星球生态 定义"* (Blocks / Items / Recipes / Tech tree / Quests / Planet ecology definitions). The file is a plain `'use strict'` ES module-style script exporting globals (`const`/`let`). All objects are keyed string maps, not arrays.
+> Repository note (2026-08-17): the legacy source referenced by this specification is archived at `legacy-web/js/data.js`.
+
+Source: `legacy-web/js/data.js` (431 lines). Header comment: *"方块 / 物品 / 配方 / 科技树 / 任务 / 星球生态 定义"* (Blocks / Items / Recipes / Tech tree / Quests / Planet ecology definitions). The file is a plain `'use strict'` ES module-style script exporting globals (`const`/`let`). All objects are keyed string maps, not arrays.
 
 ## ⚠️ Important scope notes (do not assume missing data)
 

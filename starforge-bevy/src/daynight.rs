@@ -107,7 +107,10 @@ pub fn daynight_system(
     let fog_color = lerp_color(sky, Color::WHITE, 0.15 * f * (1.0 - sf));
     for mut fog in &mut fog_q {
         if mode.space_scene() {
-            fog.falloff = FogFalloff::Linear { start: 1e9, end: 1e9 };
+            fog.falloff = FogFalloff::Linear {
+                start: 1e9,
+                end: 1e9,
+            };
         } else {
             fog.falloff = FogFalloff::Linear {
                 start: 90.0 + alt_f * 260.0,

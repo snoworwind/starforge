@@ -79,8 +79,11 @@ impl Tiles {
     }
     /// Tile name for a face: 0..5 = +X,-X,+Y,-Y,+Z,-Z (matches FACES order)
     pub fn for_face(&self, face: usize) -> &'static str {
-        if self.all.is_some() && self.top.is_none() && self.front.is_none() {
-            return self.all.unwrap();
+        if let Some(all) = self.all
+            && self.top.is_none()
+            && self.front.is_none()
+        {
+            return all;
         }
         match face {
             2 => self.top.or(self.all).or(self.side).unwrap(),
@@ -140,9 +143,12 @@ impl Block {
 }
 
 macro_rules! block {
-    ($id:expr, $key:expr, $name:expr, $hard:expr, $tiles:expr, $drops:expr $(, $field:ident : $val:expr)*) => {{
+    ($id:expr, $key:expr, $name:expr, $hard:expr, $tiles:expr, $drops:expr) => {
+        Block::def($id, $key, $name, $hard, $tiles, $drops)
+    };
+    ($id:expr, $key:expr, $name:expr, $hard:expr, $tiles:expr, $drops:expr, $($field:ident : $val:expr),+ $(,)?) => {{
         let mut b = Block::def($id, $key, $name, $hard, $tiles, $drops);
-        $(b.$field = $val;)*
+        $(b.$field = $val;)+
         b
     }};
 }
@@ -207,109 +213,379 @@ pub mod ids {
 }
 
 const NO_DROPS: &[DropEntry] = &[];
-const D1: &[DropEntry] = &[DropEntry { item: "dirt", n: 1, chance: 1.0 }];
-const D_STONE: &[DropEntry] = &[DropEntry { item: "stone", n: 1, chance: 1.0 }];
-const D_CARBON3: &[DropEntry] = &[DropEntry { item: "carbon", n: 3, chance: 1.0 }];
+const D1: &[DropEntry] = &[DropEntry {
+    item: "dirt",
+    n: 1,
+    chance: 1.0,
+}];
+const D_STONE: &[DropEntry] = &[DropEntry {
+    item: "stone",
+    n: 1,
+    chance: 1.0,
+}];
+const D_CARBON3: &[DropEntry] = &[DropEntry {
+    item: "carbon",
+    n: 3,
+    chance: 1.0,
+}];
 const D_LEAVES: &[DropEntry] = &[
-    DropEntry { item: "carbon", n: 1, chance: 1.0 },
-    DropEntry { item: "oxygen", n: 1, chance: 0.35 },
+    DropEntry {
+        item: "carbon",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "oxygen",
+        n: 1,
+        chance: 0.35,
+    },
 ];
 const D_COAL: &[DropEntry] = &[
-    DropEntry { item: "coal", n: 1, chance: 1.0 },
-    DropEntry { item: "coal", n: 1, chance: 0.3 },
+    DropEntry {
+        item: "coal",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "coal",
+        n: 1,
+        chance: 0.3,
+    },
 ];
-const D_IRON_ORE: &[DropEntry] = &[DropEntry { item: "iron_ore", n: 1, chance: 1.0 }];
-const D_COPPER_ORE: &[DropEntry] = &[DropEntry { item: "copper_ore", n: 1, chance: 1.0 }];
-const D_TITANIUM_ORE: &[DropEntry] = &[DropEntry { item: "titanium_ore", n: 1, chance: 1.0 }];
-const D_URANIUM: &[DropEntry] = &[DropEntry { item: "uranium", n: 1, chance: 1.0 }];
-const D_GOLD_ORE: &[DropEntry] = &[DropEntry { item: "gold_ore", n: 1, chance: 1.0 }];
-const D_SODIUM2: &[DropEntry] = &[DropEntry { item: "sodium", n: 2, chance: 1.0 }];
-const D_OXYGEN2: &[DropEntry] = &[DropEntry { item: "oxygen", n: 2, chance: 1.0 }];
-const D_CARBON1: &[DropEntry] = &[DropEntry { item: "carbon", n: 1, chance: 1.0 }];
-const D_PLANKS: &[DropEntry] = &[DropEntry { item: "planks_b", n: 1, chance: 1.0 }];
-const D_GLASS: &[DropEntry] = &[DropEntry { item: "glass_b", n: 1, chance: 1.0 }];
-const D_LAMP: &[DropEntry] = &[DropEntry { item: "lamp_b", n: 1, chance: 1.0 }];
+const D_IRON_ORE: &[DropEntry] = &[DropEntry {
+    item: "iron_ore",
+    n: 1,
+    chance: 1.0,
+}];
+const D_COPPER_ORE: &[DropEntry] = &[DropEntry {
+    item: "copper_ore",
+    n: 1,
+    chance: 1.0,
+}];
+const D_TITANIUM_ORE: &[DropEntry] = &[DropEntry {
+    item: "titanium_ore",
+    n: 1,
+    chance: 1.0,
+}];
+const D_URANIUM: &[DropEntry] = &[DropEntry {
+    item: "uranium",
+    n: 1,
+    chance: 1.0,
+}];
+const D_GOLD_ORE: &[DropEntry] = &[DropEntry {
+    item: "gold_ore",
+    n: 1,
+    chance: 1.0,
+}];
+const D_SODIUM2: &[DropEntry] = &[DropEntry {
+    item: "sodium",
+    n: 2,
+    chance: 1.0,
+}];
+const D_OXYGEN2: &[DropEntry] = &[DropEntry {
+    item: "oxygen",
+    n: 2,
+    chance: 1.0,
+}];
+const D_CARBON1: &[DropEntry] = &[DropEntry {
+    item: "carbon",
+    n: 1,
+    chance: 1.0,
+}];
+const D_PLANKS: &[DropEntry] = &[DropEntry {
+    item: "planks_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_GLASS: &[DropEntry] = &[DropEntry {
+    item: "glass_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_LAMP: &[DropEntry] = &[DropEntry {
+    item: "lamp_b",
+    n: 1,
+    chance: 1.0,
+}];
 const D_BASALT: &[DropEntry] = &[
-    DropEntry { item: "stone", n: 1, chance: 1.0 },
-    DropEntry { item: "coal", n: 1, chance: 0.15 },
+    DropEntry {
+        item: "stone",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "coal",
+        n: 1,
+        chance: 0.15,
+    },
 ];
 const D_ALIEN: &[DropEntry] = &[
-    DropEntry { item: "dirt", n: 1, chance: 1.0 },
-    DropEntry { item: "sodium", n: 1, chance: 0.2 },
+    DropEntry {
+        item: "dirt",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "sodium",
+        n: 1,
+        chance: 0.2,
+    },
 ];
-const D_FURNACE: &[DropEntry] = &[DropEntry { item: "furnace_b", n: 1, chance: 1.0 }];
-const D_MINER: &[DropEntry] = &[DropEntry { item: "miner_b", n: 1, chance: 1.0 }];
-const D_BELT: &[DropEntry] = &[DropEntry { item: "belt_b", n: 1, chance: 1.0 }];
-const D_ASSEMBLER: &[DropEntry] = &[DropEntry { item: "assembler_b", n: 1, chance: 1.0 }];
-const D_SOLAR: &[DropEntry] = &[DropEntry { item: "solar_b", n: 1, chance: 1.0 }];
-const D_REFINERY: &[DropEntry] = &[DropEntry { item: "refinery_b", n: 1, chance: 1.0 }];
-const D_CHEST: &[DropEntry] = &[DropEntry { item: "chest_b", n: 1, chance: 1.0 }];
-const D_REACTOR: &[DropEntry] = &[DropEntry { item: "reactor_b", n: 1, chance: 1.0 }];
-const D_LAUNCHPAD: &[DropEntry] = &[DropEntry { item: "launchpad_b", n: 1, chance: 1.0 }];
-const D_WIND: &[DropEntry] = &[DropEntry { item: "wind_b", n: 1, chance: 1.0 }];
-const D_BURNER: &[DropEntry] = &[DropEntry { item: "burner_b", n: 1, chance: 1.0 }];
+const D_FURNACE: &[DropEntry] = &[DropEntry {
+    item: "furnace_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_MINER: &[DropEntry] = &[DropEntry {
+    item: "miner_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_BELT: &[DropEntry] = &[DropEntry {
+    item: "belt_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_ASSEMBLER: &[DropEntry] = &[DropEntry {
+    item: "assembler_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_SOLAR: &[DropEntry] = &[DropEntry {
+    item: "solar_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_REFINERY: &[DropEntry] = &[DropEntry {
+    item: "refinery_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_CHEST: &[DropEntry] = &[DropEntry {
+    item: "chest_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_REACTOR: &[DropEntry] = &[DropEntry {
+    item: "reactor_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_LAUNCHPAD: &[DropEntry] = &[DropEntry {
+    item: "launchpad_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_WIND: &[DropEntry] = &[DropEntry {
+    item: "wind_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_BURNER: &[DropEntry] = &[DropEntry {
+    item: "burner_b",
+    n: 1,
+    chance: 1.0,
+}];
 const D_CRYSTAL: &[DropEntry] = &[
-    DropEntry { item: "tritium", n: 2, chance: 1.0 },
-    DropEntry { item: "tritium", n: 2, chance: 0.5 },
+    DropEntry {
+        item: "tritium",
+        n: 2,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "tritium",
+        n: 2,
+        chance: 0.5,
+    },
 ];
-const D_MUSH_STEM: &[DropEntry] = &[DropEntry { item: "carbon", n: 2, chance: 1.0 }];
+const D_MUSH_STEM: &[DropEntry] = &[DropEntry {
+    item: "carbon",
+    n: 2,
+    chance: 1.0,
+}];
 const D_MUSH_CAP: &[DropEntry] = &[
-    DropEntry { item: "carbon", n: 1, chance: 1.0 },
-    DropEntry { item: "oxygen", n: 1, chance: 0.4 },
-    DropEntry { item: "sodium", n: 1, chance: 0.2 },
+    DropEntry {
+        item: "carbon",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "oxygen",
+        n: 1,
+        chance: 0.4,
+    },
+    DropEntry {
+        item: "sodium",
+        n: 1,
+        chance: 0.2,
+    },
 ];
 const D_ASH: &[DropEntry] = &[
-    DropEntry { item: "dirt", n: 1, chance: 1.0 },
-    DropEntry { item: "coal", n: 1, chance: 0.12 },
+    DropEntry {
+        item: "dirt",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "coal",
+        n: 1,
+        chance: 0.12,
+    },
 ];
 const D_AMBER: &[DropEntry] = &[
-    DropEntry { item: "carbon", n: 2, chance: 1.0 },
-    DropEntry { item: "gold_ore", n: 1, chance: 0.08 },
+    DropEntry {
+        item: "carbon",
+        n: 2,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "gold_ore",
+        n: 1,
+        chance: 0.08,
+    },
 ];
 const D_RUST: &[DropEntry] = &[
-    DropEntry { item: "dirt", n: 1, chance: 1.0 },
-    DropEntry { item: "iron_ore", n: 1, chance: 0.25 },
+    DropEntry {
+        item: "dirt",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "iron_ore",
+        n: 1,
+        chance: 0.25,
+    },
 ];
 const D_SALT: &[DropEntry] = &[
-    DropEntry { item: "sodium", n: 1, chance: 1.0 },
-    DropEntry { item: "sodium", n: 1, chance: 0.4 },
+    DropEntry {
+        item: "sodium",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "sodium",
+        n: 1,
+        chance: 0.4,
+    },
 ];
 const D_OBSIDIAN: &[DropEntry] = &[
-    DropEntry { item: "stone", n: 1, chance: 1.0 },
-    DropEntry { item: "titanium_ore", n: 1, chance: 0.1 },
+    DropEntry {
+        item: "stone",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "titanium_ore",
+        n: 1,
+        chance: 0.1,
+    },
 ];
 const D_REDMOSS: &[DropEntry] = &[
-    DropEntry { item: "dirt", n: 1, chance: 1.0 },
-    DropEntry { item: "carbon", n: 1, chance: 0.25 },
+    DropEntry {
+        item: "dirt",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "carbon",
+        n: 1,
+        chance: 0.25,
+    },
 ];
 const D_HIVE: &[DropEntry] = &[
-    DropEntry { item: "dirt", n: 1, chance: 1.0 },
-    DropEntry { item: "carbon", n: 1, chance: 0.35 },
+    DropEntry {
+        item: "dirt",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "carbon",
+        n: 1,
+        chance: 0.35,
+    },
 ];
 const D_MURK: &[DropEntry] = &[
-    DropEntry { item: "dirt", n: 1, chance: 1.0 },
-    DropEntry { item: "oxygen", n: 1, chance: 0.15 },
+    DropEntry {
+        item: "dirt",
+        n: 1,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "oxygen",
+        n: 1,
+        chance: 0.15,
+    },
 ];
 const D_GLOW_SHROOM: &[DropEntry] = &[
-    DropEntry { item: "oxygen", n: 2, chance: 1.0 },
-    DropEntry { item: "sodium", n: 1, chance: 0.5 },
+    DropEntry {
+        item: "oxygen",
+        n: 2,
+        chance: 1.0,
+    },
+    DropEntry {
+        item: "sodium",
+        n: 1,
+        chance: 0.5,
+    },
 ];
-const D_BEACON: &[DropEntry] = &[DropEntry { item: "beacon_b", n: 1, chance: 1.0 }];
-const D_LUMBERBOT: &[DropEntry] = &[DropEntry { item: "lumberbot_b", n: 1, chance: 1.0 }];
-const D_COLLECTOR: &[DropEntry] = &[DropEntry { item: "collector_b", n: 1, chance: 1.0 }];
-const D_MEDBAY: &[DropEntry] = &[DropEntry { item: "medbay_b", n: 1, chance: 1.0 }];
-const D_SLAB: &[DropEntry] = &[DropEntry { item: "slab_b", n: 1, chance: 1.0 }];
-const D_METAL: &[DropEntry] = &[DropEntry { item: "metal_b", n: 1, chance: 1.0 }];
-const D_CONCRETE: &[DropEntry] = &[DropEntry { item: "concrete_b", n: 1, chance: 1.0 }];
+const D_BEACON: &[DropEntry] = &[DropEntry {
+    item: "beacon_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_LUMBERBOT: &[DropEntry] = &[DropEntry {
+    item: "lumberbot_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_COLLECTOR: &[DropEntry] = &[DropEntry {
+    item: "collector_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_MEDBAY: &[DropEntry] = &[DropEntry {
+    item: "medbay_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_SLAB: &[DropEntry] = &[DropEntry {
+    item: "slab_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_METAL: &[DropEntry] = &[DropEntry {
+    item: "metal_b",
+    n: 1,
+    chance: 1.0,
+}];
+const D_CONCRETE: &[DropEntry] = &[DropEntry {
+    item: "concrete_b",
+    n: 1,
+    chance: 1.0,
+}];
 
 pub const BLOCKS: &[Block] = &[
     // 0
     block!(0, "air", "空气", f32::NAN, Tiles::new("air"), NO_DROPS, solid: false),
-    block!(1, "grass", "草方块", 0.75, Tiles::full("grass_top", "grass_side", "dirt"), D1),
+    block!(
+        1,
+        "grass",
+        "草方块",
+        0.75,
+        Tiles::full("grass_top", "grass_side", "dirt"),
+        D1
+    ),
     block!(2, "dirt", "泥土", 0.7, Tiles::new("dirt"), D1),
     block!(3, "stone", "岩石", 1.6, Tiles::new("stone"), D_STONE),
     block!(4, "sand", "沙", 0.6, Tiles::new("sand"), D1),
-    block!(5, "log", "碳质木干", 1.1, Tiles::full("log_top", "log_side", "log_top"), D_CARBON3),
+    block!(
+        5,
+        "log",
+        "碳质木干",
+        1.1,
+        Tiles::full("log_top", "log_side", "log_top"),
+        D_CARBON3
+    ),
     block!(6, "leaves", "叶簇", 0.3, Tiles::new("leaves"), D_LEAVES, transparent: true, fancy: true),
     block!(7, "coal_ore", "煤矿脉", 2.2, Tiles::new("coal_ore"), D_COAL, ore: true),
     block!(8, "iron_ore", "铁矿脉", 2.6, Tiles::new("iron_ore"), D_IRON_ORE, ore: true),
@@ -325,10 +601,31 @@ pub const BLOCKS: &[Block] = &[
     block!(18, "glass", "玻璃", 0.4, Tiles::new("glass"), D_GLASS, transparent: true),
     block!(19, "lamp", "光源方块", 0.5, Tiles::new("lamp_on"), D_LAMP, glow: true),
     block!(20, "ice", "永冻冰", 1.2, Tiles::new("ice"), D_STONE),
-    block!(21, "snow", "雪被层", 0.7, Tiles::full("snow_top", "snow_side", "dirt"), D1),
+    block!(
+        21,
+        "snow",
+        "雪被层",
+        0.7,
+        Tiles::full("snow_top", "snow_side", "dirt"),
+        D1
+    ),
     block!(22, "basalt", "玄武岩", 2.0, Tiles::new("basalt"), D_BASALT),
-    block!(23, "alien", "荧紫菌毯", 0.75, Tiles::full("alien_top", "alien_side", "dirt"), D_ALIEN),
-    block!(24, "barrier", "致密基岩", f32::INFINITY, Tiles::new("barrier"), NO_DROPS),
+    block!(
+        23,
+        "alien",
+        "荧紫菌毯",
+        0.75,
+        Tiles::full("alien_top", "alien_side", "dirt"),
+        D_ALIEN
+    ),
+    block!(
+        24,
+        "barrier",
+        "致密基岩",
+        f32::INFINITY,
+        Tiles::new("barrier"),
+        NO_DROPS
+    ),
     // 25..29 reserved (unused)
     block!(30, "furnace", "熔炉", 1.2, Tiles::front("stone", "furnace_front"), D_FURNACE, machine: Some("furnace")),
     block!(31, "miner", "自动采矿机", 1.2, Tiles::full("miner_top", "metal", "metal"), D_MINER, machine: Some("miner")),
@@ -342,16 +639,51 @@ pub const BLOCKS: &[Block] = &[
     block!(39, "wind", "风力涡轮机", 1.0, Tiles::new("metal"), D_WIND, machine: Some("wind")),
     block!(40, "burner", "火力发电机", 1.2, Tiles::front("metal_dark", "furnace_front"), D_BURNER, machine: Some("burner")),
     block!(41, "crystal", "氚晶簇", 1.8, Tiles::new("crystal"), D_CRYSTAL, glow: true),
-    block!(42, "mush_stem", "巨菌柄", 0.8, Tiles::new("mush_stem"), D_MUSH_STEM),
-    block!(43, "mush_cap", "巨菌盖", 0.5, Tiles::new("mush_cap"), D_MUSH_CAP),
+    block!(
+        42,
+        "mush_stem",
+        "巨菌柄",
+        0.8,
+        Tiles::new("mush_stem"),
+        D_MUSH_STEM
+    ),
+    block!(
+        43,
+        "mush_cap",
+        "巨菌盖",
+        0.5,
+        Tiles::new("mush_cap"),
+        D_MUSH_CAP
+    ),
     block!(44, "ash", "灰烬土", 0.8, Tiles::new("ash"), D_ASH),
     block!(45, "amber", "金珀岩", 1.4, Tiles::new("amber"), D_AMBER, glow: true),
     block!(46, "rust", "锈蚀铁壤", 1.0, Tiles::new("rust"), D_RUST),
     block!(47, "salt", "盐晶块", 0.7, Tiles::new("salt"), D_SALT),
-    block!(48, "obsidian", "黑曜岩", 2.6, Tiles::new("obsidian"), D_OBSIDIAN),
-    block!(49, "redmoss", "红藓被", 0.75, Tiles::full("redmoss_top", "redmoss_side", "dirt"), D_REDMOSS),
+    block!(
+        48,
+        "obsidian",
+        "黑曜岩",
+        2.6,
+        Tiles::new("obsidian"),
+        D_OBSIDIAN
+    ),
+    block!(
+        49,
+        "redmoss",
+        "红藓被",
+        0.75,
+        Tiles::full("redmoss_top", "redmoss_side", "dirt"),
+        D_REDMOSS
+    ),
     block!(50, "hive", "蜂窝晶壁", 1.1, Tiles::new("hive"), D_HIVE),
-    block!(51, "murk", "荧沼菌毯", 0.75, Tiles::full("murk_top", "murk_side", "dirt"), D_MURK),
+    block!(
+        51,
+        "murk",
+        "荧沼菌毯",
+        0.75,
+        Tiles::full("murk_top", "murk_side", "dirt"),
+        D_MURK
+    ),
     block!(52, "glow_shroom", "荧光蕈", 0.05, Tiles::new("glow_shroom"), D_GLOW_SHROOM, solid: false, cross: true, glow: true),
     block!(53, "beacon", "标记方块", 0.8, Tiles::full("lamp_on", "metal_dark", "metal_dark"), D_BEACON, machine: Some("beacon")),
     block!(54, "lumberbot", "伐木机器人", 1.0, Tiles::full("metal_dark", "vent", "vent"), D_LUMBERBOT, machine: Some("lumberbot")),
@@ -359,7 +691,14 @@ pub const BLOCKS: &[Block] = &[
     block!(56, "medbay", "医疗站", 1.4, Tiles::full("medbay_top", "metal_dark", "metal_dark"), D_MEDBAY, machine: Some("medbay")),
     block!(57, "slab", "石半砖", 1.0, Tiles::new("slab"), D_SLAB, lowbox: Some(0.45)),
     block!(58, "metal", "金属块", 2.0, Tiles::new("metal"), D_METAL),
-    block!(59, "concrete", "混凝土块", 1.6, Tiles::new("concrete"), D_CONCRETE),
+    block!(
+        59,
+        "concrete",
+        "混凝土块",
+        1.6,
+        Tiles::new("concrete"),
+        D_CONCRETE
+    ),
 ];
 
 pub fn block_by_id(id: u8) -> &'static Block {
@@ -600,19 +939,149 @@ pub struct Tech {
 }
 
 pub const TECHS: &[Tech] = &[
-    Tech { id: "survival", name: "生存本能", icon: "carbon", cost: &[], time: 0.0, pos: (60.0, 380.0), req: &[], desc: "基础采集与合成。", unlocked: true },
-    Tech { id: "scan1", name: "扫描增幅 I", icon: "data", cost: &[("data", 4)], time: 10.0, pos: (230.0, 200.0), req: &["survival"], desc: "矿物扫描范围 24→48 格（按 C 扫描）。", unlocked: false },
-    Tech { id: "scan2", name: "扫描增幅 II", icon: "circuit", cost: &[("data", 15), ("circuit", 4)], time: 20.0, pos: (400.0, 120.0), req: &["scan1"], desc: "矿物扫描范围 48→80 格（按 C 扫描）。", unlocked: false },
-    Tech { id: "metallurgy", name: "冶金学", icon: "furnace_b", cost: &[("data", 2)], time: 8.0, pos: (230.0, 380.0), req: &["survival"], desc: "解锁熔炉高效冶炼。", unlocked: false },
-    Tech { id: "automation", name: "自动化", icon: "miner_b", cost: &[("data", 5)], time: 15.0, pos: (400.0, 260.0), req: &["metallurgy"], desc: "解锁自动采矿机、传送带与火力发电机。", unlocked: false },
-    Tech { id: "logistics", name: "物流学", icon: "chest_b", cost: &[("data", 4)], time: 12.0, pos: (400.0, 500.0), req: &["metallurgy"], desc: "解锁储物箱与物品分流。", unlocked: false },
-    Tech { id: "power", name: "清洁能源", icon: "solar_b", cost: &[("data", 8)], time: 20.0, pos: (570.0, 260.0), req: &["automation"], desc: "解锁太阳能板与风力涡轮机。", unlocked: false },
-    Tech { id: "assembly", name: "装配流水线", icon: "assembler_b", cost: &[("data", 12)], time: 25.0, pos: (570.0, 440.0), req: &["automation", "logistics"], desc: "解锁装配机，自动制造部件。", unlocked: false },
-    Tech { id: "refining", name: "化学精炼", icon: "refinery_b", cost: &[("data", 15)], time: 30.0, pos: (740.0, 340.0), req: &["power", "assembly"], desc: "解锁精炼厂：高效燃料与化合物。", unlocked: false },
-    Tech { id: "spaceport", name: "航天工程", icon: "launchpad_b", cost: &[("data", 20), ("titanium", 10)], time: 35.0, pos: (910.0, 260.0), req: &["refining"], desc: "解锁发射平台与飞船舱位扩容。", unlocked: false },
-    Tech { id: "nuclear", name: "核裂变", icon: "reactor_b", cost: &[("data", 30), ("uranium", 5)], time: 45.0, pos: (910.0, 440.0), req: &["refining"], desc: "解锁核子反应堆，能源自由！", unlocked: false },
-    Tech { id: "trade_ai", name: "贸易协议", icon: "gold", cost: &[("data", 18), ("gold", 3)], time: 25.0, pos: (1080.0, 340.0), req: &["spaceport"], desc: "空间站交易价格优惠 15%。", unlocked: false },
-    Tech { id: "warp", name: "曲率理论", icon: "warpcell", cost: &[("data", 60), ("tritium", 50)], time: 60.0, pos: (1250.0, 340.0), req: &["trade_ai", "nuclear"], desc: "解锁曲率电池——通往群星的船票。", unlocked: false },
+    Tech {
+        id: "survival",
+        name: "生存本能",
+        icon: "carbon",
+        cost: &[],
+        time: 0.0,
+        pos: (60.0, 380.0),
+        req: &[],
+        desc: "基础采集与合成。",
+        unlocked: true,
+    },
+    Tech {
+        id: "scan1",
+        name: "扫描增幅 I",
+        icon: "data",
+        cost: &[("data", 4)],
+        time: 10.0,
+        pos: (230.0, 200.0),
+        req: &["survival"],
+        desc: "矿物扫描范围 24→48 格（按 C 扫描）。",
+        unlocked: false,
+    },
+    Tech {
+        id: "scan2",
+        name: "扫描增幅 II",
+        icon: "circuit",
+        cost: &[("data", 15), ("circuit", 4)],
+        time: 20.0,
+        pos: (400.0, 120.0),
+        req: &["scan1"],
+        desc: "矿物扫描范围 48→80 格（按 C 扫描）。",
+        unlocked: false,
+    },
+    Tech {
+        id: "metallurgy",
+        name: "冶金学",
+        icon: "furnace_b",
+        cost: &[("data", 2)],
+        time: 8.0,
+        pos: (230.0, 380.0),
+        req: &["survival"],
+        desc: "解锁熔炉高效冶炼。",
+        unlocked: false,
+    },
+    Tech {
+        id: "automation",
+        name: "自动化",
+        icon: "miner_b",
+        cost: &[("data", 5)],
+        time: 15.0,
+        pos: (400.0, 260.0),
+        req: &["metallurgy"],
+        desc: "解锁自动采矿机、传送带与火力发电机。",
+        unlocked: false,
+    },
+    Tech {
+        id: "logistics",
+        name: "物流学",
+        icon: "chest_b",
+        cost: &[("data", 4)],
+        time: 12.0,
+        pos: (400.0, 500.0),
+        req: &["metallurgy"],
+        desc: "解锁储物箱与物品分流。",
+        unlocked: false,
+    },
+    Tech {
+        id: "power",
+        name: "清洁能源",
+        icon: "solar_b",
+        cost: &[("data", 8)],
+        time: 20.0,
+        pos: (570.0, 260.0),
+        req: &["automation"],
+        desc: "解锁太阳能板与风力涡轮机。",
+        unlocked: false,
+    },
+    Tech {
+        id: "assembly",
+        name: "装配流水线",
+        icon: "assembler_b",
+        cost: &[("data", 12)],
+        time: 25.0,
+        pos: (570.0, 440.0),
+        req: &["automation", "logistics"],
+        desc: "解锁装配机，自动制造部件。",
+        unlocked: false,
+    },
+    Tech {
+        id: "refining",
+        name: "化学精炼",
+        icon: "refinery_b",
+        cost: &[("data", 15)],
+        time: 30.0,
+        pos: (740.0, 340.0),
+        req: &["power", "assembly"],
+        desc: "解锁精炼厂：高效燃料与化合物。",
+        unlocked: false,
+    },
+    Tech {
+        id: "spaceport",
+        name: "航天工程",
+        icon: "launchpad_b",
+        cost: &[("data", 20), ("titanium", 10)],
+        time: 35.0,
+        pos: (910.0, 260.0),
+        req: &["refining"],
+        desc: "解锁发射平台与飞船舱位扩容。",
+        unlocked: false,
+    },
+    Tech {
+        id: "nuclear",
+        name: "核裂变",
+        icon: "reactor_b",
+        cost: &[("data", 30), ("uranium", 5)],
+        time: 45.0,
+        pos: (910.0, 440.0),
+        req: &["refining"],
+        desc: "解锁核子反应堆，能源自由！",
+        unlocked: false,
+    },
+    Tech {
+        id: "trade_ai",
+        name: "贸易协议",
+        icon: "gold",
+        cost: &[("data", 18), ("gold", 3)],
+        time: 25.0,
+        pos: (1080.0, 340.0),
+        req: &["spaceport"],
+        desc: "空间站交易价格优惠 15%。",
+        unlocked: false,
+    },
+    Tech {
+        id: "warp",
+        name: "曲率理论",
+        icon: "warpcell",
+        cost: &[("data", 60), ("tritium", 50)],
+        time: 60.0,
+        pos: (1250.0, 340.0),
+        req: &["trade_ai", "nuclear"],
+        desc: "解锁曲率电池——通往群星的船票。",
+        unlocked: false,
+    },
 ];
 
 /// Biome definition (16 biomes).
@@ -659,70 +1128,422 @@ macro_rules! biome {
 }
 
 pub const BIOMES: &[Biome] = &[
-    biome!("lush", "翠绿星球", "grass", "dirt", "stone", (0.48, 0.72, 0.95), (0.7, 0.85, 1.0), None, "", 0.0,
-        0.012, 0.02, 1.0, 0x7cc44f, "continental", None, 0x3e6bd6, false, false, 0, 0.0, false,
+    biome!(
+        "lush",
+        "翠绿星球",
+        "grass",
+        "dirt",
+        "stone",
+        (0.48, 0.72, 0.95),
+        (0.7, 0.85, 1.0),
+        None,
+        "",
+        0.0,
+        0.012,
+        0.02,
+        1.0,
+        0x7cc44f,
+        "continental",
+        None,
+        0x3e6bd6,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("", 0.25, 2.2), ("murk", 0.6, 1.2)],
-        Some(("草原跳羚", 0x8a9e56, 0x5e7038, 0x2a2a2a, 10))),
-    biome!("desert", "灼热荒漠", "sand", "sand", "stone", (0.95, 0.75, 0.5), (0.98, 0.85, 0.65), Some("heat"), "☀ 极端高温", 1.6,
-        0.001, 0.008, 1.3, 0xe0d29a, "dunes", None, 0x6db8c8, false, false, 0, 0.0, false,
+        Some(("草原跳羚", 0x8a9e56, 0x5e7038, 0x2a2a2a, 10))
+    ),
+    biome!(
+        "desert",
+        "灼热荒漠",
+        "sand",
+        "sand",
+        "stone",
+        (0.95, 0.75, 0.5),
+        (0.98, 0.85, 0.65),
+        Some("heat"),
+        "☀ 极端高温",
+        1.6,
+        0.001,
+        0.008,
+        1.3,
+        0xe0d29a,
+        "dunes",
+        None,
+        0x6db8c8,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("stone", 0.05, 1.6)],
-        Some(("沙壳甲虫", 0xd8b878, 0xa8895a, 0x442200, 7))),
-    biome!("frozen", "冰封世界", "snow", "dirt", "ice", (0.7, 0.8, 0.95), (0.85, 0.9, 1.0), Some("cold"), "❄ 酷寒", 1.4,
-        0.004, 0.006, 1.2, 0xf2f6fa, "glacial", Some("ice"), 0x9fd4e8, false, false, 0, 0.0, false,
+        Some(("沙壳甲虫", 0xd8b878, 0xa8895a, 0x442200, 7))
+    ),
+    biome!(
+        "frozen",
+        "冰封世界",
+        "snow",
+        "dirt",
+        "ice",
+        (0.7, 0.8, 0.95),
+        (0.85, 0.9, 1.0),
+        Some("cold"),
+        "❄ 酷寒",
+        1.4,
+        0.004,
+        0.006,
+        1.2,
+        0xf2f6fa,
+        "glacial",
+        Some("ice"),
+        0x9fd4e8,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("ice", 0.1, 0.5)],
-        Some(("霜绒兽", 0xdce8f0, 0xb8c8d4, 0x3399ff, 6))),
-    biome!("volcanic", "熔火之地", "basalt", "basalt", "basalt", (0.5, 0.28, 0.2), (0.6, 0.4, 0.3), Some("heat"), "🌋 炽热大气", 2.2,
-        0.0, 0.004, 2.0, 0x3a3a42, "volcanic", Some("lava_tubes"), 0xff6a1a, true, true, 0, 0.0, false,
+        Some(("霜绒兽", 0xdce8f0, 0xb8c8d4, 0x3399ff, 6))
+    ),
+    biome!(
+        "volcanic",
+        "熔火之地",
+        "basalt",
+        "basalt",
+        "basalt",
+        (0.5, 0.28, 0.2),
+        (0.6, 0.4, 0.3),
+        Some("heat"),
+        "🌋 炽热大气",
+        2.2,
+        0.0,
+        0.004,
+        2.0,
+        0x3a3a42,
+        "volcanic",
+        Some("lava_tubes"),
+        0xff6a1a,
+        true,
+        true,
+        0,
+        0.0,
+        false,
         &[("", 0.0, 1.0), ("basalt", 0.0, 0.3)],
-        Some(("熔壳蟹", 0x5a4038, 0xc94f1e, 0xff6600, 5))),
-    biome!("alien", "异星菌境", "alien", "dirt", "stone", (0.45, 0.3, 0.6), (0.6, 0.45, 0.75), Some("toxic"), "☣ 剧毒孢子", 1.8,
-        0.008, 0.03, 1.5, 0x9a5fd0, "alien", None, 0x7a4ad8, false, false, 0, 0.0, false,
+        Some(("熔壳蟹", 0x5a4038, 0xc94f1e, 0xff6600, 5))
+    ),
+    biome!(
+        "alien",
+        "异星菌境",
+        "alien",
+        "dirt",
+        "stone",
+        (0.45, 0.3, 0.6),
+        (0.6, 0.45, 0.75),
+        Some("toxic"),
+        "☣ 剧毒孢子",
+        1.8,
+        0.008,
+        0.03,
+        1.5,
+        0x9a5fd0,
+        "alien",
+        None,
+        0x7a4ad8,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("alien", 0.15, 2.5)],
-        Some(("孢子爬行者", 0x9a6fd8, 0x7c4fba, 0xffd14d, 8))),
-    biome!("ocean", "蔚蓝海球", "grass", "sand", "stone", (0.35, 0.62, 0.88), (0.6, 0.8, 0.95), None, "", 0.0,
-        0.007, 0.014, 0.9, 0x3e8ed6, "archipelago", None, 0x2b62c8, false, false, 7, 0.0, false,
+        Some(("孢子爬行者", 0x9a6fd8, 0x7c4fba, 0xffd14d, 8))
+    ),
+    biome!(
+        "ocean",
+        "蔚蓝海球",
+        "grass",
+        "sand",
+        "stone",
+        (0.35, 0.62, 0.88),
+        (0.6, 0.8, 0.95),
+        None,
+        "",
+        0.0,
+        0.007,
+        0.014,
+        0.9,
+        0x3e8ed6,
+        "archipelago",
+        None,
+        0x2b62c8,
+        false,
+        false,
+        7,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("sand", 0.8, 1.5)],
-        Some(("碧波滑行兽", 0x4da6c8, 0x2e7893, 0xffffff, 8))),
-    biome!("crystal", "晶簇冻土", "snow", "dirt", "ice", (0.55, 0.75, 0.85), (0.75, 0.9, 0.95), Some("cold"), "❄ 晶界酷寒", 1.7,
-        0.0, 0.004, 1.4, 0x7fe8e0, "glacial", Some("geodes"), 0x8fd8e8, false, false, 0, 0.02, false,
+        Some(("碧波滑行兽", 0x4da6c8, 0x2e7893, 0xffffff, 8))
+    ),
+    biome!(
+        "crystal",
+        "晶簇冻土",
+        "snow",
+        "dirt",
+        "ice",
+        (0.55, 0.75, 0.85),
+        (0.75, 0.9, 0.95),
+        Some("cold"),
+        "❄ 晶界酷寒",
+        1.7,
+        0.0,
+        0.004,
+        1.4,
+        0x7fe8e0,
+        "glacial",
+        Some("geodes"),
+        0x8fd8e8,
+        false,
+        false,
+        0,
+        0.02,
+        false,
         &[("", 0.0, 1.0), ("ice", 0.0, 0.5)],
-        Some(("晶背蟹", 0xaef0ea, 0x5ec8c0, 0x0a4f6e, 5))),
-    biome!("fungal", "巨菌之森", "alien", "dirt", "stone", (0.5, 0.38, 0.55), (0.68, 0.55, 0.72), Some("toxic"), "☣ 菌孢瘴气", 1.3,
-        0.010, 0.02, 1.2, 0xc06fd8, "continental", None, 0x6a4a8a, false, false, 0, 0.0, true,
+        Some(("晶背蟹", 0xaef0ea, 0x5ec8c0, 0x0a4f6e, 5))
+    ),
+    biome!(
+        "fungal",
+        "巨菌之森",
+        "alien",
+        "dirt",
+        "stone",
+        (0.5, 0.38, 0.55),
+        (0.68, 0.55, 0.72),
+        Some("toxic"),
+        "☣ 菌孢瘴气",
+        1.3,
+        0.010,
+        0.02,
+        1.2,
+        0xc06fd8,
+        "continental",
+        None,
+        0x6a4a8a,
+        false,
+        false,
+        0,
+        0.0,
+        true,
         &[("", 1.0, 1.0), ("murk", 0.5, 1.8)],
-        Some(("菌帽跳虫", 0xd8a8e8, 0x9a5fd0, 0xff5a4e, 9))),
-    biome!("ashen", "灰烬荒原", "ash", "ash", "basalt", (0.45, 0.42, 0.4), (0.6, 0.58, 0.55), Some("rad"), "☢ 辐射尘暴", 2.0,
-        0.0, 0.003, 1.8, 0x8a8a8a, "flats", None, 0x9a7a5a, false, false, 0, 0.0, false,
+        Some(("菌帽跳虫", 0xd8a8e8, 0x9a5fd0, 0xff5a4e, 9))
+    ),
+    biome!(
+        "ashen",
+        "灰烬荒原",
+        "ash",
+        "ash",
+        "basalt",
+        (0.45, 0.42, 0.4),
+        (0.6, 0.58, 0.55),
+        Some("rad"),
+        "☢ 辐射尘暴",
+        2.0,
+        0.0,
+        0.003,
+        1.8,
+        0x8a8a8a,
+        "flats",
+        None,
+        0x9a7a5a,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 0.0, 1.0), ("basalt", 0.0, 0.2)],
-        Some(("灰烬潜行者", 0x6e6a66, 0x3a3a3a, 0x7dff56, 4))),
-    biome!("amber", "金珀沙海", "amber", "sand", "stone", (0.92, 0.72, 0.42), (0.98, 0.85, 0.6), Some("heat"), "☀ 灼金热浪", 1.2,
-        0.001, 0.006, 1.1, 0xe0a63a, "dunes", None, 0xd8b048, false, false, 0, 0.0, false,
+        Some(("灰烬潜行者", 0x6e6a66, 0x3a3a3a, 0x7dff56, 4))
+    ),
+    biome!(
+        "amber",
+        "金珀沙海",
+        "amber",
+        "sand",
+        "stone",
+        (0.92, 0.72, 0.42),
+        (0.98, 0.85, 0.6),
+        Some("heat"),
+        "☀ 灼金热浪",
+        1.2,
+        0.001,
+        0.006,
+        1.1,
+        0xe0a63a,
+        "dunes",
+        None,
+        0xd8b048,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("amber", 0.3, 1.2)],
-        Some(("珀壳掘虫", 0xe8c060, 0xa87828, 0x5e3808, 6))),
-    biome!("ferrous", "磁暴铁原", "rust", "rust", "basalt", (0.55, 0.4, 0.32), (0.7, 0.55, 0.45), Some("storm"), "⚡ 磁暴侵蚀", 1.5,
-        0.0, 0.004, 1.6, 0xa86a4a, "shatter", None, 0x8a5a3a, false, false, 0, 0.0, false,
+        Some(("珀壳掘虫", 0xe8c060, 0xa87828, 0x5e3808, 6))
+    ),
+    biome!(
+        "ferrous",
+        "磁暴铁原",
+        "rust",
+        "rust",
+        "basalt",
+        (0.55, 0.4, 0.32),
+        (0.7, 0.55, 0.45),
+        Some("storm"),
+        "⚡ 磁暴侵蚀",
+        1.5,
+        0.0,
+        0.004,
+        1.6,
+        0xa86a4a,
+        "shatter",
+        None,
+        0x8a5a3a,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 0.0, 1.0), ("rust", 0.0, 0.4)],
-        Some(("磁尘甲兽", 0x8a5a3a, 0x4a4a52, 0x35e0e8, 5))),
-    biome!("murk", "荧光沼泽", "murk", "dirt", "stone", (0.16, 0.3, 0.28), (0.25, 0.42, 0.38), Some("toxic"), "☣ 沼气瘴雾", 1.1,
-        0.004, 0.035, 1.0, 0x2e8a72, "swamp", Some("swamp_caves"), 0x2f7a5a, false, false, 4, 0.0, true,
+        Some(("磁尘甲兽", 0x8a5a3a, 0x4a4a52, 0x35e0e8, 5))
+    ),
+    biome!(
+        "murk",
+        "荧光沼泽",
+        "murk",
+        "dirt",
+        "stone",
+        (0.16, 0.3, 0.28),
+        (0.25, 0.42, 0.38),
+        Some("toxic"),
+        "☣ 沼气瘴雾",
+        1.1,
+        0.004,
+        0.035,
+        1.0,
+        0x2e8a72,
+        "swamp",
+        Some("swamp_caves"),
+        0x2f7a5a,
+        false,
+        false,
+        4,
+        0.0,
+        true,
         &[("", 1.0, 1.0), ("murk", 0.3, 2.2)],
-        Some(("沼灯浮蜓", 0x2e8a72, 0x1a5244, 0x4ee8b8, 9))),
-    biome!("salt", "盐晶滩", "salt", "salt", "stone", (0.8, 0.85, 0.9), (0.92, 0.95, 0.98), None, "", 0.0,
-        0.0, 0.008, 1.0, 0xe8ecf0, "flats", None, 0xcfe8f0, false, false, 0, 0.0, false,
+        Some(("沼灯浮蜓", 0x2e8a72, 0x1a5244, 0x4ee8b8, 9))
+    ),
+    biome!(
+        "salt",
+        "盐晶滩",
+        "salt",
+        "salt",
+        "stone",
+        (0.8, 0.85, 0.9),
+        (0.92, 0.95, 0.98),
+        None,
+        "",
+        0.0,
+        0.0,
+        0.008,
+        1.0,
+        0xe8ecf0,
+        "flats",
+        None,
+        0xcfe8f0,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 0.0, 1.0), ("sand", 0.0, 0.5)],
-        Some(("盐羽鹬", 0xf0f2f4, 0xc2c9ce, 0x222222, 7))),
-    biome!("obsidian", "黑曜熔壁", "obsidian", "obsidian", "basalt", (0.28, 0.22, 0.35), (0.4, 0.32, 0.48), Some("heat"), "☀ 曜岩余温", 1.9,
-        0.0, 0.002, 1.7, 0x2a2a35, "shatter", None, 0x4a3a6a, true, false, 0, 0.0, false,
+        Some(("盐羽鹬", 0xf0f2f4, 0xc2c9ce, 0x222222, 7))
+    ),
+    biome!(
+        "obsidian",
+        "黑曜熔壁",
+        "obsidian",
+        "obsidian",
+        "basalt",
+        (0.28, 0.22, 0.35),
+        (0.4, 0.32, 0.48),
+        Some("heat"),
+        "☀ 曜岩余温",
+        1.9,
+        0.0,
+        0.002,
+        1.7,
+        0x2a2a35,
+        "shatter",
+        None,
+        0x4a3a6a,
+        true,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 0.0, 1.0), ("basalt", 0.0, 0.2)],
-        Some(("曜甲蟹", 0x2a2a35, 0x6a5a9a, 0xff6600, 4))),
-    biome!("redmoss", "红藓高原", "redmoss", "dirt", "stone", (0.75, 0.5, 0.42), (0.88, 0.68, 0.58), Some("cold"), "❄ 稀薄冷风", 1.1,
-        0.003, 0.012, 1.15, 0xc25a48, "mesa", None, 0xb06050, false, false, 0, 0.0, false,
+        Some(("曜甲蟹", 0x2a2a35, 0x6a5a9a, 0xff6600, 4))
+    ),
+    biome!(
+        "redmoss",
+        "红藓高原",
+        "redmoss",
+        "dirt",
+        "stone",
+        (0.75, 0.5, 0.42),
+        (0.88, 0.68, 0.58),
+        Some("cold"),
+        "❄ 稀薄冷风",
+        1.1,
+        0.003,
+        0.012,
+        1.15,
+        0xc25a48,
+        "mesa",
+        None,
+        0xb06050,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 1.0, 1.0), ("redmoss", 0.4, 1.6)],
-        Some(("藓原掠行者", 0xc25a48, 0x8a3a2c, 0xffe8a0, 8))),
-    biome!("hive", "蜂窝穹丘", "hive", "hive", "stone", (0.85, 0.6, 0.3), (0.95, 0.75, 0.45), Some("toxic"), "☣ 信息素迷雾", 1.5,
-        0.0, 0.01, 1.3, 0xd8862a, "hive", None, 0xd89830, false, false, 0, 0.0, false,
+        Some(("藓原掠行者", 0xc25a48, 0x8a3a2c, 0xffe8a0, 8))
+    ),
+    biome!(
+        "hive",
+        "蜂窝穹丘",
+        "hive",
+        "hive",
+        "stone",
+        (0.85, 0.6, 0.3),
+        (0.95, 0.75, 0.45),
+        Some("toxic"),
+        "☣ 信息素迷雾",
+        1.5,
+        0.0,
+        0.01,
+        1.3,
+        0xd8862a,
+        "hive",
+        None,
+        0xd89830,
+        false,
+        false,
+        0,
+        0.0,
+        false,
         &[("", 0.0, 1.0), ("hive", 0.0, 0.5)],
-        Some(("蜂窝守卫", 0xd8862a, 0x8a5210, 0x1a1a1a, 10))),
+        Some(("蜂窝守卫", 0xd8862a, 0x8a5210, 0x1a1a1a, 10))
+    ),
 ];
 
 pub fn biome_by_key(key: &str) -> &'static Biome {
@@ -752,13 +1573,31 @@ pub const CHARGE_DEFS: &[(&str, &str, i32, f32)] = &[
 
 /// Planet names for the world-creation screen.
 pub const PLANET_NAME_POOL: &[&str] = &[
-    "始源星", "赤沙", "霜白", "熔核", "紫瘴", "翠风", "赤岭", "霜穹", "灰烬", "荒星",
-    "渊蓝", "绿溪", "灼岩", "冰环", "晶尘", "紫涌", "绯沙", "苍脊", "黯潮", "辉冠",
+    "始源星",
+    "赤沙",
+    "霜白",
+    "熔核",
+    "紫瘴",
+    "翠风",
+    "赤岭",
+    "霜穹",
+    "灰烬",
+    "荒星",
+    "渊蓝",
+    "绿溪",
+    "灼岩",
+    "冰环",
+    "晶尘",
+    "紫涌",
+    "绯沙",
+    "苍脊",
+    "黯潮",
+    "辉冠",
 ];
 
 pub const GALAXY_PREFIX: &[&str] = &[
-    "天琴", "杜鹃", "狐尾", "鲸落", "银帆", "烛龙", "雾马", "环蛇", "曙光", "霜港",
-    "孤灯", "奔雷", "碎星", "拾荒", "眠沙", "赤弦", "夜莺", "枯苇", "潮汐", "洄游",
+    "天琴", "杜鹃", "狐尾", "鲸落", "银帆", "烛龙", "雾马", "环蛇", "曙光", "霜港", "孤灯", "奔雷",
+    "碎星", "拾荒", "眠沙", "赤弦", "夜莺", "枯苇", "潮汐", "洄游",
 ];
 
 pub const GALAXY_SUFFIX: &[&str] = &[
@@ -769,9 +1608,29 @@ pub const GALAXY_SUFFIX: &[&str] = &[
 
 /// Goods tradeable at the station terminal (price base = ITEMS[].price).
 pub const TRADE_GOODS: &[&str] = &[
-    "carbon", "oxygen", "sodium", "coal", "iron_ore", "copper_ore", "titanium_ore",
-    "gold_ore", "uranium", "tritium", "iron", "copper", "titanium", "gold", "gear",
-    "wire", "circuit", "plate", "data", "fuel", "glass_b", "antimatter", "warpcell",
+    "carbon",
+    "oxygen",
+    "sodium",
+    "coal",
+    "iron_ore",
+    "copper_ore",
+    "titanium_ore",
+    "gold_ore",
+    "uranium",
+    "tritium",
+    "iron",
+    "copper",
+    "titanium",
+    "gold",
+    "gear",
+    "wire",
+    "circuit",
+    "plate",
+    "data",
+    "fuel",
+    "glass_b",
+    "antimatter",
+    "warpcell",
 ];
 
 pub struct StationBlueprint {
@@ -781,10 +1640,26 @@ pub struct StationBlueprint {
 }
 
 pub const STATION_BLUEPRINTS: &[StationBlueprint] = &[
-    StationBlueprint { tech: "logistics", price: 800, name: "蓝图：物流学" },
-    StationBlueprint { tech: "power", price: 1500, name: "蓝图：光伏能源" },
-    StationBlueprint { tech: "refining", price: 3000, name: "蓝图：化学精炼" },
-    StationBlueprint { tech: "nuclear", price: 8000, name: "蓝图：核裂变" },
+    StationBlueprint {
+        tech: "logistics",
+        price: 800,
+        name: "蓝图：物流学",
+    },
+    StationBlueprint {
+        tech: "power",
+        price: 1500,
+        name: "蓝图：光伏能源",
+    },
+    StationBlueprint {
+        tech: "refining",
+        price: 3000,
+        name: "蓝图：化学精炼",
+    },
+    StationBlueprint {
+        tech: "nuclear",
+        price: 8000,
+        name: "蓝图：核裂变",
+    },
 ];
 
 // ==================== 任务线（21 步）====================
@@ -816,40 +1691,266 @@ pub struct Quest {
 }
 
 pub const QUESTS: &[Quest] = &[
-    Quest { id: "q_wake", title: "苏醒", desc: "检查坠毁的飞船（靠近并按 E）", qtype: QuestType::Event, flag: Some("checkedShip"), item: None, n: 0, block: None, tech: None,
-        dialog: Some("警报……船体完整性 34%。发射推进器损毁。旅行者，你需要资源来修复它。") },
-    Quest { id: "q_carbon", title: "生命之碳", desc: "采集碳 ×15（挖掘树木与蕨类）", qtype: QuestType::Collect, flag: None, item: Some("carbon"), n: 15, block: None, tech: None,
-        dialog: Some("激光采矿器已校准。瞄准植物长按左键。") },
-    Quest { id: "q_sodium", title: "防护充能", desc: "采集钠 ×8（黄色花朵）", qtype: QuestType::Collect, flag: None, item: Some("sodium"), n: 8, block: None, tech: None,
-        dialog: Some("环境防护正在耗尽，钠素花能为它充能。") },
-    Quest { id: "q_stone", title: "开采岩层", desc: "采集岩石 ×12", qtype: QuestType::Collect, flag: None, item: Some("stone"), n: 12, block: None, tech: None, dialog: None },
-    Quest { id: "q_furnace", title: "第一座熔炉", desc: "合成并放置一座熔炉", qtype: QuestType::Place, flag: None, item: None, n: 1, block: Some("furnace"), tech: None,
-        dialog: Some("按 Tab 打开合成面板。熔炉是文明的第一束火光。") },
-    Quest { id: "q_iron", title: "钢铁意志", desc: "熔炼铁锭 ×10（熔炉需要碳/煤作燃料）", qtype: QuestType::Collect, flag: None, item: Some("iron"), n: 10, block: None, tech: None, dialog: None },
-    Quest { id: "q_repair", title: "修复推进器", desc: "带着铁锭×10、碳×20 检查飞船", qtype: QuestType::Event, flag: Some("shipRepaired"), item: None, n: 0, block: None, tech: None,
-        dialog: Some("推进器修复完毕！但燃料罐是空的……") },
-    Quest { id: "q_tech", title: "科研起步", desc: "合成研究数据 ×2 并研究「冶金学」(按 T)", qtype: QuestType::Tech, flag: None, item: None, n: 0, block: None, tech: Some("metallurgy"), dialog: None },
-    Quest { id: "q_auto", title: "自动化黎明", desc: "研究「自动化」，放置自动采矿机于矿脉上", qtype: QuestType::Place, flag: None, item: None, n: 1, block: Some("miner"), tech: None,
-        dialog: Some("让机器为你工作。采矿机需要电力——先研究光伏能源，或用它旁边的手摇模式（效率减半）。") },
-    Quest { id: "q_belt", title: "流水线", desc: "放置传送带 ×6，把矿石送进熔炉", qtype: QuestType::Place, flag: None, item: None, n: 6, block: Some("belt"), tech: None, dialog: None },
-    Quest { id: "q_power", title: "电力时代", desc: "研究「光伏能源」并放置 2 块太阳能板", qtype: QuestType::Place, flag: None, item: None, n: 2, block: Some("solar"), tech: None, dialog: None },
-    Quest { id: "q_refinery", title: "化学工厂", desc: "研究「化学精炼」并放置精炼厂", qtype: QuestType::Place, flag: None, item: None, n: 1, block: Some("refinery"), tech: None, dialog: None },
-    Quest { id: "q_fuel", title: "飞向天空的燃料", desc: "合成发射燃料 ×2（Tab便携合成：碳×25+氧×10，精炼厂更高效）", qtype: QuestType::Collect, flag: None, item: Some("fuel"), n: 2, block: None, tech: None,
-        dialog: Some("发射燃料配方已同步：碳×25 + 氧气×10。可在背包合成面板直接合成，或交给精炼厂批量生产。") },
-    Quest { id: "q_launch", title: "起飞！", desc: "为飞船加注燃料并起飞（对飞船按 E，机上再按 E 可随处降落）", qtype: QuestType::Event, flag: Some("launched"), item: None, n: 0, block: None, tech: None,
-        dialog: Some("所有系统就绪。点火倒计时……祝好运，旅行者。") },
-    Quest { id: "q_station", title: "轨道灯塔", desc: "持续拉升冲出大气层，飞向空间站停靠（靠近按 E）", qtype: QuestType::Event, flag: Some("docked"), item: None, n: 0, block: None, tech: None,
-        dialog: Some("侦测到空间站信号。拉起机头爬升，冲出大气层就能看到它。") },
-    Quest { id: "q_trade", title: "第一桶金", desc: "在空间站完成一次交易", qtype: QuestType::Event, flag: Some("traded"), item: None, n: 0, block: None, tech: None, dialog: None },
-    Quest { id: "q_explore", title: "新世界", desc: "降落在另一颗星球上", qtype: QuestType::Event, flag: Some("newPlanet"), item: None, n: 0, block: None, tech: None,
-        dialog: Some("每颗星球都有独特的生态与矿藏。熔火之地矿产翻倍……但小心高温。") },
-    Quest { id: "q_nuclear", title: "原子之心", desc: "研究「核裂变」并建造核子反应堆", qtype: QuestType::Place, flag: None, item: None, n: 1, block: Some("reactor"), tech: None, dialog: None },
-    Quest { id: "q_antimatter", title: "囚禁湮灭之光", desc: "精炼反物质 ×3（铀×20+氚×100+电路×10+金锭×5 each）", qtype: QuestType::Collect, flag: None, item: Some("antimatter"), n: 3, block: None, tech: None,
-        dialog: Some("反物质——宇宙中最昂贵的物质。深挖铀矿、粉碎小行星采氚，或者用星币在空间站堆出来。") },
-    Quest { id: "q_warp", title: "群星的船票", desc: "获得一枚曲率电池（精炼合成 或 空间站 ₪240000 购买）", qtype: QuestType::Collect, flag: None, item: Some("warpcell"), n: 1, block: None, tech: None,
-        dialog: Some("曲率电池充能完毕。打开星系地图（太空中按 M），选一颗你喜欢的恒星。") },
-    Quest { id: "q_leave", title: "第一章 · 飞出初始星系", desc: "在星系地图（M）中选择目标星系，执行曲速跃迁", qtype: QuestType::Event, flag: Some("warpedOut"), item: None, n: 0, block: None, tech: None,
-        dialog: Some("跃迁成功——起源星系在身后化为一粒尘埃。第一章完结，而宇宙没有边界。旅行者，继续前进吧。") },
+    Quest {
+        id: "q_wake",
+        title: "苏醒",
+        desc: "检查坠毁的飞船（靠近并按 E）",
+        qtype: QuestType::Event,
+        flag: Some("checkedShip"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: Some("警报……船体完整性 34%。发射推进器损毁。旅行者，你需要资源来修复它。"),
+    },
+    Quest {
+        id: "q_carbon",
+        title: "生命之碳",
+        desc: "采集碳 ×15（挖掘树木与蕨类）",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("carbon"),
+        n: 15,
+        block: None,
+        tech: None,
+        dialog: Some("激光采矿器已校准。瞄准植物长按左键。"),
+    },
+    Quest {
+        id: "q_sodium",
+        title: "防护充能",
+        desc: "采集钠 ×8（黄色花朵）",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("sodium"),
+        n: 8,
+        block: None,
+        tech: None,
+        dialog: Some("环境防护正在耗尽，钠素花能为它充能。"),
+    },
+    Quest {
+        id: "q_stone",
+        title: "开采岩层",
+        desc: "采集岩石 ×12",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("stone"),
+        n: 12,
+        block: None,
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_furnace",
+        title: "第一座熔炉",
+        desc: "合成并放置一座熔炉",
+        qtype: QuestType::Place,
+        flag: None,
+        item: None,
+        n: 1,
+        block: Some("furnace"),
+        tech: None,
+        dialog: Some("按 Tab 打开合成面板。熔炉是文明的第一束火光。"),
+    },
+    Quest {
+        id: "q_iron",
+        title: "钢铁意志",
+        desc: "熔炼铁锭 ×10（熔炉需要碳/煤作燃料）",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("iron"),
+        n: 10,
+        block: None,
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_repair",
+        title: "修复推进器",
+        desc: "带着铁锭×10、碳×20 检查飞船",
+        qtype: QuestType::Event,
+        flag: Some("shipRepaired"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: Some("推进器修复完毕！但燃料罐是空的……"),
+    },
+    Quest {
+        id: "q_tech",
+        title: "科研起步",
+        desc: "合成研究数据 ×2 并研究「冶金学」(按 T)",
+        qtype: QuestType::Tech,
+        flag: None,
+        item: None,
+        n: 0,
+        block: None,
+        tech: Some("metallurgy"),
+        dialog: None,
+    },
+    Quest {
+        id: "q_auto",
+        title: "自动化黎明",
+        desc: "研究「自动化」，放置自动采矿机于矿脉上",
+        qtype: QuestType::Place,
+        flag: None,
+        item: None,
+        n: 1,
+        block: Some("miner"),
+        tech: None,
+        dialog: Some(
+            "让机器为你工作。采矿机需要电力——先研究光伏能源，或用它旁边的手摇模式（效率减半）。",
+        ),
+    },
+    Quest {
+        id: "q_belt",
+        title: "流水线",
+        desc: "放置传送带 ×6，把矿石送进熔炉",
+        qtype: QuestType::Place,
+        flag: None,
+        item: None,
+        n: 6,
+        block: Some("belt"),
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_power",
+        title: "电力时代",
+        desc: "研究「光伏能源」并放置 2 块太阳能板",
+        qtype: QuestType::Place,
+        flag: None,
+        item: None,
+        n: 2,
+        block: Some("solar"),
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_refinery",
+        title: "化学工厂",
+        desc: "研究「化学精炼」并放置精炼厂",
+        qtype: QuestType::Place,
+        flag: None,
+        item: None,
+        n: 1,
+        block: Some("refinery"),
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_fuel",
+        title: "飞向天空的燃料",
+        desc: "合成发射燃料 ×2（Tab便携合成：碳×25+氧×10，精炼厂更高效）",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("fuel"),
+        n: 2,
+        block: None,
+        tech: None,
+        dialog: Some(
+            "发射燃料配方已同步：碳×25 + 氧气×10。可在背包合成面板直接合成，或交给精炼厂批量生产。",
+        ),
+    },
+    Quest {
+        id: "q_launch",
+        title: "起飞！",
+        desc: "为飞船加注燃料并起飞（对飞船按 E，机上再按 E 可随处降落）",
+        qtype: QuestType::Event,
+        flag: Some("launched"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: Some("所有系统就绪。点火倒计时……祝好运，旅行者。"),
+    },
+    Quest {
+        id: "q_station",
+        title: "轨道灯塔",
+        desc: "持续拉升冲出大气层，飞向空间站停靠（靠近按 E）",
+        qtype: QuestType::Event,
+        flag: Some("docked"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: Some("侦测到空间站信号。拉起机头爬升，冲出大气层就能看到它。"),
+    },
+    Quest {
+        id: "q_trade",
+        title: "第一桶金",
+        desc: "在空间站完成一次交易",
+        qtype: QuestType::Event,
+        flag: Some("traded"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_explore",
+        title: "新世界",
+        desc: "降落在另一颗星球上",
+        qtype: QuestType::Event,
+        flag: Some("newPlanet"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: Some("每颗星球都有独特的生态与矿藏。熔火之地矿产翻倍……但小心高温。"),
+    },
+    Quest {
+        id: "q_nuclear",
+        title: "原子之心",
+        desc: "研究「核裂变」并建造核子反应堆",
+        qtype: QuestType::Place,
+        flag: None,
+        item: None,
+        n: 1,
+        block: Some("reactor"),
+        tech: None,
+        dialog: None,
+    },
+    Quest {
+        id: "q_antimatter",
+        title: "囚禁湮灭之光",
+        desc: "精炼反物质 ×3（铀×20+氚×100+电路×10+金锭×5 each）",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("antimatter"),
+        n: 3,
+        block: None,
+        tech: None,
+        dialog: Some(
+            "反物质——宇宙中最昂贵的物质。深挖铀矿、粉碎小行星采氚，或者用星币在空间站堆出来。",
+        ),
+    },
+    Quest {
+        id: "q_warp",
+        title: "群星的船票",
+        desc: "获得一枚曲率电池（精炼合成 或 空间站 ₪240000 购买）",
+        qtype: QuestType::Collect,
+        flag: None,
+        item: Some("warpcell"),
+        n: 1,
+        block: None,
+        tech: None,
+        dialog: Some("曲率电池充能完毕。打开星系地图（太空中按 M），选一颗你喜欢的恒星。"),
+    },
+    Quest {
+        id: "q_leave",
+        title: "第一章 · 飞出初始星系",
+        desc: "在星系地图（M）中选择目标星系，执行曲速跃迁",
+        qtype: QuestType::Event,
+        flag: Some("warpedOut"),
+        item: None,
+        n: 0,
+        block: None,
+        tech: None,
+        dialog: Some(
+            "跃迁成功——起源星系在身后化为一粒尘埃。第一章完结，而宇宙没有边界。旅行者，继续前进吧。",
+        ),
+    },
 ];
 
 pub fn quest_by_id(id: &str) -> &'static Quest {
@@ -872,11 +1973,41 @@ pub struct PlanetDef {
 
 /// 初始星系（固定布局，每档案随机种子着色）
 pub const DEFAULT_PLANETS: &[PlanetDef] = &[
-    PlanetDef { id: 0, biome: "lush", name: "始源星", pos: [0.0, 0.0, 0.0], radius: 150.0 },
-    PlanetDef { id: 1, biome: "desert", name: "赤沙", pos: [1800.0, 120.0, -900.0], radius: 130.0 },
-    PlanetDef { id: 2, biome: "frozen", name: "霜白", pos: [-1500.0, -200.0, -1700.0], radius: 140.0 },
-    PlanetDef { id: 3, biome: "volcanic", name: "熔核", pos: [900.0, -100.0, 2300.0], radius: 120.0 },
-    PlanetDef { id: 4, biome: "alien", name: "紫瘴", pos: [-2400.0, 250.0, 1100.0], radius: 145.0 },
+    PlanetDef {
+        id: 0,
+        biome: "lush",
+        name: "始源星",
+        pos: [0.0, 0.0, 0.0],
+        radius: 150.0,
+    },
+    PlanetDef {
+        id: 1,
+        biome: "desert",
+        name: "赤沙",
+        pos: [1800.0, 120.0, -900.0],
+        radius: 130.0,
+    },
+    PlanetDef {
+        id: 2,
+        biome: "frozen",
+        name: "霜白",
+        pos: [-1500.0, -200.0, -1700.0],
+        radius: 140.0,
+    },
+    PlanetDef {
+        id: 3,
+        biome: "volcanic",
+        name: "熔核",
+        pos: [900.0, -100.0, 2300.0],
+        radius: 120.0,
+    },
+    PlanetDef {
+        id: 4,
+        biome: "alien",
+        name: "紫瘴",
+        pos: [-2400.0, 250.0, 1100.0],
+        radius: 145.0,
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -928,9 +2059,9 @@ pub fn generate_galaxy(seed: u32) -> Galaxy {
         "amber", "ferrous", "murk", "salt", "obsidian", "redmoss", "hive",
     ];
     let names = [
-        "翠风", "赤岭", "霜穹", "灰烬", "荒星", "渊蓝", "绿溪", "灼岩", "冰环", "晶尘",
-        "紫涌", "绯沙", "苍脊", "黯潮", "辉冠", "裂星", "流火", "雾原", "雪锋", "熔渊",
-        "澜礁", "菌歌", "空悬", "曜壁", "沉塔", "洄湾", "铁穗", "昙丘", "烬柱", "虹隙",
+        "翠风", "赤岭", "霜穹", "灰烬", "荒星", "渊蓝", "绿溪", "灼岩", "冰环", "晶尘", "紫涌",
+        "绯沙", "苍脊", "黯潮", "辉冠", "裂星", "流火", "雾原", "雪锋", "熔渊", "澜礁", "菌歌",
+        "空悬", "曜壁", "沉塔", "洄湾", "铁穗", "昙丘", "烬柱", "虹隙",
     ];
     let mut used: Vec<usize> = Vec::new();
     let mut planets: Vec<PlanetDef> = Vec::new();
@@ -1011,10 +2142,42 @@ pub struct ShipClass {
 }
 
 pub const SHIP_CLASSES: &[ShipClass] = &[
-    ShipClass { key: "C", weight: 0.55, price: 45000, weapon: "pulse", weapon_name: "脉冲机炮", slots: 12, color: "#9aa6b2" },
-    ShipClass { key: "B", weight: 0.25, price: 140000, weapon: "twin", weapon_name: "双联流火炮", slots: 16, color: "#35e0e8" },
-    ShipClass { key: "A", weight: 0.15, price: 350000, weapon: "phase", weapon_name: "相位光矛", slots: 20, color: "#b58aff" },
-    ShipClass { key: "S", weight: 0.05, price: 900000, weapon: "annihil", weapon_name: "湮灭重炮", slots: 24, color: "#ffd94d" },
+    ShipClass {
+        key: "C",
+        weight: 0.55,
+        price: 45000,
+        weapon: "pulse",
+        weapon_name: "脉冲机炮",
+        slots: 12,
+        color: "#9aa6b2",
+    },
+    ShipClass {
+        key: "B",
+        weight: 0.25,
+        price: 140000,
+        weapon: "twin",
+        weapon_name: "双联流火炮",
+        slots: 16,
+        color: "#35e0e8",
+    },
+    ShipClass {
+        key: "A",
+        weight: 0.15,
+        price: 350000,
+        weapon: "phase",
+        weapon_name: "相位光矛",
+        slots: 20,
+        color: "#b58aff",
+    },
+    ShipClass {
+        key: "S",
+        weight: 0.05,
+        price: 900000,
+        weapon: "annihil",
+        weapon_name: "湮灭重炮",
+        slots: 24,
+        color: "#ffd94d",
+    },
 ];
 
 pub const SHIP_MODEL_NAMES: &[(&str, &str)] = &[
@@ -1044,11 +2207,20 @@ pub fn ship_class_by_key(key: &str) -> &'static ShipClass {
 }
 
 pub const PILOT_NAMES: &[&str] = &[
-    "游商·卡洛", "飞手·薇拉", "老练的走私客", "星途旅人·顿", "佣兵·赤羽", "货运队长·穆",
+    "游商·卡洛",
+    "飞手·薇拉",
+    "老练的走私客",
+    "星途旅人·顿",
+    "佣兵·赤羽",
+    "货运队长·穆",
 ];
 
 /// 交易计算：买 = max(1, round(price*mod*1.25*discount))，卖 = max(1, round(price*mod*0.8))，discount=0.85 有 trade_ai。
-pub fn trade_buy_price(item: &str, market: &std::collections::HashMap<String, f32>, has_trade_ai: bool) -> i32 {
+pub fn trade_buy_price(
+    item: &str,
+    market: &std::collections::HashMap<String, f32>,
+    has_trade_ai: bool,
+) -> i32 {
     let base = item_by_key(item).map(|i| i.price).unwrap_or(1) as f32;
     let mult = market.get(item).copied().unwrap_or(1.0);
     let discount = if has_trade_ai { 0.85 } else { 1.0 };

@@ -7,7 +7,7 @@ use crate::data;
 use crate::player::Player;
 use crate::quests::{BigMessageEvent, FlagEvent};
 use crate::save::Appearance;
-use crate::space::{FlightCamera, FlightMode, ShipAsset, ShipState, SpaceGame, SHIP_R};
+use crate::space::{FlightCamera, FlightMode, SHIP_R, ShipAsset, ShipState, SpaceGame};
 use crate::ui::{Panel, UiState};
 
 // ---------- 站体布局（DOCK_L 局部坐标） ----------
@@ -27,8 +27,45 @@ const DOCK_GARAGE: [f32; 3] = [30.0, 4.0, 24.0];
 const BOUNDS_X: f32 = 30.0;
 const BOUNDS_Z_MIN: f32 = -12.0;
 const BOUNDS_Z_MAX: f32 = 74.0;
-const PADS: [[f32; 3]; 4] = [[-20.0, 2.0, 30.0], [20.0, 2.0, 30.0], [-20.0, 2.0, 52.0], [20.0, 2.0, 52.0]];
+const PADS: [[f32; 3]; 4] = [
+    [-20.0, 2.0, 30.0],
+    [20.0, 2.0, 30.0],
+    [-20.0, 2.0, 52.0],
+    [20.0, 2.0, 52.0],
+];
 const VIS_PADS: [[f32; 3]; 3] = [[-20.0, 2.0, 30.0], [-20.0, 2.0, 52.0], [20.0, 2.0, 52.0]];
+
+/// World-space position of one of the three visitor pads. The fourth pad is
+/// permanently reserved for the player.
+pub fn visitor_pad_world(station_pos: Vec3, index: usize, y: f32) -> Vec3 {
+    let pad = VIS_PADS[index.min(VIS_PADS.len() - 1)];
+    station_pos + Vec3::new(pad[0], y, pad[2])
+}
+
+#[derive(Resource, Default)]
+pub struct StationDefense {
+    pub remaining: f32,
+    pub warn_cd: f32,
+}
+
+impl StationDefense {
+    pub fn active(&self) -> bool {
+        self.remaining > 0.0
+    }
+
+    /// Raise or refresh the shield. Returns true only for the initial alarm.
+    pub fn raise(&mut self) -> bool {
+        let first = !self.active();
+        self.remaining = 10.0;
+        first
+    }
+}
+
+#[derive(Component)]
+pub struct StationShield;
+
+#[derive(Component)]
+pub struct StationGateLight;
 
 // ---------- 站体碰撞（STATION_COLS） ----------
 
@@ -39,10 +76,13 @@ struct ColBox {
 
 fn station_cols() -> Vec<ColBox> {
     let mut v = Vec::new();
-    let mut push = |v: &mut Vec<ColBox>, min: [f32; 3], max: [f32; 3], sym: bool| {
+    let push = |v: &mut Vec<ColBox>, min: [f32; 3], max: [f32; 3], sym: bool| {
         v.push(ColBox { min, max });
         if sym {
-            v.push(ColBox { min: [-max[0], min[1], min[2]], max: [-min[0], max[1], max[2]] });
+            v.push(ColBox {
+                min: [-max[0], min[1], min[2]],
+                max: [-min[0], max[1], max[2]],
+            });
         }
     };
     push(&mut v, [-40.0, -4.0, -20.0], [40.0, 0.0, 82.0], false); // 库底板
@@ -56,8 +96,22 @@ fn station_cols() -> Vec<ColBox> {
 }
 
 /// 空间站实体碰撞（飞船按半径 SHIP_R 的球处理）。
-pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3) {
+pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: bool) {
     let p = *pos - station_pos;
+    // Active station shield: a 213-unit bubble centered slightly above and
+    // behind the hangar. Ships already in the bay are not pushed out.
+    if shield_up {
+        let inside_bay = p.x.abs() < 32.0 && p.y > 0.0 && p.y < 30.0 && p.z > -14.0 && p.z < 78.0;
+        if !inside_bay {
+            let center = station_pos + Vec3::new(0.0, 20.0, -20.0);
+            let delta = *pos - center;
+            let distance = delta.length();
+            if distance < 213.0 && distance > 1e-4 {
+                *pos = center + delta * (213.0 / distance);
+                return;
+            }
+        }
+    }
     // 主塔圆柱
     {
         let c = Vec3::new(0.0, 0.0, -72.0);
@@ -90,9 +144,12 @@ pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3) {
             pos.z += dn.z * push;
         } else {
             let pens = [
-                p.x - cb.min[0], cb.max[0] - p.x,
-                p.y - cb.min[1], cb.max[1] - p.y,
-                p.z - cb.min[2], cb.max[2] - p.z,
+                p.x - cb.min[0],
+                cb.max[0] - p.x,
+                p.y - cb.min[1],
+                cb.max[1] - p.y,
+                p.z - cb.min[2],
+                cb.max[2] - p.z,
             ];
             let mut mi = 0;
             for i in 1..6 {
@@ -240,7 +297,13 @@ pub fn begin_dock(mode: &mut FlightMode, ship_pos: &Vec3, station_pos: Vec3) -> 
         st.curve = vec![*ship_pos, inner, over];
         st.dur = 2.2;
     } else {
-        st.curve = vec![*ship_pos, slot + Vec3::new(0.0, 1.0, 16.0), slot, inner, over];
+        st.curve = vec![
+            *ship_pos,
+            slot + Vec3::new(0.0, 1.0, 16.0),
+            slot,
+            inner,
+            over,
+        ];
         st.dur = 4.2;
     }
     st.offers = roll_offers(station_pos);
@@ -252,7 +315,10 @@ pub fn begin_dock(mode: &mut FlightMode, ship_pos: &Vec3, station_pos: Vec3) -> 
     st.staff_talks = vec![
         vec!["欢迎来到贸易站。".into(), "需要补给的话去终端看看。".into()],
         vec!["停机坪有三位游商。".into(), "他们的船都保养得不错。".into()],
-        vec!["想买蓝图吗？终端上有售。".into(), "科技是最大的财富。".into()],
+        vec![
+            "想买蓝图吗？终端上有售。".into(),
+            "科技是最大的财富。".into(),
+        ],
     ];
     st.pilots = build_pilots(&st.offers, station_pos);
     *mode = FlightMode::Station;
@@ -262,11 +328,19 @@ pub fn begin_dock(mode: &mut FlightMode, ship_pos: &Vec3, station_pos: Vec3) -> 
 fn roll_offers(station_pos: Vec3) -> Vec<BuyOffer> {
     let mut rnd = crate::rng::Rng::new(station_pos.x.to_bits() ^ 0xC0FFEE);
     let mut out = Vec::new();
-    let names = ["游商·卡洛", "飞手·薇拉", "老练的走私客", "星途旅人·顿", "佣兵·赤羽", "货运队长·穆"];
+    let names = [
+        "游商·卡洛",
+        "飞手·薇拉",
+        "老练的走私客",
+        "星途旅人·顿",
+        "佣兵·赤羽",
+        "货运队长·穆",
+    ];
     for _ in 0..3 {
         let cls = data::roll_ship_class(rnd.next());
         let model = data::SHIP_MODEL_NAMES[rnd.range(data::SHIP_MODEL_NAMES.len())].0;
-        let price = ((cls.price as f32 * (0.88 + rnd.next() * 0.28) / 100.0).round() * 100.0) as i32;
+        let price =
+            ((cls.price as f32 * (0.88 + rnd.next() * 0.28) / 100.0).round() * 100.0) as i32;
         out.push(BuyOffer {
             cls: cls.key.to_string(),
             model: model.to_string(),
@@ -329,8 +403,18 @@ pub fn spawn_station(
         unlit: true,
         ..default()
     });
+    let gate_glow = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.21, 0.88, 0.91),
+        emissive: LinearRgba::new(0.1, 0.6, 0.7, 1.0) * 2.0,
+        unlit: true,
+        ..default()
+    });
     let root = commands
-        .spawn((Transform::from_translation(pos), Visibility::default(), crate::InGame))
+        .spawn((
+            Transform::from_translation(pos),
+            Visibility::default(),
+            crate::InGame,
+        ))
         .id();
     let b = |commands: &mut Commands,
              meshes: &mut Assets<Mesh>,
@@ -341,7 +425,8 @@ pub fn spawn_station(
              m: &Handle<StandardMaterial>,
              x: f32,
              y: f32,
-             z: f32| {
+             z: f32|
+     -> Entity {
         let e = commands
             .spawn((
                 Mesh3d(meshes.add(Cuboid::new(w, h, d))),
@@ -351,6 +436,7 @@ pub fn spawn_station(
             ))
             .id();
         commands.entity(root).add_child(e);
+        e
     };
     // 主塔
     let tower = commands
@@ -374,31 +460,181 @@ pub fn spawn_station(
         .id();
     commands.entity(root).add_child(ring);
     // 机库
-    b(commands, meshes, root, 80.0, 4.0, 102.0, &dark, 0.0, -2.0, 31.0);
-    b(commands, meshes, root, 80.0, 4.0, 102.0, &dark, 0.0, 32.0, 31.0);
-    b(commands, meshes, root, 8.0, 30.0, 102.0, &hull, -36.0, 15.0, 31.0);
-    b(commands, meshes, root, 8.0, 30.0, 102.0, &hull, 36.0, 15.0, 31.0);
-    b(commands, meshes, root, 80.0, 30.0, 6.0, &hull, 0.0, 15.0, -17.0);
-    b(commands, meshes, root, 80.0, 12.0, 6.0, &hull, 0.0, 24.0, 79.0);
-    b(commands, meshes, root, 80.0, 2.0, 6.0, &hull, 0.0, 1.0, 79.0);
-    b(commands, meshes, root, 26.0, 16.0, 6.0, &hull, -27.0, 10.0, 79.0);
-    b(commands, meshes, root, 26.0, 16.0, 6.0, &hull, 27.0, 10.0, 79.0);
+    b(
+        commands, meshes, root, 80.0, 4.0, 102.0, &dark, 0.0, -2.0, 31.0,
+    );
+    b(
+        commands, meshes, root, 80.0, 4.0, 102.0, &dark, 0.0, 32.0, 31.0,
+    );
+    b(
+        commands, meshes, root, 8.0, 30.0, 102.0, &hull, -36.0, 15.0, 31.0,
+    );
+    b(
+        commands, meshes, root, 8.0, 30.0, 102.0, &hull, 36.0, 15.0, 31.0,
+    );
+    b(
+        commands, meshes, root, 80.0, 30.0, 6.0, &hull, 0.0, 15.0, -17.0,
+    );
+    b(
+        commands, meshes, root, 80.0, 12.0, 6.0, &hull, 0.0, 24.0, 79.0,
+    );
+    b(
+        commands, meshes, root, 80.0, 2.0, 6.0, &hull, 0.0, 1.0, 79.0,
+    );
+    b(
+        commands, meshes, root, 26.0, 16.0, 6.0, &hull, -27.0, 10.0, 79.0,
+    );
+    b(
+        commands, meshes, root, 26.0, 16.0, 6.0, &hull, 27.0, 10.0, 79.0,
+    );
     // 停机坪
     for p in PADS {
-        b(commands, meshes, root, 12.0, 2.0, 12.0, &dark, p[0], p[1] + 1.0, p[2]);
+        b(
+            commands,
+            meshes,
+            root,
+            12.0,
+            2.0,
+            12.0,
+            &dark,
+            p[0],
+            p[1] + 1.0,
+            p[2],
+        );
     }
     // 大厅平台（z≤6 抬升）
-    b(commands, meshes, root, 64.0, 3.0, 26.0, &hull, 0.0, 1.5, -7.0);
+    b(
+        commands, meshes, root, 64.0, 3.0, 26.0, &hull, 0.0, 1.5, -7.0,
+    );
     // 门口引导灯
-    b(commands, meshes, root, 2.0, 0.4, 0.4, &glow_c, -14.0, 10.0, 79.4);
-    b(commands, meshes, root, 2.0, 0.4, 0.4, &glow_c, 14.0, 10.0, 79.4);
+    let gate_left = b(
+        commands, meshes, root, 2.0, 0.4, 0.4, &gate_glow, -14.0, 10.0, 79.4,
+    );
+    let gate_right = b(
+        commands, meshes, root, 2.0, 0.4, 0.4, &gate_glow, 14.0, 10.0, 79.4,
+    );
+    commands.entity(gate_left).insert(StationGateLight);
+    commands.entity(gate_right).insert(StationGateLight);
     // 交易终端（发光屏）
-    b(commands, meshes, root, 2.6, 4.2, 1.4, &dark, DOCK_TERMINAL[0], DOCK_TERMINAL[1] + 1.0, DOCK_TERMINAL[2]);
-    b(commands, meshes, root, 2.2, 2.0, 0.2, &glow_c, DOCK_TERMINAL[0], DOCK_TERMINAL[1] + 1.0, DOCK_TERMINAL[2] - 0.72);
+    b(
+        commands,
+        meshes,
+        root,
+        2.6,
+        4.2,
+        1.4,
+        &dark,
+        DOCK_TERMINAL[0],
+        DOCK_TERMINAL[1] + 1.0,
+        DOCK_TERMINAL[2],
+    );
+    b(
+        commands,
+        meshes,
+        root,
+        2.2,
+        2.0,
+        0.2,
+        &glow_c,
+        DOCK_TERMINAL[0],
+        DOCK_TERMINAL[1] + 1.0,
+        DOCK_TERMINAL[2] - 0.72,
+    );
     // 换船电脑
-    b(commands, meshes, root, 2.2, 3.0, 1.2, &dark, DOCK_GARAGE[0], DOCK_GARAGE[1] + 0.5, DOCK_GARAGE[2]);
-    b(commands, meshes, root, 1.8, 1.4, 0.2, &glow_a, DOCK_GARAGE[0], DOCK_GARAGE[1] + 0.5, DOCK_GARAGE[2] - 0.62);
+    b(
+        commands,
+        meshes,
+        root,
+        2.2,
+        3.0,
+        1.2,
+        &dark,
+        DOCK_GARAGE[0],
+        DOCK_GARAGE[1] + 0.5,
+        DOCK_GARAGE[2],
+    );
+    b(
+        commands,
+        meshes,
+        root,
+        1.8,
+        1.4,
+        0.2,
+        &glow_a,
+        DOCK_GARAGE[0],
+        DOCK_GARAGE[1] + 0.5,
+        DOCK_GARAGE[2] - 0.62,
+    );
+    let shield = commands
+        .spawn((
+            Mesh3d(meshes.add(Sphere::new(213.0))),
+            MeshMaterial3d(mats.add(StandardMaterial {
+                base_color: Color::srgba(0.25, 0.65, 1.0, 0.0),
+                emissive: LinearRgba::new(0.1, 0.45, 1.0, 1.0),
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 20.0, -20.0),
+            Visibility::Hidden,
+            StationShield,
+            crate::InGame,
+        ))
+        .id();
+    commands.entity(root).add_child(shield);
     root
+}
+
+/// Shield countdown and visual state. Gate lights switch to a flashing red
+/// warning while docking clearance is suspended.
+pub fn station_defense_system(
+    time: Res<Time>,
+    mut defense: ResMut<StationDefense>,
+    mut shield: Query<(&MeshMaterial3d<StandardMaterial>, &mut Visibility), With<StationShield>>,
+    gates: Query<&MeshMaterial3d<StandardMaterial>, With<StationGateLight>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut big_ev: MessageWriter<BigMessageEvent>,
+    mut commands: Commands,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    let was_active = defense.active();
+    if defense.remaining > 0.0 {
+        defense.remaining = (defense.remaining - time.delta_secs()).max(0.0);
+    }
+    defense.warn_cd = (defense.warn_cd - time.delta_secs()).max(0.0);
+    let active = defense.active();
+    let pulse = 0.12 + (time.elapsed_secs() * 6.0).sin() * 0.035;
+    for (material, mut visibility) in &mut shield {
+        *visibility = if active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(mut mat) = materials.get_mut(material.0.id()) {
+            mat.base_color.set_alpha(if active { pulse } else { 0.0 });
+        }
+    }
+    for material in &gates {
+        if let Some(mut mat) = materials.get_mut(material.0.id()) {
+            if active {
+                let flash = 0.55 + 0.45 * (time.elapsed_secs() * 9.0).sin();
+                mat.base_color = Color::srgb(1.0, 0.18 * flash, 0.12 * flash);
+                mat.emissive = LinearRgba::new(1.0, 0.04, 0.02, 1.0) * 2.5;
+            } else {
+                mat.base_color = Color::srgb(0.21, 0.88, 0.91);
+                mat.emissive = LinearRgba::new(0.1, 0.6, 0.7, 1.0) * 2.0;
+            }
+        }
+    }
+    if was_active && !active {
+        big_ev.write(BigMessageEvent {
+            title: "空间站防护盾解除".into(),
+            sub: "准入已恢复".into(),
+            dur: 2.2,
+        });
+        crate::audio::play(&mut commands, sfx.scan.clone(), 0.45, None);
+    }
 }
 
 // ---------- Catmull-Rom ----------
@@ -449,7 +685,9 @@ pub fn ship_switch_system(
         let old = ship_asset.data.clone();
         let new_data = match e.garage_idx {
             Some(i) => {
-                let Some(stored) = game.garage.get(i).cloned() else { continue };
+                let Some(stored) = game.garage.get(i).cloned() else {
+                    continue;
+                };
                 if let Some(slot) = game.garage.get_mut(i) {
                     *slot = old.clone();
                 }
@@ -469,7 +707,9 @@ pub fn ship_switch_system(
                 };
                 fresh.inv = old.inv.clone();
                 fresh.inv.truncate(data::ship_class_by_key(&e.cls).slots);
-                fresh.inv.resize(data::ship_class_by_key(&e.cls).slots, None);
+                fresh
+                    .inv
+                    .resize(data::ship_class_by_key(&e.cls).slots, None);
                 game.garage.push(old.clone());
                 fresh
             }
@@ -558,7 +798,9 @@ pub fn station_system(
             if t >= 1.0 {
                 ship.pos = st.pad;
                 st.phase = StationPhase::Parked;
-                flag_ev.write(FlagEvent { flag: "docked".into() });
+                flag_ev.write(FlagEvent {
+                    flag: "docked".into(),
+                });
                 big_ev.write(BigMessageEvent {
                     title: "泊入完成".into(),
                     sub: "E 下船 · W 离站".into(),
@@ -577,7 +819,11 @@ pub fn station_system(
                 crate::audio::play(&mut commands, sfx.jump.clone(), 0.5, None);
             }
             if keys.just_pressed(KeyCode::KeyW) {
-                st.curve = vec![st.pad, st.pad + Vec3::Y * 7.0, st.station_pos + Vec3::from(DOCK_EXIT)];
+                st.curve = vec![
+                    st.pad,
+                    st.pad + Vec3::Y * 7.0,
+                    st.station_pos + Vec3::from(DOCK_EXIT),
+                ];
                 st.dur = 2.4;
                 st.t = 0.0;
                 st.phase = StationPhase::Leave;
@@ -622,7 +868,11 @@ fn disembark(st: &mut StationState, player: &mut Query<&mut Player>) {
     let sx = st.station_pos.x + 8.0;
     let sz = st.station_pos.z + 24.0;
     let fy = st.station_pos.y + floor_at(8.0, 24.0) + 0.1;
-    st.walk = Some(WalkState { pos: Vec3::new(sx, fy, sz), board_cd: 0.6, vy: 0.0 });
+    st.walk = Some(WalkState {
+        pos: Vec3::new(sx, fy, sz),
+        board_cd: 0.6,
+        vy: 0.0,
+    });
     if let Ok(mut p) = player.single_mut() {
         let term = st.station_pos + Vec3::from(DOCK_TERMINAL);
         p.yaw = (-(term.x - sx)).atan2(-(term.z - sz));
@@ -641,11 +891,7 @@ fn floor_at(lx: f32, lz: f32) -> f32 {
             return p[1] + 2.0;
         }
     }
-    if lz <= 6.0 {
-        3.0
-    } else {
-        0.0
-    }
+    if lz <= 6.0 { 3.0 } else { 0.0 }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -662,7 +908,9 @@ fn walk_tick(
     commands: &mut Commands,
     sfx: &crate::audio::Sfx,
 ) {
-    let Ok(mut p) = player.single_mut() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     let o = st.station_pos;
     let Some(w) = st.walk.as_mut() else { return };
     w.board_cd -= dt;
@@ -690,7 +938,11 @@ fn walk_tick(
     if keys.pressed(KeyCode::KeyA) {
         wish -= r;
     }
-    let sp = if keys.pressed(KeyCode::ShiftLeft) { 7.0 } else { 4.4 };
+    let sp = if keys.pressed(KeyCode::ShiftLeft) {
+        7.0
+    } else {
+        4.4
+    };
     if wish.length_squared() > 0.0 {
         wish = wish.normalize();
     }
@@ -834,7 +1086,9 @@ fn walk_tick(
             crate::audio::play(commands, sfx.click.clone(), 0.5, None);
         }
         StationNear::Pilot(i) => {
-            let Some(offer) = st.offers.get(i).cloned() else { return };
+            let Some(offer) = st.offers.get(i).cloned() else {
+                return;
+            };
             let cls = data::ship_class_by_key(&offer.cls);
             let model_name = data::SHIP_MODEL_NAMES
                 .iter()
@@ -845,7 +1099,10 @@ fn walk_tick(
                 name: offer.pilot_name.clone(),
                 lines: vec![
                     format!("看什么？哦——我这艘「{model_name}」啊。"),
-                    format!("等级 {} 级 · 武装「{}」 · 货仓 {} 格。", cls.key, cls.weapon_name, cls.slots),
+                    format!(
+                        "等级 {} 级 · 武装「{}」 · 货仓 {} 格。",
+                        cls.key, cls.weapon_name, cls.slots
+                    ),
                     format!("出价 ₪{}，一口价。想要的话，再按一次 E 成交。", offer.price),
                 ],
                 idx: 0,
@@ -882,10 +1139,10 @@ pub fn station_dialog_system(time: Res<Time>, mut st: ResMut<StationState>) {
         let dt = time.delta_secs();
         // JS 打字机 26 字符/秒
         d.chars += (dt * 26.0) as usize;
-        if let Some(cur) = d.lines.get(d.idx) {
-            if d.chars > cur.chars().count() + 8 {
-                d.chars = cur.chars().count();
-            }
+        if let Some(cur) = d.lines.get(d.idx)
+            && d.chars > cur.chars().count() + 8
+        {
+            d.chars = cur.chars().count();
         }
     }
 }

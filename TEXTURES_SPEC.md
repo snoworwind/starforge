@@ -1,5 +1,7 @@
 # STARFORGE — Procedural Texture & Rendering Specification (Rust port reference)
 
+> Repository note (2026-08-17): all legacy paths named below now live under `legacy-web/`.
+
 Target crates: `image` (RGBA8 pixel buffer) + `bevy_render` / `wgpu` (samplers, textures, mipmaps).
 This document is exhaustive for `js/textures.js` and the cross-file pieces it depends on. Every color
 is given as an exact hex value; every algorithm as pseudocode. Where the JS reads a color as an

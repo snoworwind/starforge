@@ -17,7 +17,7 @@ impl Rng {
         let mut t = self.0;
         t = (t ^ (t >> 15)).wrapping_mul(t | 1);
         t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
-        ((t ^ (t >> 14)) as u32 as f32) / 4294967296.0
+        ((t ^ (t >> 14)) as f32) / 4294967296.0
     }
 
     /// Integer in [0, n).
@@ -199,9 +199,15 @@ mod tests {
     #[test]
     fn mulberry32_matches_js() {
         let mut r = Rng::new(12345);
-        // Golden values from the original JS (tools/golden.mjs)
+        // Golden values captured from the archived JS generator
+        // (`../legacy-web/tools/golden.mjs`).
         let expected = [
-            0.97972827, 0.30675226, 0.48420542, 0.81793441, 0.50942837, 0.34747186,
+            0.979_728_3,
+            0.30675226,
+            0.48420542,
+            0.817_934_4,
+            0.509_428_4,
+            0.34747186,
         ];
         for e in expected {
             let v = r.next();
@@ -234,9 +240,12 @@ mod tests {
             lattice3(3, 4, 5, 0xCAFE01, 7777),
             lattice3(-10, 2, 33, 0xCAFE01, 7777),
         ];
-        let expected = [0.39047589, 0.04641483];
+        let expected = [0.390_475_9, 0.04641483];
         for (got, exp) in v.iter().zip(expected.iter()) {
-            assert!((got - exp).abs() < 1e-6, "lattice3 mismatch: got {got}, expected {exp}");
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "lattice3 mismatch: got {got}, expected {exp}"
+            );
         }
     }
 }

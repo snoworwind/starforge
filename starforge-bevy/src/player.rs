@@ -484,6 +484,7 @@ pub fn camera_system(
         tf.rotation = yaw * pitch;
         *proj = Projection::Perspective(PerspectiveProjection {
             fov: 75f32.to_radians(),
+            far: crate::space::CAM_FAR,
             ..default()
         });
     }

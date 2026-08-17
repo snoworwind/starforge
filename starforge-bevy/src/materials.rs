@@ -49,6 +49,8 @@ pub type TerrainMat = ExtendedMaterial<StandardMaterial, TerrainExtension>;
 pub struct TerrainMaterials {
     pub solid: Handle<TerrainMat>,
     pub water: Handle<TerrainMat>,
+    /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）
+    pub far: Handle<TerrainMat>,
     pub atlas_image: Handle<Image>,
 }
 
@@ -123,9 +125,30 @@ impl TerrainMaterials {
                 },
             },
         });
+        let far = materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                double_sided: true,
+                cull_mode: None,
+                // 半透明：顶点 alpha 承载“远景挖空环”（玩家周围由真实区块覆盖，视距边缘淡出）
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            },
+            extension: TerrainExtension {
+                curve: CurveUniform {
+                    amt: 0.0,
+                    grow: 1.0,
+                    fade: 1.0,
+                    edge_r: 9999.0,
+                    wave_on: 0.0,
+                    ..default()
+                },
+            },
+        });
         Self {
             solid,
             water,
+            far,
             atlas_image,
         }
     }
@@ -143,7 +166,7 @@ pub fn curve_system(
     *wave_t += time.delta_secs();
     let cam_y = p.eye().y;
     let amt = ((cam_y - 62.0) / (150.0 - 62.0)).clamp(0.0, 1.0);
-    for handle in [&mats.solid, &mats.water] {
+    for handle in [&mats.solid, &mats.water, &mats.far] {
         if let Some(mut m) = materials.get_mut(handle) {
             let c = &mut m.extension.curve;
             c.center = Vec2::new(p.pos.x, p.pos.z);

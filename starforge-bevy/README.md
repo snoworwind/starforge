@@ -16,6 +16,19 @@ cargo run --release
 cargo run -- --smoke   # 冒烟自测：自动建世界 → 地面游玩 → 进入太空 → SMOKE_OK 退出
 ```
 
+发布后的可执行文件必须与资源目录放在同一目录层级：
+
+```text
+starforge-bevy.exe
+assets/
+  models/
+  shaders/
+```
+
+程序会固定从 `starforge-bevy.exe` 所在目录的 `assets/` 读取模型、纹理、动画和着色器，
+不依赖启动时的当前工作目录。外部飞船/空间站模型也必须放在该目录下的
+`assets/models/external/`；模型下载和目录映射见本文档的“外部模型下载”及 `CREDITS.md`。
+
 首次构建需编译全部依赖（约 10~30 分钟，取决于机器）。需要 Rust ≥ 1.85（stable 即可）。
 
 ## 操作

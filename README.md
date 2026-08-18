@@ -14,6 +14,9 @@ cargo run -- --smoke
 
 功能、操作、素材许可和测试说明见 [`starforge-bevy/README.md`](starforge-bevy/README.md)。
 
+发布时请将 `assets/` 放在可执行文件旁边；Bevy 版会固定从可执行文件所在目录读取
+模型、纹理、动画和着色器，不依赖启动时的当前工作目录。
+
 > 注意：外部飞船和空间站模型体积较大，不包含在 Git 仓库中。首次运行前请按
 > [`starforge-bevy/CREDITS.md`](starforge-bevy/CREDITS.md) 中的来源链接下载，并按
 > [`assets/licenses/models-directory-audit.md`](starforge-bevy/assets/licenses/models-directory-audit.md)

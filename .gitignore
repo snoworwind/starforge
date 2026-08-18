@@ -11,6 +11,9 @@ save/
 starforge-bevy/target/
 starforge-bevy/saves/
 
+# 本地下载的模型素材包（体积较大，不纳入仓库）
+models/
+
 # 系统 / 编辑器文件
 .DS_Store
 Thumbs.db

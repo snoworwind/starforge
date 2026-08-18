@@ -1177,6 +1177,26 @@ impl World {
         0
     }
 
+    /// Ground that a walking creature is allowed to stand on.
+    ///
+    /// `top_at` intentionally includes liquids and decorative tree blocks for
+    /// player/raycast compatibility.  AI must use a stricter query: otherwise
+    /// a creature can treat a lake, trunk, or canopy as a perfectly valid floor
+    /// and teleport straight up to its top.
+    pub fn creature_ground_at(&self, x: i32, z: i32) -> Option<i32> {
+        let cx = x.div_euclid(CHUNK);
+        let cz = z.div_euclid(CHUNK);
+        if !self.chunks.contains_key(&ckey(cx, cz)) {
+            return None;
+        }
+        let y = self.top_at(x, z);
+        let def = data::block_by_id(self.get(x, y, z));
+        if !def.solid || def.liquid || def.cross || matches!(def.key, "log" | "leaves") {
+            return None;
+        }
+        Some(y)
+    }
+
     /// Find a spawn position（JS findSpawn 移植：种子派生、400 次随机逐步扩大搜索、网格兜底）。
     /// 锚定在传入列附近以保证区块已生成（JS 为绝对坐标，此处取相对偏移保持流式中心一致）。
     pub fn find_spawn(&self, x: i32, z: i32) -> Vec3 {
@@ -1858,6 +1878,27 @@ mod tests {
         let g = WorldGen::new(4242, biome);
         let d = g.gen_chunk_data(0, 0);
         assert!(d.contains(&ids::WATER));
+    }
+
+    #[test]
+    fn creature_ground_rejects_water_and_tree_blocks() {
+        let mut w = World::new(4242, "lush", 4);
+        w.ensure_chunk(0, 0);
+        let x = 4;
+        let z = 4;
+        let y = w.top_at(x, z);
+        assert!(w.creature_ground_at(x, z).is_some());
+
+        w.set(x, y + 1, z, ids::WATER);
+        assert!(w.creature_ground_at(x, z).is_none());
+        w.set(x, y + 1, z, ids::AIR);
+
+        w.set(x, y + 1, z, ids::LOG);
+        assert!(w.creature_ground_at(x, z).is_none());
+        w.set(x, y + 1, z, ids::AIR);
+
+        w.set(x, y + 1, z, ids::LEAVES);
+        assert!(w.creature_ground_at(x, z).is_none());
     }
 
     #[test]

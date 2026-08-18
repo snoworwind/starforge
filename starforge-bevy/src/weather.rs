@@ -11,7 +11,7 @@ use crate::world::World;
 #[derive(Component)]
 pub struct GroundCloud {
     base: Vec3,
-    speed: f32,
+    wind: Vec2,
 }
 
 #[derive(Component)]
@@ -113,40 +113,65 @@ pub fn climate_system(
         runtime.elapsed = 0.0;
 
         if settings.clouds {
-            let mesh = meshes.add(Sphere::new(1.0).mesh().ico(3).expect("cloud mesh"));
-            let material = materials.add(StandardMaterial {
-                base_color: Color::srgba(1.0, 1.0, 1.0, 0.38),
-                alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 1.0,
-                cull_mode: None,
-                ..default()
-            });
+            // A single opaque-looking icosphere per cloud reads as floating
+            // bubbles.  Use smooth, translucent lobes with three density
+            // layers so each cloud has a soft core, a shaded middle, and a
+            // broken wispy edge.
+            let mesh = meshes.add(Sphere::new(1.0));
+            let cloud_materials = [
+                materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.92, 0.96, 1.0, 0.16),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 1.0,
+                    cull_mode: None,
+                    ..default()
+                }),
+                materials.add(StandardMaterial {
+                    base_color: Color::srgba(1.0, 1.0, 1.0, 0.24),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 1.0,
+                    cull_mode: None,
+                    ..default()
+                }),
+                materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.72, 0.82, 0.94, 0.11),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 1.0,
+                    cull_mode: None,
+                    ..default()
+                }),
+            ];
             let mut rng = crate::rng::Rng::new(world.seed ^ 0xC10D5);
-            for _ in 0..70 {
+            for _ in 0..48 {
                 let center = Vec3::new(
                     (rng.next() - 0.5) * 1100.0,
-                    124.0 + rng.next() * 30.0,
+                    126.0 + rng.next() * 34.0,
                     (rng.next() - 0.5) * 1100.0,
                 );
-                let parts = 2 + (rng.next() * 3.0) as usize;
-                let speed = 1.5 + rng.next() * 2.5;
-                for _ in 0..parts {
+                let parts = 5 + (rng.next() * 6.0) as usize;
+                let wind = Vec2::new(1.5 + rng.next() * 2.5, (rng.next() - 0.5) * 0.45);
+                for part in 0..parts {
+                    let edge = part == 0 || part + 1 == parts;
                     let base = center
                         + Vec3::new(
-                            (rng.next() - 0.5) * 26.0,
-                            (rng.next() - 0.5) * 4.0,
-                            (rng.next() - 0.5) * 26.0,
+                            (rng.next() - 0.5) * 34.0,
+                            (rng.next() - 0.5) * 8.0,
+                            (rng.next() - 0.5) * 34.0,
                         );
                     let scale = Vec3::new(
-                        14.0 + rng.next() * 22.0,
-                        3.5 + rng.next() * 4.5,
-                        14.0 + rng.next() * 22.0,
+                        10.0 + rng.next() * 20.0,
+                        if edge {
+                            2.4 + rng.next() * 3.0
+                        } else {
+                            4.5 + rng.next() * 6.5
+                        },
+                        10.0 + rng.next() * 20.0,
                     );
                     commands.spawn((
                         Mesh3d(mesh.clone()),
-                        MeshMaterial3d(material.clone()),
+                        MeshMaterial3d(cloud_materials[part % cloud_materials.len()].clone()),
                         Transform::from_translation(base).with_scale(scale),
-                        GroundCloud { base, speed },
+                        GroundCloud { base, wind },
                         crate::InGame,
                     ));
                 }
@@ -194,10 +219,13 @@ pub fn climate_system(
         };
         if show_clouds {
             let x = player.pos.x
-                + (cloud.base.x + runtime.elapsed * cloud.speed - player.pos.x + half)
+                + (cloud.base.x + runtime.elapsed * cloud.wind.x - player.pos.x + half)
                     .rem_euclid(1100.0)
                 - half;
-            let z = player.pos.z + (cloud.base.z - player.pos.z + half).rem_euclid(1100.0) - half;
+            let z = player.pos.z
+                + (cloud.base.z + runtime.elapsed * cloud.wind.y - player.pos.z + half)
+                    .rem_euclid(1100.0)
+                - half;
             transform.translation = Vec3::new(x, cloud.base.y, z);
         }
     }
@@ -254,20 +282,20 @@ fn cloud_texture(images: &mut Assets<Image>, key: &str, seed: u32) -> Handle<Ima
     for y in 0..height {
         for x in 0..width {
             let seam = x as f32 / width as f32;
-            let a = noise.fbm2(x as f32 * 0.05, y as f32 * 0.08, 4, 2.0, 0.5) * 0.5 + 0.5;
-            let b = noise.fbm2(
-                (x as f32 - width as f32) * 0.05,
-                y as f32 * 0.08,
-                4,
-                2.0,
-                0.5,
-            ) * 0.5
-                + 0.5;
+            let sample = |x: f32, y: f32| {
+                let warp_x = noise.fbm2(x * 0.018 + 19.0, y * 0.024 - 7.0, 3, 2.0, 0.5) * 8.0;
+                let warp_y = noise.fbm2(x * 0.021 - 11.0, y * 0.017 + 5.0, 3, 2.0, 0.5) * 6.0;
+                noise.fbm2((x + warp_x) * 0.042, (y + warp_y) * 0.068, 5, 2.0, 0.5) * 0.5 + 0.5
+            };
+            let a = sample(x as f32, y as f32);
+            let b = sample(x as f32 - width as f32, y as f32);
             let mut value = a * (1.0 - seam) + b * seam;
+            let v = y as f32 / height as f32;
+            value *= 0.88 + (1.0 - (v * 2.0 - 1.0).abs()) * 0.12;
             if stormy {
                 value += (seam * std::f32::consts::TAU * 3.0).sin() * 0.16;
             }
-            let opacity = ((value - threshold) / 0.24).clamp(0.0, 1.0);
+            let opacity = ((value - threshold) / 0.30).clamp(0.0, 1.0);
             let opacity = opacity * opacity * (3.0 - 2.0 * opacity);
             let offset = (y * width + x) * 4;
             bytes[offset..offset + 3].fill(255);
@@ -329,7 +357,7 @@ pub fn space_cloud_system(
         });
         let entity = commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(planet.def.radius * 1.32))),
+                Mesh3d(meshes.add(Sphere::new(planet.def.radius * 1.035))),
                 MeshMaterial3d(material),
                 Transform::from_rotation(Quat::from_rotation_y(planet.def.id as f32 * 1.7)),
                 SpaceCloud {

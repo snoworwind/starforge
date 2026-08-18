@@ -6,7 +6,7 @@ description = "STARFORGE 星穹熔炉 — 体素星际工厂 Bevy 移植版"
 license = "MIT"
 
 [dependencies]
-bevy = { version = "0.19.1", features = ["wav"] }
+bevy = { version = "0.19.1", features = ["wav", "jpeg"] }
 bevy_egui = "0.41"
 bevy_world_serialization = "0.19"
 serde = { version = "1", features = ["derive"] }

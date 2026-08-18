@@ -277,6 +277,7 @@ fn main() {
         .insert_resource(space::WarpVisuals::default())
         .insert_resource(space::VisitorRespawn::default())
         .insert_resource(space::VisitorTraffic::default())
+        .init_resource::<space::ExternalAnimationLibrary>()
         .insert_resource(weather::ClimateRuntime::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())

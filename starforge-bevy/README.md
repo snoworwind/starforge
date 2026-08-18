@@ -2,7 +2,12 @@
 
 原项目的浏览器 Three.js 版本已归档到 `../legacy-web/`。本目录是当前主线的 **Bevy 0.19（Rust）移植版**：
 原生 Windows 可执行文件，保留原作的球面体素星球、采矿建造、背包合成、科技树、生存系统、像素美术，
-并已移植**太空飞船、空间站、星系跃迁、任务线、完整工厂电力网、太空战斗与外部 CC0 素材库**。
+并已移植**太空飞船、空间站、星系跃迁、任务线、完整工厂电力网、太空战斗与外部 CC0/CC-BY 素材库**。
+
+> 注意：外部飞船和空间站模型总计约 557 MB，因体积过大不包含在 Git 仓库中。
+> 请从本文档下方 `外部模型下载` 中的对应来源页面下载，并按
+> `assets/licenses/models-directory-audit.md` 的目录结构解压到
+> `assets/models/external/`，否则运行时会找不到 glTF、纹理和动画资源。
 
 ## 运行
 
@@ -71,7 +76,7 @@ cargo run -- --smoke   # 冒烟自测：自动建世界 → 地面游玩 → 进
 - **采矿与建造**：硬度→挖掘时间、掉率难度倍率、掉落物磁吸与同类合并（上限 90）、拆机内容退款、上方植物连带掉落、方块与机器放置、「需要采矿激光」提示；
 - **完整工厂电力网**：太阳能（10kW·白天）/ 风力（2~16kW·海拔）/ 火力（25kW·烧碳煤）/ 核子反应堆（100kW·铀）发电，装配机（12kW）/ 精炼厂（20kW）/ 采矿机（8kW）/ 医疗站（6kW）用电，电网满足率计算与 HUD ⚡ 显示；**传送带物流**（物品沿带运输、转弯、送入机器、输入面回流防护）、自动采矿机（矿脉耗尽改岩石）、装配机/精炼厂（配方选择，便携配方可入装配机）、医疗站（自动治疗）、**伐木机器人（完整状态机：扫描→伐木→送货）**、收集点、标记方块（重命名/全星系显示）、发射平台（免燃料起飞）；
 - **背包/合成/科技**：36 格背包（JS 同款交互：左键取放合并交换/右键拆半放一/Shift 快速移动/垃圾桶/整理/物品提示）、37 配方（Shift 批量合成、产出难度倍率、溢出掉落）、13 节点科技树（研究计时 + 完成播报）、研究数据产出、研究进度持久化；
-- **太空飞船**：CC0 GLB 飞船模型（等级差异化 C/B/A/S）、登船/下船、燃料加注、大气层飞行（经纬环绕、地形碰撞细分步进防高速穿墙、转向侧倾压弯、再入俯冲保护、冲出大气交棒）、太空飞行（姿态/滚转/脉冲引擎/氚消耗）、恒星高温危险、**小行星群（GLB 陨石，可击碎掉落氚/金）**；
+- **太空飞船**：CC-BY-4.0 外部 glTF 飞船模型（等级差异化 C/B/A/S，含材质、纹理和动画）、登船/下船、燃料加注、大气层飞行（经纬环绕、地形碰撞细分步进防高速穿墙、转向侧倾压弯、再入俯冲保护、冲出大气交棒）、太空飞行（姿态/滚转/脉冲引擎/氚消耗）、恒星高温危险、**小行星群（GLB 陨石，可击碎掉落氚/金）**；
 - **太空战斗**：鼠标左键双发激光弹道、武器威力随等级（C1/B1/A2/S4）、高速线段碰撞、**访客船队巡航/进站/停靠/离站 + 可击毁（战利品直入货仓 + 信用点，35-65s 补员）**，站体遇袭会升起护盾并封闭泊入通道；
 - **无缝换系**：体素 ↔ 球面坐标精确互逆映射（有往返测试），大气层 ⇄ 太空零传送；**多星球**：同星系多星球再入，星球档案（建筑/机器/区块改动/地图标记）随离开归档、返回恢复；跨星系档案（`galaxyArchives`）；
 - **空间站**：自动泊入（Catmull-Rom 泊入曲线）、站内第一人称行走（机库/大厅/停机坪、站内喷气背包、固定优先级交互）、贸易终端（23 种商品买卖 + 市场漂移、蓝图购买：物流/光伏/精炼/核裂变）、换船电脑（机库 12~24 格货仓）、游商购船（C/B/A/S 随机等级）、站员对话；
@@ -87,10 +92,27 @@ cargo run -- --smoke   # 冒烟自测：自动建世界 → 地面游玩 → 进
 
 ## 外部素材（全部可免费商用）
 
+### 外部模型下载
+
+外部飞船和空间站模型因体积较大不随 Git 仓库分发。请从下表对应的来源页面下载模型压缩包，解压后保留 `scene.gltf`、`scene.bin`、`textures/` 和 `license.txt`，并放入 `assets/models/external/` 下对应目录。完整 URL、作者署名和目录映射见 `CREDITS.md` 与 `assets/licenses/models-directory-audit.md`。
+
+| 目录 | 来源 |
+|---|---|
+| `assets/models/external/ships/space_ship_b/` | [Space Ship B](https://sketchfab.com/3d-models/space-ship-356a3acb00164c698d657146caa5ebf3) |
+| `assets/models/external/ships/space_ship_c/` | [Space Ship C](https://sketchfab.com/3d-models/space-ship-63ce372c1aa843e98bf1548109e055d8) |
+| `assets/models/external/ships/space_ship_torb/` | [Space Ship “Torb”](https://sketchfab.com/3d-models/space-ship-torb-fb9cac9500d147528b6cdef8385cf926) |
+| `assets/models/external/ships/supermatic_sky_cruiser/` | [Supermatic Sky Cruiser](https://sketchfab.com/3d-models/supermatic-sky-cruiser-d8e0d3253dfa45479f7637d3cff32c4c) |
+| `assets/models/external/ships/unsa_destroyer/` | [UNSA Destroyer](https://sketchfab.com/3d-models/unsa-destroyer-spaceship-0fd8c6ecd9374392a1ed900e82d7417d) |
+| `assets/models/external/stations/space_station/` | [Space Station](https://sketchfab.com/3d-models/space-station-0da4a24e7edd49159737675ffcc06228) |
+| `assets/models/external/stations/space_station_3/` | [Space Station 3](https://sketchfab.com/3d-models/space-station-3-a7a6ad10261149cab31aa394bfcf8940) |
+| `assets/models/external/stations/space_station_4/` | [Space Station 4](https://sketchfab.com/3d-models/space-station-4-cf80075368174bf9895f4fd266cf17e3) |
+| `assets/models/external/stations/helveta/` | [HelVeta Space Battle Ship](https://sketchfab.com/3d-models/helveta-space-battle-ship-b743d59343834ec593aa6c2c02bf8473) |
+
 | 素材 | 来源 | 许可 |
 |---|---|---|
 | 音效（assets/audio/，32 条） | Kenney UI Audio / Sci-Fi Sounds | CC0 1.0 |
-| 飞船/宇航员/陨石模型 | Kenney Space Kit | CC0 1.0 |
+| 随仓库提供的飞船/宇航员/陨石模型 | Kenney Space Kit | CC0 1.0 |
+| 外部飞船/空间站模型 | Sketchfab（作者见 `CREDITS.md`） | CC-BY-4.0，必须署名 |
 | NPC 角色（冒险者 5 款） | KayKit Character Pack: Adventurers | CC0 |
 | 遗迹守卫（骷髅） | KayKit Character Pack: Skeletons | CC0 |
 | 生物模型（羊驼/鹿/狐/狼，带骨骼动画） | Quaternius Ultimate Animated Animal Pack | CC0 1.0 |
@@ -142,7 +164,7 @@ src/
 └── rng.rs          # mulberry32 / Perlin / 值噪声（含黄金值测试）
 assets/
 ├── audio/          # 32 条 Kenney CC0 音效
-├── models/         # CC0/CC-BY GLB 模型（ships/npc/creatures/asteroids）
+├── models/         # 仓库内模型；external/ 外部大模型需按上文下载
 ├── licenses/       # 第三方许可证原文
 ├── fonts/NotoSansSC.ttf
 └── shaders/terrain_{vertex,prepass_vertex,fragment}.wgsl

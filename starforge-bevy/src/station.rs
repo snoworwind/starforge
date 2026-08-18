@@ -1,7 +1,9 @@
 //! 空间站 — 泊入 / 站内行走 / 贸易 / 购船 / 离站。
 //! Port of js/station.js + js/space.js 站体与碰撞部分。
 
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy_world_serialization::prelude::WorldAssetRoot;
 
 use crate::data;
 use crate::player::Player;
@@ -823,6 +825,80 @@ pub fn spawn_station(
     root
 }
 
+/// 外部空间站模型。模型按星系种子轮换：家园使用基础站，后续星系
+/// 使用其余 CC-BY 模型；停靠路径和碰撞仍使用本文件中的逻辑尺寸。
+pub fn spawn_station_model(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
+    pos: Vec3,
+    galaxy_seed: u32,
+) -> Entity {
+    let (path, scale, rotation) = if galaxy_seed == data::HOME_GALAXY_SEED {
+        (
+            "models/external/stations/space_station/scene.gltf",
+            11.0,
+            Quat::IDENTITY,
+        )
+    } else {
+        match galaxy_seed % 3 {
+            0 => (
+                "models/external/stations/space_station_3/scene.gltf",
+                30.0,
+                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            ),
+            1 => (
+                "models/external/stations/space_station_4/scene.gltf",
+                5.0,
+                Quat::IDENTITY,
+            ),
+            _ => (
+                "models/external/stations/helveta/scene.gltf",
+                0.28,
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            ),
+        }
+    };
+    let root = commands
+        .spawn((
+            Transform::from_translation(pos),
+            Visibility::default(),
+            crate::InGame,
+        ))
+        .id();
+    let model = commands
+        .spawn((
+            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path))),
+            Transform::from_rotation(rotation).with_scale(Vec3::splat(scale)),
+            crate::InGame,
+        ))
+        .id();
+    crate::space::attach_external_animation(commands, model, path);
+    commands.entity(root).add_child(model);
+
+    // 交互系统使用独立的防护盾实体，不依赖外部模型的材质节点。
+    let shield = commands
+        .spawn((
+            Mesh3d(meshes.add(Sphere::new(213.0))),
+            MeshMaterial3d(mats.add(StandardMaterial {
+                base_color: Color::srgba(0.25, 0.65, 1.0, 0.0),
+                emissive: LinearRgba::new(0.1, 0.45, 1.0, 1.0),
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 20.0, -20.0),
+            Visibility::Hidden,
+            StationShield,
+            crate::InGame,
+        ))
+        .id();
+    commands.entity(root).add_child(shield);
+    root
+}
+
 /// Shield countdown and visual state. Gate lights switch to a flashing red
 /// warning while docking clearance is suspended.
 pub fn station_defense_system(
@@ -960,7 +1036,7 @@ pub fn ship_switch_system(
         for f in ship_asset.flames.drain(..) {
             commands.entity(f).despawn();
         }
-        let (ent, flames) = crate::space::spawn_ship(
+        let (ent, flames) = crate::space::spawn_external_ship(
             &mut commands,
             &mut meshes,
             &mut mats,
@@ -968,6 +1044,7 @@ pub fn ship_switch_system(
             pos,
             yaw,
             cls,
+            Some(&new_data.model),
         );
         ship_asset.entity = Some(ent);
         ship_asset.flames = flames;
@@ -1433,7 +1510,7 @@ pub fn station_npc_spawn_system(
         orig.entity = Some(human.root);
         let pad = station_pos + Vec3::from(VIS_PADS[i % VIS_PADS.len()]);
         let cls = data::ship_class_by_key(&pil.cls);
-        let (ship_e, flames) = crate::space::spawn_ship(
+        let (ship_e, flames) = crate::space::spawn_external_ship(
             &mut commands,
             &mut meshes,
             &mut mats,
@@ -1441,6 +1518,7 @@ pub fn station_npc_spawn_system(
             pad + Vec3::new(0.0, 2.0, 0.0),
             std::f32::consts::PI,
             cls,
+            Some(&pil.model),
         );
         orig.ship_entity = Some(ship_e);
         for f in flames {

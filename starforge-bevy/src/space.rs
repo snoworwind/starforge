@@ -232,8 +232,8 @@ pub struct ExternalAnimationLibrary {
     clips: HashMap<&'static str, (Handle<AnimationGraph>, AnimationNodeIndex)>,
 }
 
-/// Connect the single embedded animation clip carried by the external model
-/// to an AnimationGraph and loop it. This is shared by ships and stations.
+/// Connect the embedded animation clip carried by a known animated external
+/// model to an AnimationGraph and loop it. This is shared by ships and stations.
 fn external_model_animation_ready(
     ready: On<WorldInstanceReady>,
     mut commands: Commands,
@@ -275,6 +275,18 @@ pub(crate) fn attach_external_animation(
     entity: Entity,
     model: &'static str,
 ) {
+    // Most of the freely usable external models are static scenes and do not
+    // contain Animation0. Do not ask the glTF loader for a clip that cannot
+    // exist, otherwise Bevy logs an asset-load error at runtime.
+    if !matches!(
+        model,
+        "models/external/ships/supermatic_sky_cruiser/scene.gltf"
+            | "models/external/stations/space_station_3/scene.gltf"
+            | "models/external/stations/space_station_4/scene.gltf"
+    ) {
+        return;
+    }
+
     commands
         .entity(entity)
         .insert(ExternalAnimationSetup { model })
@@ -1652,43 +1664,38 @@ pub fn spawn_external_ship(
         Some("ship_dispatcher") => (
             "models/external/ships/space_ship_b/scene.gltf",
             1.0,
-            // B 模型的机头推测沿 -X，转到游戏本地 -Z。
-            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+            Quat::IDENTITY,
         ),
         Some("ship_insurgent") => (
             "models/external/ships/supermatic_sky_cruiser/scene.gltf",
             1.1,
-            // A 模型的长轴已是 Z，但推测机头朝 +Z，翻转 180°。
-            Quat::from_rotation_y(std::f32::consts::PI),
+            Quat::IDENTITY,
         ),
         Some("ship") => (
             "models/external/ships/space_ship_c/scene.gltf",
             0.45,
-            // C 模型的机头推测沿 +Y，转到游戏本地 -Z，再绕最长轴翻转 180°。
-            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-                * Quat::from_rotation_y(std::f32::consts::PI),
+            Quat::IDENTITY,
         ),
         _ => match cls.key {
             "S" => (
                 "models/external/ships/unsa_destroyer/scene.gltf",
                 0.00028,
-                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                Quat::IDENTITY,
             ),
             "A" => (
                 "models/external/ships/supermatic_sky_cruiser/scene.gltf",
                 1.1,
-                Quat::from_rotation_y(std::f32::consts::PI),
+                Quat::IDENTITY,
             ),
             "B" => (
                 "models/external/ships/space_ship_b/scene.gltf",
                 1.0,
-                Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+                Quat::IDENTITY,
             ),
             _ => (
                 "models/external/ships/space_ship_c/scene.gltf",
                 0.45,
-                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-                    * Quat::from_rotation_y(std::f32::consts::PI),
+                Quat::IDENTITY,
             ),
         },
     };

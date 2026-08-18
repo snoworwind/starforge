@@ -67,6 +67,10 @@ pub struct StationShield;
 #[derive(Component)]
 pub struct StationGateLight;
 
+/// Visual-only modular station parts. Collision remains in `station_cols()`.
+#[derive(Component)]
+pub struct StationModule;
+
 // ---------- 站体碰撞（STATION_COLS） ----------
 
 struct ColBox {
@@ -459,6 +463,230 @@ pub fn spawn_station(
         ))
         .id();
     commands.entity(root).add_child(ring);
+    // 视觉层：把原本的“大圆柱 + 大圆环”拆成分段工业结构。
+    // 这些实体只负责渲染，碰撞仍由 station_cols() 独立维护，方便后续继续迭代模型。
+    let spine_dark = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.12, 0.16, 0.2),
+        perceptual_roughness: 0.62,
+        metallic: 0.78,
+        cull_mode: None,
+        ..default()
+    });
+    let panel_blue = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.28, 0.36),
+        perceptual_roughness: 0.48,
+        metallic: 0.72,
+        cull_mode: None,
+        ..default()
+    });
+    let panel_orange = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.46, 0.23, 0.1),
+        perceptual_roughness: 0.5,
+        metallic: 0.62,
+        cull_mode: None,
+        ..default()
+    });
+    let station_light = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.9, 0.92),
+        emissive: LinearRgba::new(0.08, 0.72, 0.78, 1.0) * 3.0,
+        unlit: true,
+        ..default()
+    });
+    let warning_light = mats.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.44, 0.12),
+        emissive: LinearRgba::new(0.95, 0.18, 0.03, 1.0) * 2.5,
+        unlit: true,
+        ..default()
+    });
+
+    // 主轴分段和外露维护环，避免主塔成为一根没有层级的光滑柱体。
+    for y in [-43.0f32, -18.0, 7.0, 32.0, 57.0] {
+        b(
+            commands,
+            meshes,
+            root,
+            56.0,
+            2.2,
+            9.0,
+            &spine_dark,
+            0.0,
+            y,
+            -72.0,
+        );
+        b(
+            commands,
+            meshes,
+            root,
+            38.0,
+            0.65,
+            3.0,
+            &station_light,
+            0.0,
+            y + 1.45,
+            -72.0,
+        );
+    }
+    // 环形居住舱与桁架支撑：用重复模块制造远近都可辨认的轮廓。
+    for i in 0..8 {
+        let a = i as f32 * std::f32::consts::TAU / 8.0;
+        let x = a.cos() * 63.0;
+        let y = -20.0 + a.sin() * 63.0;
+        let pod = b(
+            commands,
+            meshes,
+            root,
+            18.0,
+            5.0,
+            10.0,
+            if i % 2 == 0 {
+                &panel_blue
+            } else {
+                &panel_orange
+            },
+            x,
+            y,
+            -72.0,
+        );
+        commands.entity(pod).insert(StationModule);
+        let lamp = b(
+            commands,
+            meshes,
+            root,
+            8.0,
+            0.35,
+            0.45,
+            &station_light,
+            x,
+            y + 3.0,
+            -72.0,
+        );
+        commands.entity(lamp).insert(StationModule);
+    }
+    // 四条停泊臂与外侧端舱。
+    for (x, z, rot) in [
+        (-58.0f32, -72.0f32, 0.0f32),
+        (58.0, -72.0, 0.0),
+        (0.0, -130.0, std::f32::consts::FRAC_PI_2),
+        (0.0, -14.0, std::f32::consts::FRAC_PI_2),
+    ] {
+        let arm = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(12.0, 5.0, 46.0))),
+                MeshMaterial3d(spine_dark.clone()),
+                Transform::from_xyz(x, -20.0, z).with_rotation(Quat::from_rotation_y(rot)),
+                crate::InGame,
+            ))
+            .id();
+        commands.entity(root).add_child(arm);
+        let arm_light = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(2.0, 0.35, 38.0))),
+                MeshMaterial3d(station_light.clone()),
+                Transform::from_xyz(x, -16.8, z).with_rotation(Quat::from_rotation_y(rot)),
+                crate::InGame,
+            ))
+            .id();
+        commands.entity(root).add_child(arm_light);
+    }
+    // 机库门框和跑道灯：强化当前可交互区域的视觉指向。
+    for x in [-18.0f32, 18.0] {
+        b(
+            commands,
+            meshes,
+            root,
+            3.0,
+            24.0,
+            3.0,
+            &spine_dark,
+            x,
+            13.0,
+            79.0,
+        );
+        b(
+            commands,
+            meshes,
+            root,
+            3.8,
+            0.8,
+            3.0,
+            &station_light,
+            x,
+            26.0,
+            79.0,
+        );
+        for z in [12.0f32, 24.0, 36.0, 48.0, 60.0] {
+            b(
+                commands,
+                meshes,
+                root,
+                1.0,
+                0.28,
+                3.0,
+                &station_light,
+                x,
+                2.2,
+                z,
+            );
+        }
+    }
+    // 维护天线和顶部警示灯，让站体在远处不再只是一个灰色几何体。
+    b(
+        commands,
+        meshes,
+        root,
+        2.5,
+        36.0,
+        2.5,
+        &spine_dark,
+        0.0,
+        76.0,
+        -72.0,
+    );
+    b(
+        commands,
+        meshes,
+        root,
+        12.0,
+        1.2,
+        2.0,
+        &panel_blue,
+        0.0,
+        92.0,
+        -72.0,
+    );
+    b(
+        commands,
+        meshes,
+        root,
+        2.2,
+        2.2,
+        2.2,
+        &warning_light,
+        0.0,
+        96.0,
+        -72.0,
+    );
+    // 低成本局部灯光：只照亮机库入口和中央轴，不给每个模块创建灯。
+    for (translation, color) in [
+        (Vec3::new(0.0, 18.0, 72.0), Color::srgb(0.15, 0.75, 0.9)),
+        (Vec3::new(-24.0, 5.0, 34.0), Color::srgb(0.1, 0.55, 0.9)),
+        (Vec3::new(24.0, 5.0, 34.0), Color::srgb(0.95, 0.42, 0.16)),
+    ] {
+        let light = commands
+            .spawn((
+                PointLight {
+                    color,
+                    intensity: 850.0,
+                    range: 32.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(translation),
+                crate::InGame,
+            ))
+            .id();
+        commands.entity(root).add_child(light);
+    }
     // 机库
     b(
         commands, meshes, root, 80.0, 4.0, 102.0, &dark, 0.0, -2.0, 31.0,

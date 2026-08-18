@@ -93,7 +93,7 @@ cargo run -- --smoke   # 冒烟自测：自动建世界 → 地面游玩 → 进
 | 飞船/宇航员/陨石模型 | Kenney Space Kit | CC0 1.0 |
 | NPC 角色（冒险者 5 款） | KayKit Character Pack: Adventurers | CC0 |
 | 遗迹守卫（骷髅） | KayKit Character Pack: Skeletons | CC0 |
-| 生物模型（蟹/史莱姆/鹿） | Poly Pizza | CC-BY 3.0（署名见 CREDITS.md） |
+| 生物模型（羊驼/鹿/狐/狼，带骨骼动画） | Quaternius Ultimate Animated Animal Pack | CC0 1.0 |
 
 完整登记与署名要求见 **`CREDITS.md`**，许可证原文在 `assets/licenses/`。
 

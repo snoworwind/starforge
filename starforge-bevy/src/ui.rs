@@ -322,6 +322,21 @@ pub fn hud_system(
                 [c + egui::vec2(0.0, 2.0), c + egui::vec2(0.0, 7.0)],
                 egui::Stroke::new(2.0, col),
             );
+            if let Some(mining) = &p.mining {
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(c, egui::vec2(34.0, 34.0)),
+                    egui::CornerRadius::same(3),
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+                    egui::StrokeKind::Outside,
+                );
+                painter.text(
+                    c + egui::vec2(0.0, 23.0),
+                    egui::Align2::CENTER_TOP,
+                    format!("采矿 {:.0}%", mining.prog.clamp(0.0, 1.0) * 100.0),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(0xff, 0xd1, 0x66),
+                );
+            }
         });
 
     // hotbar
@@ -492,6 +507,30 @@ pub fn hud_system(
                     .size(13.0),
                 );
             }
+            if *mode == crate::space::FlightMode::Planet
+                && let Some(g) = game.as_ref()
+                && g.ship_pos != Vec3::ZERO
+            {
+                let delta = g.ship_pos - p.pos;
+                let distance = delta.length();
+                let dir = delta.normalize_or_zero();
+                let ahead = p.forward().dot(dir);
+                let side = p.forward().cross(dir).y;
+                let arrow = if distance < 8.0 {
+                    "▣ 已抵达飞船"
+                } else if ahead > 0.72 {
+                    "▲ 飞船在前方"
+                } else if side > 0.0 {
+                    "◀ 向左转向飞船"
+                } else {
+                    "▶ 向右转向飞船"
+                };
+                ui.label(
+                    egui::RichText::new(format!("{} · {:.0}m", arrow, distance))
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
+                );
+            }
             let hh = (day.0 * 24.0) as i32;
             let mm = ((day.0 * 24.0 * 60.0) as i32) % 60;
             ui.label(egui::RichText::new(format!("⏰ {:02}:{:02}", hh, mm)).size(13.0));
@@ -656,6 +695,35 @@ pub fn hud_system(
                                 .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
                         );
                     }
+                });
+            let target_dir = crate::space::galaxy_dir(lock.seed);
+            let forward = crate::space::ship_forward(s.yaw, s.pitch);
+            let align = forward.dot(target_dir);
+            let side = forward.cross(target_dir).y;
+            let guide = if align > 0.96 {
+                "▲ 目标在准星前方"
+            } else if side > 0.0 {
+                "◀ 向左转向目标"
+            } else {
+                "▶ 向右转向目标"
+            };
+            egui::Area::new(egui::Id::new("warp_guidance"))
+                .fixed_pos(egui::pos2(screen.center().x - 95.0, 104.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} · 对准度 {:.0}%",
+                            guide,
+                            align.max(0.0) * 100.0
+                        ))
+                        .size(13.0)
+                        .color(if align > 0.96 {
+                            egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
+                        } else {
+                            egui::Color32::from_rgb(0xff, 0xd1, 0x66)
+                        }),
+                    );
                 });
         }
         // 操作提示

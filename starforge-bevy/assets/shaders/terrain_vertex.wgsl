@@ -13,6 +13,7 @@ struct CurveUniform {
     grow: f32,
     wave_time: f32,
     wave_on: f32,
+    water_on: f32,
     fade: f32,
     edge_r: f32,
     pad: f32,

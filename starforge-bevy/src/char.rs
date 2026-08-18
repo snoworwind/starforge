@@ -47,6 +47,13 @@ pub struct HumanoidParts {
     pub leg_r: Entity,
 }
 
+#[derive(Component)]
+pub struct NpcIdle {
+    pub phase: f32,
+    pub base_y: f32,
+    pub base_rotation: Quat,
+}
+
 /// 生成 NPC 人形（GLB 角色模型，按模型实测尺寸缩放 + 脚底对齐）。
 pub fn spawn_humanoid(
     commands: &mut Commands,
@@ -67,6 +74,11 @@ pub fn spawn_humanoid(
                 .with_rotation(Quat::from_rotation_y(yaw))
                 .with_scale(Vec3::splat(scale)),
             Visibility::default(),
+            NpcIdle {
+                phase: pos.x * 0.17 + pos.z * 0.11,
+                base_y: pos.y + y_off,
+                base_rotation: Quat::from_rotation_y(yaw),
+            },
             crate::InGame,
         ))
         .id();
@@ -78,6 +90,17 @@ pub fn spawn_humanoid(
         arm_r: root,
         leg_l: root,
         leg_r: root,
+    }
+}
+
+/// Small breathing/weight-shift loop for all GLB NPC roots. It remains useful
+/// even for assets whose embedded animation clips are not exposed by Bevy.
+pub fn npc_idle_system(time: Res<Time>, mut q: Query<(&mut NpcIdle, &mut Transform)>) {
+    for (mut idle, mut transform) in &mut q {
+        idle.phase += time.delta_secs();
+        let wave = idle.phase * 1.7;
+        transform.translation.y = idle.base_y + wave.sin() * 0.025;
+        transform.rotation = idle.base_rotation * Quat::from_rotation_y(wave.cos() * 0.012);
     }
 }
 

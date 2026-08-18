@@ -12,6 +12,7 @@ struct CurveUniform {
     grow: f32,
     wave_time: f32,
     wave_on: f32,
+    water_on: f32,
     fade: f32,
     edge_r: f32,
     pad: f32,
@@ -75,6 +76,15 @@ fn fragment(
     let scan_add = vec3<f32>(0.13, 0.86, 0.9) * (exp(-sd * sd * 0.018) + grid * trail * 0.5) * curve.scan_a;
     let pre_scan = out.color;
     out.color = vec4<f32>(pre_scan.rgb + scan_add, pre_scan.a);
+
+    // Animated sky/light sheen for water. This stays stable across streamed
+    // voxel chunks while preventing the surface from reading as flat glass.
+    if curve.water_on > 0.5 {
+        let ripple_a = 0.5 + 0.5 * sin(in.world_position.x * 0.17 + curve.wave_time * 1.8);
+        let ripple_b = 0.5 + 0.5 * cos(in.world_position.z * 0.13 - curve.wave_time * 1.25);
+        let sheen = ripple_a * ripple_b * 0.20;
+        out.color = vec4<f32>(out.color.rgb + vec3<f32>(0.12, 0.27, 0.42) * sheen, out.color.a);
+    }
 
     return out;
 }

@@ -2,7 +2,7 @@
 
 > 本登记簿记录所有引入的外部素材。**全部素材均允许免费商用**（CC0 免署名 / CC-BY 署名）。
 > 许可证原文已存档于 `assets/licenses/`。
-> 素材下载日期：2026-08-17（以当前仓库 `assets/` 内文件为准）。
+> 素材下载日期：2026-08-18（以当前仓库 `assets/` 内文件为准）。
 
 ## 音效（assets/audio/*.ogg，共 32 条）
 
@@ -13,7 +13,7 @@
 
 > 32 条文件清单：alarm、break_block、click、coin、craft、creature_die、creature_hit、dig、dock、engine_loop、error、explosion、hover、hurt、insert、jet、jump、land、land_ship、laser_hit、open_chest、pickup、place、pulse、research、scan、shoot、step、takeoff、ui_close、ui_open、warp（均为 .ogg）。
 
-## 3D 模型（assets/models/，共 22 个 .glb）
+## 3D 模型（assets/models/，含 GLB / glTF）
 
 ### Kenney Space Kit（CC0 1.0，免署名）— https://kenney.nl/assets/space-kit
 
@@ -49,6 +49,21 @@
 - KayKit Character Pack: Adventurers：https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0
 - KayKit Character Pack: Skeletons：https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0
 
+### Quaternius Ultimate Animated Animals（CC0 1.0，免署名）
+
+> 官方包提供 glTF，并包含 Idle、Walk、Gallop、Jump、Death 等动画。本项目使用内嵌数据的 glTF 文件，避免额外纹理依赖。
+
+| 文件 | 对应模型 |
+|---|---|
+| models/creatures/quaternius_alpaca.gltf | Alpaca |
+| models/creatures/quaternius_deer.gltf | Deer |
+| models/creatures/quaternius_fox.gltf | Fox |
+| models/creatures/quaternius_wolf.gltf | Wolf |
+
+- 官方页面：https://quaternius.com/packs/ultimateanimatedanimals.html
+- glTF 下载目录：https://drive.google.com/drive/folders/1uJ3N5HfB7jKTseJUNQr3N4YaN0UuEtHk?usp=sharing
+- 许可证原文：`assets/licenses/quaternius_ultimate_animated_animals_LICENSE.txt`
+
 ### 需署名条目（CC-BY 3.0）
 
 > 来源：Poly Pizza（https://poly.pizza）。模型使用 CC-BY 3.0 许可，署名如下：
@@ -68,8 +83,8 @@
 ## 备注
 
 - 程序化贴图（方块/物品图标）与程序化星球/空间站几何属于原版 1:1 移植的一部分，保持程序生成。
-- 生物的动画为**程序化动画**（淡入/淡出、行走摇摆、呼吸起伏、受击脉冲），由代码逐帧驱动，不依赖模型自带的骨骼动画；blob.glb 自带的动画未使用。
-- 被动生物（crab/blob/strider）模型来自 Poly Pizza（CC-BY，见上表）；玩家飞船与访客飞船模型来自 Kenney Space Kit（CC0）；哨兵（sentinel）来自 KayKit Skeletons（CC0）；冒险者 NPC 来自 KayKit Adventurers（CC0）。
+- 被动生物使用 Quaternius 的带骨骼动画 glTF（CC0）；生物 AI 状态会在 Idle 与 Walk 之间切换，模型自带四肢、尾巴和头部动作随动画播放。
+- 旧版 Poly Pizza 生物文件仍保留在仓库中，但不再作为当前被动生物的默认模型；玩家飞船与访客飞船模型来自 Kenney Space Kit（CC0）；哨兵（sentinel）来自 KayKit Skeletons（CC0）；冒险者 NPC 来自 KayKit Adventurers（CC0）。
 - 素材进入仓库前已做轻量清洗：移除 Kenney GLB 根节点平移、修正 blob 节点缩放（100 倍）造成的渲染尺寸偏差；仅修改变换，未改动任何网格/材质/动画数据。
 
 ## 发行与署名要求

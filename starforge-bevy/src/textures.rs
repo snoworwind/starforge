@@ -144,11 +144,11 @@ impl Atlas {
                     b,
                     r,
                     &[
-                        hex("#69b23f"),
-                        hex("#5da337"),
-                        hex("#74bd48"),
-                        hex("#619f3b"),
-                        hex("#7cc44f"),
+                        hex("#3f9b72"),
+                        hex("#2d8068"),
+                        hex("#56b982"),
+                        hex("#347f70"),
+                        hex("#65c58d"),
                     ],
                 )
             }),
@@ -183,7 +183,7 @@ impl Atlas {
                             b,
                             x,
                             y,
-                            [hex("#69b23f"), hex("#5da337"), hex("#74bd48")]
+                            [hex("#3f9b72"), hex("#2d8068"), hex("#56b982")]
                                 [((r.next() * 3.0) as usize).min(2)],
                         );
                     }

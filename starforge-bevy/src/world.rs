@@ -253,9 +253,25 @@ impl WorldGen {
                 // continental
                 let (q0, q1) = self.warp_xz(wx, wz, 190.0);
                 let b = n.fbm2(q0 * 0.005, q1 * 0.005, 5, 2.0, 0.5);
-                SEA as f32 - 5.0
-                    + (b * 0.5 + 0.5) * 30.0 * rugged
-                    + n.fbm2(wx * 0.05, wz * 0.05, 3, 2.0, 0.5) * 3.5
+                {
+                    let continental = SEA as f32 - 5.0
+                        + (b * 0.5 + 0.5) * 30.0 * rugged
+                        + n.fbm2(wx * 0.05, wz * 0.05, 3, 2.0, 0.5) * 3.5;
+                    if self.biome.key == "lush" {
+                        let wet =
+                            n.fbm2(wx * 0.0018 + 41.0, wz * 0.0018 - 17.0, 4, 2.0, 0.5) * 0.5 + 0.5;
+                        let basin = ((0.54 - wet) / 0.16).clamp(0.0, 1.0);
+                        let ridge = (n
+                            .fbm2(wx * 0.0032 - 13.0, wz * 0.0032 + 7.0, 3, 2.0, 0.5)
+                            .abs()
+                            * 2.0
+                            - 0.45)
+                            .max(0.0);
+                        continental - basin.powf(1.35) * 24.0 + ridge.powf(1.4) * 22.0
+                    } else {
+                        continental
+                    }
+                }
             }
         };
         let amp: f32 = match t {
@@ -344,7 +360,8 @@ impl WorldGen {
     /// Tree test for a column. Returns (ground h, trunk height, rng) if a tree grows here.
     pub fn tree_at(&self, wx: i32, wz: i32, tree_mul: f32) -> Option<(i32, i32, Rng)> {
         let mut r = hash2(wx, wz, 0xABCD, self.seed);
-        if r.next() >= self.biome.trees * tree_mul {
+        let density_boost = if self.biome.key == "lush" { 2.2 } else { 1.0 };
+        if r.next() >= self.biome.trees * tree_mul * density_boost {
             return None;
         }
         let h = self.height_at(wx as f32, wz as f32);
@@ -373,6 +390,13 @@ impl WorldGen {
         let flora_list: &[&str] = match b.key {
             "murk" => &["glow_shroom", "glow_shroom", "oxygen_plant"],
             "salt" => &["sodium_plant", "sodium_plant", "fern"],
+            "lush" => &[
+                "sodium_plant",
+                "oxygen_plant",
+                "fern",
+                "fern",
+                "glow_shroom",
+            ],
             _ => &["sodium_plant", "oxygen_plant", "fern"],
         };
 
@@ -384,6 +408,7 @@ impl WorldGen {
                 let sd = self.sub_at(wx as f32, wz as f32);
                 let surf_id = match sd {
                     Some((g, _, _)) if !g.is_empty() => data::block_by_key(g).id,
+                    _ if b.key == "lush" && h > seab + 27 => ids::SNOW,
                     _ => grass_id,
                 };
                 let can_cave = h > seab + 1;

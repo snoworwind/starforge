@@ -14,6 +14,7 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 pub const W: f32 = 0.3;
 pub const H: f32 = 1.8;
 pub const EYE: f32 = 1.62;
+pub const JETPACK_CEILING: f32 = 118.0;
 
 #[derive(Clone, Debug)]
 pub struct Stats {
@@ -92,6 +93,7 @@ pub struct Player {
     pub haz_beep_t: f32,
     /// 「需要采矿激光」提示计时（JS noLaserHintT）
     pub no_laser_t: f32,
+    pub step_t: f32,
 }
 
 impl Player {
@@ -120,6 +122,7 @@ impl Player {
             appearance: crate::save::Appearance::default(),
             haz_beep_t: 0.0,
             no_laser_t: 0.0,
+            step_t: 0.0,
         }
     }
 
@@ -322,9 +325,11 @@ pub fn movement_system(
         if p.in_liquid {
             p.vel.x *= (1.0 - 5.0 * dt).max(0.0);
             p.vel.z *= (1.0 - 5.0 * dt).max(0.0);
-            p.vel.y += (2.6 - p.vel.y) * (4.0 * dt).min(1.0);
+            p.vel.y += (0.0 - p.vel.y) * (3.2 * dt).min(1.0);
             if keys.pressed(KeyCode::Space) {
-                p.vel.y = (p.vel.y + 24.0 * dt).min(5.5);
+                p.vel.y = (p.vel.y + 18.0 * dt).min(5.5);
+            } else if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+                p.vel.y = (p.vel.y - 18.0 * dt).max(-5.5);
             }
             p.on_ground = false;
         } else {
@@ -335,9 +340,11 @@ pub fn movement_system(
                 p.vel.y = 7.4;
                 p.on_ground = false;
                 audio::play(&mut commands, sfx.jump.clone(), 0.5, None);
-            } else if space && !p.on_ground && p.stats.jet > 0.0 {
+            } else if space && !p.on_ground && p.stats.jet > 0.0 && p.pos.y < JETPACK_CEILING {
                 p.vel.y = (p.vel.y + 33.0 * dt).min(8.5);
                 p.stats.jet = (p.stats.jet - 28.0 * dt).max(0.0);
+            } else if p.pos.y >= JETPACK_CEILING {
+                p.vel.y = p.vel.y.min(0.0);
             }
         }
         // 喷气背包循环音（JS Sound.loops.jet 启停）
@@ -353,6 +360,21 @@ pub fn movement_system(
         }
         if p.creative() {
             p.stats.jet = 100.0;
+        }
+        let horizontal_speed = Vec2::new(p.vel.x, p.vel.z).length();
+        if p.on_ground && horizontal_speed > 1.0 {
+            p.step_t += dt;
+            if p.step_t >= if sprint { 0.28 } else { 0.38 } {
+                p.step_t = 0.0;
+                audio::play(
+                    &mut commands,
+                    sfx.step.clone(),
+                    0.28,
+                    Some(0.92 + (p.pos.x.abs() % 0.12)),
+                );
+            }
+        } else {
+            p.step_t = 0.0;
         }
         // toasts decay
         for t in p.toasts.iter_mut() {
@@ -422,6 +444,10 @@ pub fn collision_system(time: Res<Time>, mut q: Query<&mut Player>, world: Res<W
             }
         }
         p.pos = np;
+        if p.pos.y > JETPACK_CEILING {
+            p.pos.y = JETPACK_CEILING;
+            p.vel.y = p.vel.y.min(0.0);
+        }
         if p.pos.y < -10.0 {
             p.pos.y = 80.0;
             p.damage(2.0);
@@ -512,18 +538,48 @@ pub fn survival_system(
 
 pub fn camera_system(
     player: Query<&Player>,
+    mode: Res<PlayerCameraMode>,
     mut cam: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<Player>)>,
 ) {
     let Ok(p) = player.single() else { return };
     for (mut tf, mut proj) in &mut cam {
-        tf.translation = p.eye();
         let yaw = Quat::from_rotation_y(p.yaw);
         let pitch = Quat::from_rotation_x(p.pitch);
-        tf.rotation = yaw * pitch;
+        if mode.third_person {
+            let look = p.eye();
+            tf.translation = look - p.forward() * 6.0 + Vec3::Y * 2.2;
+            tf.look_at(look, Vec3::Y);
+        } else {
+            tf.translation = p.eye();
+            tf.rotation = yaw * pitch;
+        }
         *proj = Projection::Perspective(PerspectiveProjection {
             fov: 75f32.to_radians(),
             far: crate::space::CAM_FAR,
             ..default()
+        });
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct PlayerCameraMode {
+    pub third_person: bool,
+}
+
+pub fn camera_toggle_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<PlayerCameraMode>,
+    mut player: Query<&mut Player>,
+) {
+    if !keys.just_pressed(KeyCode::KeyV) {
+        return;
+    }
+    mode.third_person = !mode.third_person;
+    if let Ok(mut p) = player.single_mut() {
+        p.toast(if mode.third_person {
+            "第三人称镜头"
+        } else {
+            "第一人称镜头"
         });
     }
 }
@@ -652,7 +708,6 @@ pub fn mining_system(
                         p.mining = None;
                         let drops = def.drops.to_vec();
                         queue.0.push((pe, cell, drops, mult));
-                        audio::play(&mut commands, sfx.break_block.clone(), 0.7, None);
                     }
                 }
                 if !p.creative() {
@@ -901,6 +956,10 @@ pub fn break_system(
     mut commands: Commands,
     icons: Res<crate::ui::IconMaterials>,
     mut net_ev: MessageWriter<crate::network::BlockChanged>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut feedback: ResMut<crate::feedback::FeedbackAssets>,
+    sfx: Res<audio::Sfx>,
 ) {
     for (player_e, cell, drops, mult) in queue.0.drain(..) {
         let mut rng = crate::rng::Rng::new(
@@ -928,6 +987,28 @@ pub fn break_system(
             }
             commands.entity(e).despawn();
         }
+        let broken_id = world.get(cell[0], cell[1], cell[2]);
+        crate::feedback::spawn_block_burst(
+            &mut commands,
+            &mut feedback,
+            &mut meshes,
+            &mut materials,
+            Vec3::new(
+                cell[0] as f32 + 0.5,
+                cell[1] as f32 + 0.5,
+                cell[2] as f32 + 0.5,
+            ),
+            broken_id,
+            (cell[0] as u32).wrapping_mul(73856093) ^ (cell[2] as u32).wrapping_mul(19349663),
+        );
+        let pitch = match data::block_by_id(broken_id).key {
+            "glass" | "ice" => 1.32,
+            "metal" | "iron_ore" | "titanium_ore" => 0.78,
+            "leaves" | "fern" | "sodium_plant" | "oxygen_plant" => 1.15,
+            "sand" | "snow" | "salt" => 1.08,
+            _ => 1.0,
+        };
+        audio::play(&mut commands, sfx.break_block.clone(), 0.7, Some(pitch));
         world.set(cell[0], cell[1], cell[2], ids::AIR);
         net_ev.write(crate::network::BlockChanged {
             x: cell[0],

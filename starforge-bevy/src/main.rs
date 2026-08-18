@@ -11,6 +11,7 @@ mod creatures;
 mod data;
 mod daynight;
 mod factory;
+mod feedback;
 mod inventory;
 mod materials;
 mod network;
@@ -263,6 +264,8 @@ fn main() {
         .insert_resource(ShipState::default())
         .insert_resource(SpaceInput::default())
         .insert_resource(FlightCamera::default())
+        .insert_resource(player::PlayerCameraMode::default())
+        .insert_resource(feedback::FeedbackAssets::default())
         .insert_resource(station::StationState::default())
         .insert_resource(station::StationDefense::default())
         .insert_resource(quests::Quests::default())
@@ -314,6 +317,7 @@ fn main() {
                                 quests::quest_tick_system,
                                 quests::side_quest_system,
                                 quests::village_side_quest_system,
+                                char::npc_idle_system,
                                 ui::research_system,
                                 materials::curve_system,
                                 materials::lamp_pool_system,
@@ -333,6 +337,7 @@ fn main() {
                                 stream_system.run_if(ground_scene_mode),
                                 creatures::creature_spawn_system.run_if(ground_mode),
                                 creatures::creature_system.run_if(ground_mode),
+                                creatures::creature_sound_system.run_if(ground_mode),
                                 creatures::creature_animation_system.run_if(ground_mode),
                                 creatures::sentinel_system.run_if(ground_mode),
                             )
@@ -346,6 +351,7 @@ fn main() {
                                 ui::scan_system.run_if(ground_mode),
                                 // 视角
                                 player::look_system.run_if(walk_look_mode),
+                                player::camera_toggle_system.run_if(in_planet_mode),
                                 player::camera_system.run_if(in_planet_mode),
                                 // 太空
                                 space::space_input_system,
@@ -473,6 +479,10 @@ fn main() {
         .add_systems(Update, far_mesh_system.run_if(in_state(GameState::Playing)))
         .add_systems(
             Update,
+            feedback::particle_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
             network::network_system.run_if(in_state(GameState::Playing)),
         );
     if smoke || play {
@@ -541,7 +551,17 @@ fn startup(
         );
         // GLB 模型同样自解压到 exe 旁（仅首次；源码在 <crate>/target/<profile>/ 下时向上两级即 crate 根）
         let models_dir = dir.join("assets").join("models");
-        if !models_dir.exists() {
+        // Existing target folders may come from an older build and therefore
+        // already contain legacy NPC assets while missing the new creature set.
+        // Copy when any required Quaternius file is absent, not only when the
+        // directory itself is absent.
+        let creature_files = ["alpaca", "deer", "fox", "wolf"];
+        if creature_files.iter().any(|name| {
+            !models_dir
+                .join("creatures")
+                .join(format!("quaternius_{name}.gltf"))
+                .exists()
+        }) {
             let mut src: Option<std::path::PathBuf> = None;
             let via_exe = dir.join("..").join("..").join("assets").join("models");
             if via_exe.is_dir() {

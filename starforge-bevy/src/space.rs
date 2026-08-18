@@ -373,7 +373,10 @@ pub fn ship_cam_input_system(
     mode: Res<FlightMode>,
     mut player: Query<&mut Player>,
 ) {
-    if !matches!(*mode, FlightMode::Atmo | FlightMode::Space | FlightMode::Warping) {
+    if !matches!(
+        *mode,
+        FlightMode::Atmo | FlightMode::Space | FlightMode::Warping
+    ) {
         return;
     }
     if keys.just_pressed(KeyCode::KeyF) {
@@ -381,7 +384,11 @@ pub fn ship_cam_input_system(
         cam.free_yaw = 0.0;
         cam.free_pitch = 0.0;
         if let Ok(mut p) = player.single_mut() {
-            p.toast(if cam.third { "第三人称镜头" } else { "第一人称镜头" });
+            p.toast(if cam.third {
+                "第三人称镜头"
+            } else {
+                "第一人称镜头"
+            });
         }
     }
     if cam.third {
@@ -1282,11 +1289,7 @@ pub fn visitor_system(
                         traffic.pads[pad] = Some(entity);
                         visitor.pad = Some(pad);
                         let rest = crate::station::visitor_pad_world(station, pad, 3.0, seed);
-                        visitor.path = vec![
-                            rest + Vec3::Y * 22.0,
-                            rest + Vec3::Y * 4.0,
-                            rest,
-                        ];
+                        visitor.path = vec![rest + Vec3::Y * 22.0, rest + Vec3::Y * 4.0, rest];
                         visitor.path_index = 0;
                         visitor.phase = VisitorPhase::DockIn;
                     } else {
@@ -1319,10 +1322,8 @@ pub fn visitor_system(
                 if visitor.timer <= 0.0 {
                     let pad = visitor.pad.unwrap_or(0);
                     let rest = crate::station::visitor_pad_world(station, pad, 3.0, seed);
-                    visitor.path = vec![
-                        rest + Vec3::Y * 22.0,
-                        station + Vec3::new(0.0, 60.0, 220.0),
-                    ];
+                    visitor.path =
+                        vec![rest + Vec3::Y * 22.0, station + Vec3::new(0.0, 60.0, 220.0)];
                     visitor.path_index = 0;
                     visitor.phase = VisitorPhase::DockOut;
                 }
@@ -2052,9 +2053,10 @@ pub fn spawn_space_scene(
         let root = if is_origin {
             commands
                 .spawn((
-                    WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(
-                        "models/earth/scene.gltf",
-                    ))),
+                    WorldAssetRoot(
+                        asset_server
+                            .load(GltfAssetLabel::Scene(0).from_asset("models/earth/scene.gltf")),
+                    ),
                     Transform::from_translation(Vec3::from(pd.pos))
                         .with_scale(Vec3::splat(pd.radius / 6.4726)),
                     crate::InGame,
@@ -2073,7 +2075,7 @@ pub fn spawn_space_scene(
                 alpha_mode: AlphaMode::Blend,
                 ..default()
             });
-            let root = commands
+            commands
                 .spawn((
                     Mesh3d(meshes.add(Sphere::new(pd.radius))),
                     MeshMaterial3d(mat.clone()),
@@ -2084,8 +2086,7 @@ pub fn spawn_space_scene(
                     },
                     crate::InGame,
                 ))
-                .id();
-            root
+                .id()
         };
         // 起源星地球模型自带云层壳；atmo 若作为子实体挂在带 23 倍缩放的
         // 模型实体下会被等比放大成巨型壳，因此起源星跳过（其他行星根实体
@@ -2360,8 +2361,7 @@ pub fn ship_recall_system(
     };
     let from = Vec3::new(
         game.ship_pos.x,
-        game
-            .ship_pos
+        game.ship_pos
             .y
             .max(parked_y_at(&world, game.ship_pos.x, game.ship_pos.z)),
         game.ship_pos.z,
@@ -2889,7 +2889,11 @@ pub fn atmo_system(
         }
     }
     // 鼠标侧倾（视觉银行）存入真实 roll —— 模型反向携带（JS：Euler z = -atmo.roll）
-    let bank_in = if input.mouse_dx.abs() < 0.6 { 0.0 } else { input.mouse_dx };
+    let bank_in = if input.mouse_dx.abs() < 0.6 {
+        0.0
+    } else {
+        input.mouse_dx
+    };
     let target_roll = bank_in * -0.04 * settings.mouse_sens;
     ship.roll += (target_roll - ship.roll) * (dt * 5.0).min(1.0);
     // A/D 滚转微调缓慢自动回正（转向时加速配平）
@@ -3046,7 +3050,11 @@ pub fn space_system(mut p: SpaceSysParams) {
     p.ship.roll = nr;
     // 视觉侧倾（NMS 式转向银行）与换系滚转微调 —— 模型/相机整体携带（JS Space.update 同口径）
     // 鼠标抖动死区：微小移动不触发侧倾，避免飞行时船体轻微摆动（抖）
-    let bank_in = if p.input.mouse_dx.abs() < 0.6 { 0.0 } else { p.input.mouse_dx };
+    let bank_in = if p.input.mouse_dx.abs() < 0.6 {
+        0.0
+    } else {
+        p.input.mouse_dx
+    };
     p.ship.vis_bank +=
         (bank_in * -0.045 * p.settings.mouse_sens - p.ship.vis_bank) * (dt * 5.0).min(1.0);
     let steer = p.input.mouse_dx.abs() + p.input.mouse_dy.abs();

@@ -729,8 +729,8 @@ pub fn hud_system(
                     let half_h = half_v * aspect;
                     let mut sx = screen.center().x
                         + (rel.dot(cam_right) / fd) / half_h * screen.width() * 0.5;
-                    let mut sy = screen.center().y
-                        - (rel.dot(cam_up) / fd) / half_v * screen.height() * 0.5;
+                    let mut sy =
+                        screen.center().y - (rel.dot(cam_up) / fd) / half_v * screen.height() * 0.5;
                     let margin = 36.0;
                     if sx >= margin
                         && sx <= screen.width() - margin

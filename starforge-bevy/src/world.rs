@@ -1249,10 +1249,7 @@ impl World {
                 let wz = z + gz;
                 let y = self.top_at(wx, wz);
                 let d = data::block_by_id(self.get(wx, y, wz));
-                if d.solid
-                    && !d.liquid
-                    && best.map(|b| y > b.2).unwrap_or(true)
-                {
+                if d.solid && !d.liquid && best.map(|b| y > b.2).unwrap_or(true) {
                     best = Some((wx, wz, y));
                 }
             }

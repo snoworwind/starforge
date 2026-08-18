@@ -362,7 +362,12 @@ pub fn space_cloud_system(
             }
             // 双层云壳：内层较密、外层稀薄，不同转速形成视差
             let (radius_k, alpha, seed, speed) = if layer == 0 {
-                (1.045f32, 0.42f32, 90_210 + planet.def.id as u32 * 777, 0.010)
+                (
+                    1.045f32,
+                    0.42f32,
+                    90_210 + planet.def.id as u32 * 777,
+                    0.010,
+                )
             } else {
                 (1.09, 0.30, 371_015 + planet.def.id as u32 * 913, -0.007)
             };

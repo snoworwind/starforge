@@ -47,6 +47,10 @@ pub enum Panel {
     Creative,
     /// 星球全息地图（M）
     Map,
+    /// 空间站停泊服务菜单（泊入后 E 打开）
+    Station,
+    /// 空间站买船中心（停泊服务菜单进入）
+    BuyShip,
 }
 
 impl UiState {
@@ -288,8 +292,8 @@ pub fn hud_system(
     ship: Option<Res<crate::space::ShipState>>,
     game: Option<Res<crate::space::SpaceGame>>,
     quests: Option<Res<crate::quests::Quests>>,
-    station: Option<Res<crate::station::StationState>>,
     power: Res<crate::factory::Power>,
+    cam_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     let Ok(p) = player.single() else { return };
     if ui.panel != Panel::None {
@@ -711,6 +715,63 @@ pub fn hud_system(
                         }),
                     );
                 });
+            // 三维方向指引：目标在屏幕内画准星标记，在屏幕外画指向箭头
+            if let Ok((_cam, cam_gt)) = cam_q.single() {
+                let cam_pos = cam_gt.translation();
+                let cam_fwd = cam_gt.rotation() * Vec3::NEG_Z;
+                let cam_right = cam_gt.rotation() * Vec3::X;
+                let cam_up = cam_gt.rotation() * Vec3::Y;
+                let rel = (s.pos + target_dir * 5000.0) - cam_pos;
+                let fd = rel.dot(cam_fwd);
+                if fd > 1.0 {
+                    let half_v = (75.0f32.to_radians() / 2.0).tan();
+                    let aspect = (screen.width() / screen.height().max(1.0)).max(0.5);
+                    let half_h = half_v * aspect;
+                    let mut sx = screen.center().x
+                        + (rel.dot(cam_right) / fd) / half_h * screen.width() * 0.5;
+                    let mut sy = screen.center().y
+                        - (rel.dot(cam_up) / fd) / half_v * screen.height() * 0.5;
+                    let margin = 36.0;
+                    if sx >= margin
+                        && sx <= screen.width() - margin
+                        && sy >= margin
+                        && sy <= screen.max.y - margin
+                    {
+                        egui::Area::new(egui::Id::new("warp_marker"))
+                            .fixed_pos(egui::pos2(sx - 14.0, sy - 14.0))
+                            .interactable(false)
+                            .show(ctx, |ui| {
+                                ui.painter().text(
+                                    ui.min_rect().center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "◎",
+                                    egui::FontId::proportional(24.0),
+                                    egui::Color32::from_rgb(0x7d, 0xff, 0x8a),
+                                );
+                            });
+                    } else {
+                        sx = sx.clamp(margin, screen.width() - margin);
+                        sy = sy.clamp(margin, screen.max.y - margin);
+                        let ang = (screen.center().y - sy).atan2(screen.center().x - sx);
+                        let dir = egui::vec2(ang.cos(), ang.sin());
+                        let perp = egui::vec2(-dir.y, dir.x);
+                        let tip = dir * 14.0;
+                        let base1 = -dir * 5.0 + perp * 7.0;
+                        let base2 = -dir * 5.0 - perp * 7.0;
+                        egui::Area::new(egui::Id::new("warp_arrow"))
+                            .fixed_pos(egui::pos2(sx, sy))
+                            .interactable(false)
+                            .show(ctx, |ui| {
+                                let c = ui.min_rect().center();
+                                ui.painter().add(egui::Shape::convex_polygon(
+                                    vec![c + tip, c + base1, c + base2],
+                                    egui::Color32::from_rgb(0x7d, 0xff, 0x8a),
+                                    egui::Stroke::NONE,
+                                ));
+                            });
+                    }
+                }
+            }
         }
         // 操作提示
         egui::Area::new(egui::Id::new("flighthint"))
@@ -808,13 +869,6 @@ pub fn hud_system(
             dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
         }
     }
-    if dialog.is_none()
-        && let Some(st) = station.as_ref()
-        && let Some(d) = &st.dlg
-    {
-        let cur = &d.lines[d.idx];
-        dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
-    }
     if let Some((name, text, chars, total)) = dialog {
         let shown: String = text.chars().take(chars).collect();
         let full = chars >= total;
@@ -890,8 +944,11 @@ pub fn ship_label_system(
     mut contexts: EguiContexts,
     mode: Res<crate::space::FlightMode>,
     game: Option<Res<crate::space::SpaceGame>>,
+    ship_asset: Res<crate::space::ShipAsset>,
     ui_state: Res<UiState>,
     camera: HudCamera,
+    gt_q: Query<&GlobalTransform>,
+    tf_q: Query<&Transform>,
 ) {
     if *mode != crate::space::FlightMode::Planet || ui_state.locked() {
         return;
@@ -907,8 +964,18 @@ pub fn ship_label_system(
     let Ok((camera, camera_transform)) = camera.query.single() else {
         return;
     };
-    let Ok(viewport) = camera.world_to_viewport(camera_transform, game.ship_pos + Vec3::Y * 4.0)
-    else {
+    // 投影飞船实体真实位置（game.ship_pos 可能是旧坐标/存档坐标），
+    // 优先 GlobalTransform，首帧未生成时退回 Transform。
+    let ship_pos = ship_asset
+        .entity
+        .and_then(|e| {
+            gt_q.get(e)
+                .map(|gt| gt.translation())
+                .ok()
+                .or_else(|| tf_q.get(e).ok().map(|t| t.translation))
+        })
+        .unwrap_or(game.ship_pos);
+    let Ok(viewport) = camera.world_to_viewport(camera_transform, ship_pos + Vec3::Y * 7.0) else {
         return;
     };
     let screen = ctx.content_rect();
@@ -922,11 +989,11 @@ pub fn ship_label_system(
         return;
     }
     let label_width = 300.0_f32.min(screen.width().max(220.0));
+    let label_x =
+        (pos.x - label_width * 0.5).clamp(4.0, (screen.width() - label_width - 4.0).max(4.0));
+    let label_y = (pos.y - 16.0).clamp(4.0, (screen.height() - 30.0).max(4.0));
     egui::Area::new(egui::Id::new("ship_world_label"))
-        .fixed_pos(egui::pos2(
-            (pos.x - label_width * 0.5).clamp(4.0, (screen.width() - label_width - 4.0).max(4.0)),
-            (pos.y - 28.0).clamp(4.0, (screen.height() - 28.0).max(4.0)),
-        ))
+        .fixed_pos(egui::pos2(label_x, label_y))
         .interactable(false)
         .show(ctx, |ui| {
             ui.set_width(label_width);
@@ -934,12 +1001,22 @@ pub fn ship_label_system(
                 ui.label(
                     egui::RichText::new(format!(
                         "▣ 飞船  ({:.0}, {:.0}, {:.0})",
-                        game.ship_pos.x, game.ship_pos.y, game.ship_pos.z
+                        ship_pos.x, ship_pos.y, ship_pos.z
                     ))
                     .size(13.0)
                     .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
                 );
             });
+            // 从标签底部画一条细线指向飞船实际位置，锚点一目了然
+            let r = ui.min_rect();
+            let bottom = egui::pos2(r.center().x, r.bottom());
+            ui.painter().line_segment(
+                [bottom, egui::pos2(pos.x, pos.y)],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(0x7d, 0xff, 0x8a, 110),
+                ),
+            );
         });
 }
 
@@ -2724,7 +2801,6 @@ pub fn panel_hotkeys_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_state: ResMut<UiState>,
     mut quests: Option<ResMut<crate::quests::Quests>>,
-    mut station: Option<ResMut<crate::station::StationState>>,
     mut player: Query<&mut Player>,
     world: Res<World>,
     machines: Query<(Entity, &Machine)>,
@@ -2744,12 +2820,6 @@ pub fn panel_hotkeys_system(
                 q.dialog = None;
                 return;
             }
-        }
-        if let Some(st) = station.as_deref_mut()
-            && st.dlg.is_some()
-        {
-            st.dlg = None;
-            return;
         }
         let was_locked = ui_state.locked();
         match ui_state.panel {
@@ -2793,6 +2863,18 @@ pub fn panel_hotkeys_system(
     // O：Bevy 原生联机面板
     if keys.just_pressed(KeyCode::KeyO) && !ui_state.locked() {
         ui_state.panel = Panel::Network;
+        ui_state.selected_inv = None;
+        audio::play(&mut commands, sfx.click.clone(), 0.5, None);
+    }
+    // N：换船电脑（空间站停泊 / 太空中均可）
+    if keys.just_pressed(KeyCode::KeyN)
+        && !ui_state.locked()
+        && matches!(
+            *mode,
+            crate::space::FlightMode::Station | crate::space::FlightMode::Space
+        )
+    {
+        ui_state.panel = Panel::Garage;
         ui_state.selected_inv = None;
         audio::play(&mut commands, sfx.click.clone(), 0.5, None);
     }
@@ -3307,6 +3389,145 @@ pub fn garage_panel_system(
         };
         if let Some(s) = game.ship_inv.get_mut(i).and_then(|s| s.take()) {
             p.inv.add_item(&s.item, s.n);
+        }
+    }
+}
+
+// ---------- 空间站停泊服务 ----------
+
+/// 停泊后按 E 打开的空间站服务菜单：贸易 / 买船 / 换船。
+pub fn station_services_panel_system(
+    mut contexts: EguiContexts,
+    mut ui_state: ResMut<UiState>,
+    mode: Res<crate::space::FlightMode>,
+    station: Option<Res<crate::station::StationState>>,
+) {
+    if ui_state.panel != Panel::Station {
+        return;
+    }
+    // 离开站态/未停泊时自动关闭
+    let docked = *mode == crate::space::FlightMode::Station
+        && station
+            .as_ref()
+            .is_some_and(|st| st.phase == crate::station::StationPhase::Parked);
+    if !docked {
+        ui_state.panel = Panel::None;
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    if !egui_fonts_ready(ctx) {
+        return;
+    }
+    egui::Window::new("◈ 空间站服务")
+        .default_size([320.0, 230.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("已停泊于空间站顶部 · 选择服务")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0x9a, 0xa6, 0xb2)),
+            );
+            ui.separator();
+            if ui
+                .button(egui::RichText::new("💰 银河交易终端").size(16.0))
+                .clicked()
+            {
+                ui_state.panel = Panel::Trade;
+            }
+            if ui
+                .button(egui::RichText::new("🚀 买船中心").size(16.0))
+                .clicked()
+            {
+                ui_state.panel = Panel::BuyShip;
+            }
+            if ui
+                .button(egui::RichText::new("🔁 换船电脑").size(16.0))
+                .clicked()
+            {
+                ui_state.panel = Panel::Garage;
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Esc 关闭 · W 离站").size(12.0));
+        });
+}
+
+/// 买船中心：游商不再对话卖船，统一在本中心出售。
+pub fn buy_ship_panel_system(
+    mut contexts: EguiContexts,
+    mut ui_state: ResMut<UiState>,
+    mut player: Query<&mut Player>,
+    mut switch_ev: MessageWriter<crate::station::ShipSwitchEvent>,
+    mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
+    station: Option<Res<crate::station::StationState>>,
+    mut commands: Commands,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    if ui_state.panel != Panel::BuyShip {
+        return;
+    }
+    let Some(st) = station.as_deref() else {
+        ui_state.panel = Panel::None;
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    if !egui_fonts_ready(ctx) {
+        return;
+    }
+    let mut buy_req: Option<usize> = None;
+    let credits = player.single().map(|p| p.credits).unwrap_or(0);
+    egui::Window::new("◈ 舰船交易中心")
+        .default_size([460.0, 320.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!("₪ {credits}"))
+                    .size(20.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+            );
+            ui.separator();
+            for (i, o) in st.offers.iter().enumerate() {
+                let cls = crate::data::ship_class_by_key(&o.cls);
+                let model_name = crate::data::SHIP_MODEL_NAMES
+                    .iter()
+                    .find(|(k, _)| *k == o.model)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("飞船");
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "「{model_name}」 {} 级 · {} · 货仓 {} 格",
+                        cls.key, cls.weapon_name, cls.slots
+                    ));
+                    if ui.button(format!("购买 ₪{}", o.price)).clicked() {
+                        buy_req = Some(i);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    if let Some(i) = buy_req {
+        let Some(offer) = st.offers.get(i).cloned() else {
+            return;
+        };
+        let Ok(mut p) = player.single_mut() else {
+            return;
+        };
+        if p.credits >= offer.price {
+            p.credits -= offer.price;
+            switch_ev.write(crate::station::ShipSwitchEvent {
+                cls: offer.cls.clone(),
+                model: offer.model.clone(),
+                garage_idx: None,
+            });
+            big_ev.write(crate::quests::BigMessageEvent {
+                title: "成交！".into(),
+                sub: format!("已购入 {} 级飞船", offer.cls),
+                dur: 2.4,
+            });
+            audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+        } else {
+            p.toast("信用点不足");
+            audio::play(&mut commands, sfx.error.clone(), 0.4, None);
         }
     }
 }

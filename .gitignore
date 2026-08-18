@@ -23,3 +23,6 @@ desktop.ini
 
 # DSH 运行时目录（本机工具生成，勿提交）
 .dsh-vision-router/
+
+# 起源星地球模型素材包（体积较大，不纳入仓库，需从本地 models/earth.zip 解压）
+starforge-bevy/assets/models/earth/

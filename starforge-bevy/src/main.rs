@@ -275,6 +275,7 @@ fn main() {
         .insert_resource(ShipRecall::default())
         .insert_resource(SpaceInput::default())
         .insert_resource(FlightCamera::default())
+        .insert_resource(space::ShipCam::default())
         .insert_resource(player::PlayerCameraMode::default())
         .insert_resource(feedback::FeedbackAssets::default())
         .insert_resource(station::StationState::default())
@@ -377,7 +378,6 @@ fn main() {
                             (
                                 station::station_system,
                                 station::station_defense_system,
-                                station::station_dialog_system,
                                 station::station_npc_spawn_system,
                                 station::ship_switch_system,
                                 planet_switch_system,
@@ -400,6 +400,8 @@ fn main() {
                             ui::pause_panel_system,
                             ui::trade_panel_system,
                             ui::garage_panel_system,
+                            ui::station_services_panel_system,
+                            ui::buy_ship_panel_system,
                             ui::galaxy_map_system,
                             network::network_ui_system,
                             ui::creative_panel_system,
@@ -489,6 +491,14 @@ fn main() {
         .add_systems(
             Update,
             space::engine_loop_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::ship_cam_input_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::space_stars_follow_system.run_if(in_state(GameState::Playing)),
         )
         .add_systems(Update, far_mesh_system.run_if(in_state(GameState::Playing)))
         .add_systems(
@@ -1504,8 +1514,21 @@ fn spawn_scene(
     normalized_ship_inv.truncate(12);
     normalized_ship_inv.resize(12, None);
     ship_data.inv = normalized_ship_inv;
-    let (ship_ent, flames, ship_spawn_pos) =
-        space::spawn_initial_ship(commands, meshes, stdmats, asset_server, &world, &ship_data);
+    // 船放在玩家出生点旁边（太空开局用占位点，船随即被同步到存档太空位置）
+    let ship_anchor = if start_mode == FlightMode::Space {
+        Vec3::new(96.0, 40.0, 96.0)
+    } else {
+        p.pos
+    };
+    let (ship_ent, flames, ship_spawn_pos) = space::spawn_initial_ship(
+        commands,
+        meshes,
+        stdmats,
+        asset_server,
+        &world,
+        ship_anchor,
+        &ship_data,
+    );
     if game.ship_pos == Vec3::ZERO {
         game.ship_pos = ship_spawn_pos;
     }
@@ -2091,7 +2114,7 @@ fn planet_switch_system(
     mut commands: Commands,
     chunk_meshes: Query<Entity, With<ChunkMesh>>,
     machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
-    creatures: Query<(Entity, &creatures::Creature, &Transform)>,
+    mut creatures: Query<(Entity, &mut creatures::Creature, &Transform)>,
     mut spawner: ResMut<creatures::CreatureSpawner>,
     mut sent_spawner: ResMut<creatures::SentinelSpawner>,
     mut scan_state: ResMut<ui::ScanState>,
@@ -2124,7 +2147,10 @@ fn planet_switch_system(
         for (ent, _, _) in &machines {
             commands.entity(ent).despawn();
         }
-        for (ent, _, _) in &creatures {
+        for (ent, mut c, _) in &mut creatures {
+            // 先抬血再统一销毁：避免 creature_despawn_system 同帧对
+            // hp<=0（淡出/已死）生物重复 despawn 报 Entity invalid。
+            c.hp = 1.0;
             commands.entity(ent).despawn();
         }
         for ent in &scan_markers {
@@ -2272,7 +2298,7 @@ fn save_system(
     quests: Res<quests::Quests>,
     station: Option<Res<station::StationState>>,
     spawner: Res<creatures::CreatureSpawner>,
-    creatures_q: Query<(Entity, &creatures::Creature, &Transform)>,
+    creatures_q: Query<(Entity, &mut creatures::Creature, &Transform)>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
 ) {
@@ -2312,11 +2338,8 @@ fn save_system(
             if *mode == FlightMode::Station
                 && let Some(st) = station.as_ref()
             {
-                ss.pos = [
-                    st.station_pos.x + station::station_exit_pos()[0],
-                    st.station_pos.y + station::station_exit_pos()[1],
-                    st.station_pos.z + station::station_exit_pos()[2],
-                ];
+                let exit = station::station_exit_pos(st.station_pos, st.seed);
+                ss.pos = [exit.x, exit.y, exit.z];
             }
             Some(ss)
         } else {

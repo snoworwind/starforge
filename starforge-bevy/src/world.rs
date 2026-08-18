@@ -1204,14 +1204,20 @@ impl World {
         let mut rng = crate::rng::Rng::new(self.seed ^ 0xB00B5);
         let valid = |wx: i32, wz: i32| -> bool {
             let y = self.top_at(wx, wz);
-            if y <= seab {
+            // 水面以上至少 1 格；表面与脚下都必须是实体陆地（排除水面/悬空/树冠）
+            if y <= seab + 1 {
                 return false;
             }
             let d = data::block_by_id(self.get(wx, y, wz));
-            d.solid && !d.liquid && d.key != "leaves" && d.key != "log"
+            if !d.solid || d.liquid || d.key == "leaves" || d.key == "log" {
+                return false;
+            }
+            let below = data::block_by_id(self.get(wx, y - 1, wz));
+            below.solid && !below.liquid
         };
-        for r in 0..400 {
-            let range = (20 + r) as f32;
+        // 就近优先：搜索半径从 8 缓慢增长，避免随机跳得很远（旧代码 20→420 会跳到远处）
+        for r in 0..120 {
+            let range = (8 + r * 2) as f32;
             let wx = x + ((rng.next() * range * 2.0 - range) as i32);
             let wz = z + ((rng.next() * range * 2.0 - range) as i32);
             if valid(wx, wz) {
@@ -1234,6 +1240,25 @@ impl World {
                     );
                 }
             }
+        }
+        // 终极兜底：取锚点附近最高实体地形（尽量不返回水面）
+        let mut best: Option<(i32, i32, i32)> = None;
+        for gx in (-64..=64).step_by(4) {
+            for gz in (-64..=64).step_by(4) {
+                let wx = x + gx;
+                let wz = z + gz;
+                let y = self.top_at(wx, wz);
+                let d = data::block_by_id(self.get(wx, y, wz));
+                if d.solid
+                    && !d.liquid
+                    && best.map(|b| y > b.2).unwrap_or(true)
+                {
+                    best = Some((wx, wz, y));
+                }
+            }
+        }
+        if let Some((wx, wz, y)) = best {
+            return Vec3::new(wx as f32 + 0.5, y as f32 + 2.0, wz as f32 + 0.5);
         }
         Vec3::new(
             x as f32 + 0.5,

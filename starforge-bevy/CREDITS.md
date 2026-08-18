@@ -26,6 +26,7 @@
 
 | 文件 | 用途 | 作者 | 来源 |
 |---|---|---|---|
+| `models/earth/` | 起源星（始源星）太空侧模型 | SebastianSosnowski | https://sketchfab.com/3d-models/earth-4de1bcbd22a444abb4f089b9b78ec96a |
 | `models/external/ships/space_ship_b/` | B 级飞船 | yanix | https://sketchfab.com/3d-models/space-ship-356a3acb00164c698d657146caa5ebf3 |
 | `models/external/ships/space_ship_c/` | C 级飞船 | Comrade1280 | https://sketchfab.com/3d-models/space-ship-63ce372c1aa843e98bf1548109e055d8 |
 | `models/external/ships/space_ship_torb/` | `ship_striker` 变体 | tramkar | https://sketchfab.com/3d-models/space-ship-torb-fb9cac9500d147528b6cdef8385cf926 |

@@ -344,7 +344,7 @@ impl CreatureSpawner {
     /// 序列化（存档）：活跃实体回写最新位置/血量。
     pub fn serialize(
         &self,
-        q: &Query<(Entity, &Creature, &Transform)>,
+        q: &Query<(Entity, &mut Creature, &Transform)>,
     ) -> (Vec<HerdSave>, Vec<CellSave>) {
         let mut herds: Vec<HerdSave> = Vec::new();
         for h in self.herds.values() {

@@ -24,6 +24,7 @@ pub struct WeatherParticle {
 #[derive(Component)]
 pub struct SpaceCloud {
     planet: Entity,
+    layer: u8,
     speed: f32,
 }
 
@@ -118,54 +119,60 @@ pub fn climate_system(
             // layers so each cloud has a soft core, a shaded middle, and a
             // broken wispy edge.
             let mesh = meshes.add(Sphere::new(1.0));
+            // unlit：雾团不受太阳光照影响，避免出现塑料白球的明暗轮廓
             let cloud_materials = [
                 materials.add(StandardMaterial {
-                    base_color: Color::srgba(0.92, 0.96, 1.0, 0.16),
+                    base_color: Color::srgba(0.92, 0.96, 1.0, 0.10),
                     alpha_mode: AlphaMode::Blend,
+                    unlit: true,
                     perceptual_roughness: 1.0,
                     cull_mode: None,
                     ..default()
                 }),
                 materials.add(StandardMaterial {
-                    base_color: Color::srgba(1.0, 1.0, 1.0, 0.24),
+                    base_color: Color::srgba(1.0, 1.0, 1.0, 0.16),
                     alpha_mode: AlphaMode::Blend,
+                    unlit: true,
                     perceptual_roughness: 1.0,
                     cull_mode: None,
                     ..default()
                 }),
                 materials.add(StandardMaterial {
-                    base_color: Color::srgba(0.72, 0.82, 0.94, 0.11),
+                    base_color: Color::srgba(0.72, 0.82, 0.94, 0.08),
                     alpha_mode: AlphaMode::Blend,
+                    unlit: true,
                     perceptual_roughness: 1.0,
                     cull_mode: None,
                     ..default()
                 }),
             ];
             let mut rng = crate::rng::Rng::new(world.seed ^ 0xC10D5);
-            for _ in 0..48 {
+            for _ in 0..60 {
                 let center = Vec3::new(
                     (rng.next() - 0.5) * 1100.0,
-                    126.0 + rng.next() * 34.0,
+                    118.0 + rng.next() * 40.0,
                     (rng.next() - 0.5) * 1100.0,
                 );
-                let parts = 5 + (rng.next() * 6.0) as usize;
+                let parts = 8 + (rng.next() * 7.0) as usize;
                 let wind = Vec2::new(1.5 + rng.next() * 2.5, (rng.next() - 0.5) * 0.45);
+                // 雾团：多个小扁球紧密交叠，低透明度叠加成蓬松白雾，
+                // 而不是单个可见的圆球/椭球。
                 for part in 0..parts {
                     let edge = part == 0 || part + 1 == parts;
                     let base = center
                         + Vec3::new(
-                            (rng.next() - 0.5) * 34.0,
-                            (rng.next() - 0.5) * 8.0,
-                            (rng.next() - 0.5) * 34.0,
+                            (rng.next() - 0.5) * 30.0,
+                            (rng.next() - 0.5) * 6.0,
+                            (rng.next() - 0.5) * 30.0,
                         );
                     let scale = Vec3::new(
-                        10.0 + rng.next() * 20.0,
+                        14.0 + rng.next() * 18.0,
                         if edge {
-                            2.4 + rng.next() * 3.0
+                            2.6 + rng.next() * 2.6
                         } else {
-                            4.5 + rng.next() * 6.5
+                            4.0 + rng.next() * 4.5
                         },
-                        10.0 + rng.next() * 20.0,
+                        14.0 + rng.next() * 18.0,
                     );
                     commands.spawn((
                         Mesh3d(mesh.clone()),
@@ -317,8 +324,9 @@ fn cloud_texture(images: &mut Assets<Image>, key: &str, seed: u32) -> Handle<Ima
     images.add(image)
 }
 
-/// Adds a separate procedural cloud shell to every space-scene planet and
-/// rotates it slowly so the globe remains visibly alive from orbit.
+/// Adds two translucent cloud shells to every space-scene planet and rotates
+/// them at slightly different speeds so the globe reads as layered, living
+/// clouds instead of a flat sticker. Low opacity lets the surface show through.
 #[allow(clippy::too_many_arguments)]
 pub fn space_cloud_system(
     time: Res<Time>,
@@ -339,35 +347,55 @@ pub fn space_cloud_system(
     }
     let Some(scene) = scene else { return };
     for planet in &scene.planets {
-        if existing
-            .iter()
-            .any(|(_, cloud)| cloud.planet == planet.entity)
-        {
+        // 起源星（家园星系 id 0）的地球模型自带云层壳，不再叠加程序化云壳
+        if scene.galaxy_seed == crate::data::HOME_GALAXY_SEED && planet.def.id == 0 {
             continue;
         }
-        let seed = 90_210 + planet.def.id as u32 * 777 + planet.def.biome.len() as u32 * 131;
-        let texture = cloud_texture(&mut images, planet.def.biome, seed);
-        let material = materials.add(StandardMaterial {
-            base_color_texture: Some(texture),
-            base_color: Color::srgba(1.0, 1.0, 1.0, 0.85),
-            alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 1.0,
-            cull_mode: None,
-            ..default()
-        });
-        let entity = commands
-            .spawn((
-                Mesh3d(meshes.add(Sphere::new(planet.def.radius * 1.035))),
-                MeshMaterial3d(material),
-                Transform::from_rotation(Quat::from_rotation_y(planet.def.id as f32 * 1.7)),
-                SpaceCloud {
-                    planet: planet.entity,
-                    speed: 0.008 + planet.def.id as f32 * 0.0007,
-                },
-                crate::InGame,
-            ))
-            .id();
-        commands.entity(planet.entity).add_child(entity);
+        let have: Vec<u8> = existing
+            .iter()
+            .filter(|(_, cloud)| cloud.planet == planet.entity)
+            .map(|(_, cloud)| cloud.layer)
+            .collect();
+        for layer in 0..2u8 {
+            if have.contains(&layer) {
+                continue;
+            }
+            // 双层云壳：内层较密、外层稀薄，不同转速形成视差
+            let (radius_k, alpha, seed, speed) = if layer == 0 {
+                (1.045f32, 0.42f32, 90_210 + planet.def.id as u32 * 777, 0.010)
+            } else {
+                (1.09, 0.30, 371_015 + planet.def.id as u32 * 913, -0.007)
+            };
+            let texture = cloud_texture(
+                &mut images,
+                planet.def.biome,
+                seed + planet.def.biome.len() as u32 * 131,
+            );
+            let material = materials.add(StandardMaterial {
+                base_color_texture: Some(texture),
+                base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
+                alpha_mode: AlphaMode::Blend,
+                perceptual_roughness: 1.0,
+                cull_mode: None,
+                ..default()
+            });
+            let entity = commands
+                .spawn((
+                    Mesh3d(meshes.add(Sphere::new(planet.def.radius * radius_k))),
+                    MeshMaterial3d(material),
+                    Transform::from_rotation(Quat::from_rotation_y(
+                        planet.def.id as f32 * 1.7 + layer as f32 * 2.4,
+                    )),
+                    SpaceCloud {
+                        planet: planet.entity,
+                        layer,
+                        speed,
+                    },
+                    crate::InGame,
+                ))
+                .id();
+            commands.entity(planet.entity).add_child(entity);
+        }
     }
     for (cloud, mut transform) in &mut clouds {
         transform.rotate_y(cloud.speed * time.delta_secs());

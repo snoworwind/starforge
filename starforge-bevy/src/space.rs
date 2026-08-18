@@ -2,7 +2,7 @@
 //! 空间站停靠/站内行走在 station.rs。
 
 use bevy::gltf::GltfAssetLabel;
-use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::input::mouse::{AccumulatedMouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 use bevy_world_serialization::prelude::WorldAssetRoot;
@@ -49,6 +49,21 @@ pub const SHIP_R: f32 = 3.0;
 /// 相交，导致船体陷入地形并被碰撞修正卡住。
 pub fn parked_ship_y(ground_y: i32) -> f32 {
     ground_y as f32 + 1.0 + SHIP_BOX[1]
+}
+
+/// 飞船在 (x, z) 落点的停放高度：取船体碰撞包络范围内**最高**地形，
+/// 避免降落在凹陷处导致船体边缘卡进周围地面、起飞时飞不起来。
+pub fn parked_y_at(world: &VoxelWorld, x: f32, z: f32) -> f32 {
+    let cx = x.floor() as i32;
+    let cz = z.floor() as i32;
+    let r = (SHIP_BOX[0].max(SHIP_BOX[2]) + 0.5) as i32;
+    let mut gy = i32::MIN;
+    for dx in -r..=r {
+        for dz in -r..=r {
+            gy = gy.max(world.top_at(cx + dx, cz + dz));
+        }
+    }
+    parked_ship_y(gy.max(0))
 }
 
 /// 体素→太空缩放
@@ -308,6 +323,81 @@ impl FlightCamera {
     }
 }
 
+/// 飞船镜头：第一/第三人称切换、第三人称距离缩放、右键自由视角。
+#[derive(Resource)]
+pub struct ShipCam {
+    pub third: bool,
+    /// 第三人称尾随距离（滚轮缩放）。
+    pub dist: f32,
+    /// 右键自由视角偏移（不改变飞船偏航）。
+    pub free_yaw: f32,
+    pub free_pitch: f32,
+}
+
+impl Default for ShipCam {
+    fn default() -> Self {
+        Self {
+            third: true,
+            dist: 11.0,
+            free_yaw: 0.0,
+            free_pitch: 0.0,
+        }
+    }
+}
+
+/// 计算飞船相机位姿：第一人称（座舱）或第三人称（尾随 + 自由视角）。
+fn ship_camera_pose(cam: &ShipCam, ship_pos: Vec3, ship_q: Quat) -> (Vec3, Quat) {
+    if !cam.third {
+        // 第一人称：座舱内
+        let pos = ship_pos + ship_q * Vec3::new(0.0, 2.2, 4.2);
+        return (pos, ship_q);
+    }
+    if cam.free_yaw != 0.0 || cam.free_pitch != 0.0 {
+        // 右键自由视角：相机绕飞船旋转（飞船偏航不变）
+        let rot = Quat::from_euler(EulerRot::YXZ, cam.free_yaw, cam.free_pitch, 0.0);
+        let pos = ship_pos + ship_q * (rot * Vec3::new(0.0, 1.0, cam.dist));
+        return (pos, ship_q * rot);
+    }
+    // 第三人称尾随
+    let pos = ship_pos + ship_q * Vec3::new(0.0, 3.2, cam.dist);
+    (pos, ship_q)
+}
+
+/// 飞船镜头输入：F 切换第一/第三人称；第三人称下滚轮缩放、右键自由视角。
+pub fn ship_cam_input_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<MouseWheel>,
+    motion: Res<AccumulatedMouseMotion>,
+    mut cam: ResMut<ShipCam>,
+    mode: Res<FlightMode>,
+    mut player: Query<&mut Player>,
+) {
+    if !matches!(*mode, FlightMode::Atmo | FlightMode::Space | FlightMode::Warping) {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        cam.third = !cam.third;
+        cam.free_yaw = 0.0;
+        cam.free_pitch = 0.0;
+        if let Ok(mut p) = player.single_mut() {
+            p.toast(if cam.third { "第三人称镜头" } else { "第一人称镜头" });
+        }
+    }
+    if cam.third {
+        for ev in wheel.read() {
+            cam.dist = (cam.dist - ev.y * 2.5).clamp(6.0, 60.0);
+        }
+        if mouse.pressed(MouseButton::Right) {
+            cam.free_yaw -= motion.delta.x * 0.0035;
+            cam.free_pitch = (cam.free_pitch - motion.delta.y * 0.0035).clamp(-1.35, 1.35);
+        } else {
+            cam.free_yaw = 0.0;
+            cam.free_pitch = 0.0;
+        }
+    }
+}
+
 // ---------- 星球档案 / 星系 ----------
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -370,6 +460,8 @@ pub struct SpaceGame {
     pub garage: Vec<save::ShipSave>,
     /// 当前星球地图标记（JS mapMarks[pid]）
     pub marks: Vec<Mark>,
+    /// 离站后禁止立即重新泊入的倒计时（秒）。
+    pub dock_cd: f32,
 }
 
 impl SpaceGame {
@@ -396,6 +488,7 @@ impl SpaceGame {
             ship_inv: Vec::new(),
             garage: Vec::new(),
             marks: Vec::new(),
+            dock_cd: 0.0,
         }
     }
 
@@ -414,7 +507,7 @@ impl SpaceGame {
 pub struct PlanetVis {
     pub def: PlanetDef,
     pub entity: Entity,
-    pub atmo: Entity,
+    pub atmo: Option<Entity>,
 }
 
 #[derive(Resource)]
@@ -426,6 +519,22 @@ pub struct SpaceScene {
     pub sun_glow: Entity,
     pub asteroids: Vec<Entity>,
     pub dir_light: Entity,
+    pub galaxy_seed: u32,
+}
+
+/// 太空星域根节点：每帧跟随玩家，保证无论飞到多远背景恒星始终环绕相机。
+#[derive(Component)]
+pub struct SpaceStars;
+
+/// 太空星域根节点跟随玩家位置（星点保持相对方向）。
+pub fn space_stars_follow_system(
+    player: Query<&Player>,
+    mut stars: Query<&mut Transform, With<SpaceStars>>,
+) {
+    let Ok(p) = player.single() else { return };
+    for mut tf in &mut stars {
+        tf.translation = p.pos;
+    }
 }
 
 #[derive(Component)]
@@ -1149,6 +1258,7 @@ pub fn visitor_system(
     }
 
     let station = Vec3::from(game.galaxy.station);
+    let seed = game.galaxy.seed;
     for (entity, mut visitor, mut transform) in &mut visitors {
         match visitor.phase {
             VisitorPhase::Cruise => {
@@ -1171,13 +1281,11 @@ pub fn visitor_system(
                     if let Some(pad) = free.filter(|_| rng.next() < 0.65) {
                         traffic.pads[pad] = Some(entity);
                         visitor.pad = Some(pad);
-                        let pad_top = crate::station::visitor_pad_world(station, pad, 3.0);
+                        let rest = crate::station::visitor_pad_world(station, pad, 3.0, seed);
                         visitor.path = vec![
-                            station + Vec3::new(0.0, 12.0, 170.0),
-                            station + Vec3::new(0.0, 10.0, 79.0),
-                            station + Vec3::new(0.0, 12.0, 44.0),
-                            pad_top + Vec3::Y * 7.0,
-                            pad_top,
+                            rest + Vec3::Y * 22.0,
+                            rest + Vec3::Y * 4.0,
+                            rest,
                         ];
                         visitor.path_index = 0;
                         visitor.phase = VisitorPhase::DockIn;
@@ -1210,12 +1318,10 @@ pub fn visitor_system(
                 );
                 if visitor.timer <= 0.0 {
                     let pad = visitor.pad.unwrap_or(0);
-                    let pad_top = crate::station::visitor_pad_world(station, pad, 3.0);
+                    let rest = crate::station::visitor_pad_world(station, pad, 3.0, seed);
                     visitor.path = vec![
-                        pad_top + Vec3::Y * 7.0,
-                        station + Vec3::new(0.0, 12.0, 44.0),
-                        station + Vec3::new(0.0, 10.0, 79.0),
-                        station + Vec3::new(0.0, 12.0, 190.0),
+                        rest + Vec3::Y * 22.0,
+                        station + Vec3::new(0.0, 60.0, 220.0),
                     ];
                     visitor.path_index = 0;
                     visitor.phase = VisitorPhase::DockOut;
@@ -1655,47 +1761,59 @@ pub fn spawn_external_ship(
     cls: &ShipClass,
     model: Option<&str>,
 ) -> (Entity, Vec<Entity>) {
+    // 外部模型朝向修正（运行时 Transform，不改模型文件）。
+    // 游戏约定 yaw=0 时机头朝 -Z（ship_forward = Quat::YXZ(yaw,pitch,0) * NEG_Z）。
+    // 已实机确认：
+    //   space_ship_c：场景空间原始姿态 = 机头朝 +Z、机腹朝 -Y（水平）。
+    //     实测（仅 Rx+90° 时）船尾在上、船腹在前 → 只需绕 Y 转 180°：
+    //     Quat::from_rotation_y(PI)，机头即朝 -Z，机腹仍朝下。
+    // 待实机确认：
+    //   space_ship_b / space_ship_torb / unsa_destroyer 长轴在 X → 绕 Y ±90°（当前填 +90°）；
+    //   supermatic_sky_cruiser 长轴在 Z → 只需检查是否倒着飞（需要时改 from_rotation_y(PI)）。
+    // 朝向不对时：把 90° 改成 -90°（FRAC_PI_2 → -FRAC_PI_2），或补/换 180°（from_rotation_y(PI)）。
     let (path, scale, model_rotation) = match model {
         Some("ship_striker") => (
             "models/external/ships/space_ship_torb/scene.gltf",
             0.18,
-            Quat::IDENTITY,
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
         ),
         Some("ship_dispatcher") => (
             "models/external/ships/space_ship_b/scene.gltf",
             1.0,
-            Quat::IDENTITY,
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
         ),
         Some("ship_insurgent") => (
             "models/external/ships/supermatic_sky_cruiser/scene.gltf",
             1.1,
-            Quat::IDENTITY,
+            Quat::IDENTITY, // 长轴已在 Z；若倒着飞改为 from_rotation_y(PI)
         ),
         Some("ship") => (
             "models/external/ships/space_ship_c/scene.gltf",
             0.45,
-            Quat::IDENTITY,
+            // 已实机确认：机头朝 +Z、机腹朝下 → 绕 Y 转 180° 使机头朝 -Z。
+            Quat::from_rotation_y(std::f32::consts::PI),
         ),
         _ => match cls.key {
             "S" => (
                 "models/external/ships/unsa_destroyer/scene.gltf",
                 0.00028,
-                Quat::IDENTITY,
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
             ),
             "A" => (
                 "models/external/ships/supermatic_sky_cruiser/scene.gltf",
                 1.1,
-                Quat::IDENTITY,
+                Quat::IDENTITY, // 同 ship_insurgent
             ),
             "B" => (
                 "models/external/ships/space_ship_b/scene.gltf",
                 1.0,
-                Quat::IDENTITY,
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
             ),
             _ => (
                 "models/external/ships/space_ship_c/scene.gltf",
                 0.45,
-                Quat::IDENTITY,
+                // 已实机确认：绕 Y 转 180°（与 ship 相同）。
+                Quat::from_rotation_y(std::f32::consts::PI),
             ),
         },
     };
@@ -1860,7 +1978,12 @@ pub fn spawn_space_scene(
     let star_mesh = meshes.add(Cuboid::new(1.4, 1.4, 1.4));
     let mut rnd = crate::rng::Rng::new(777);
     let stars_root = commands
-        .spawn((Transform::IDENTITY, Visibility::default(), crate::InGame))
+        .spawn((
+            Transform::IDENTITY,
+            Visibility::default(),
+            SpaceStars,
+            crate::InGame,
+        ))
         .id();
     for _ in 0..400 {
         let mut v = Vec3::new(
@@ -1922,46 +2045,75 @@ pub fn spawn_space_scene(
     // 星球群
     let mut planets = Vec::new();
     for pd in &galaxy.planets {
-        // 当前星球：采样真实体素地形；其他星球：程序化回退
-        let sample_world = if pd.id == current_planet { world } else { None };
-        let tex = planet_texture(images, pd.biome, 1000 + pd.id as u32 * 137, sample_world);
-        // 星球淡入（出大气/跃迁抵达时球面 0→1 平滑出现，避免贴图瞬间突变）
-        let mat = mats.add(StandardMaterial {
-            base_color_texture: Some(tex),
-            base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        });
-        let root = commands
-            .spawn((
-                Mesh3d(meshes.add(Sphere::new(pd.radius))),
-                MeshMaterial3d(mat.clone()),
-                Transform::from_translation(Vec3::from(pd.pos)),
-                SphereFade {
-                    mat: mat.clone(),
-                    t: 0.0,
-                },
-                crate::InGame,
-            ))
-            .id();
         let b = data::biome_by_key(pd.biome);
-        let atmo = commands
-            .spawn((
-                Mesh3d(meshes.add(Sphere::new(pd.radius * 1.37))),
-                MeshMaterial3d(mats.add(StandardMaterial {
-                    base_color: Color::srgba(b.sky.0, b.sky.1, b.sky.2, 0.16),
-                    unlit: true,
-                    alpha_mode: AlphaMode::Add,
-                    cull_mode: None,
-                    ..default()
-                })),
-                Transform::default(),
-                crate::InGame,
-            ))
-            .id();
-        commands.entity(root).add_child(atmo);
+        // 起源星（家园星系 id 0「始源星」）：太空侧使用地球模型 assets/models/earth，
+        // 其余行星保持程序化贴图球。模型实测半径约 6.47，缩放到行星半径。
+        let is_origin = galaxy.seed == data::HOME_GALAXY_SEED && pd.id == 0;
+        let root = if is_origin {
+            commands
+                .spawn((
+                    WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(
+                        "models/earth/scene.gltf",
+                    ))),
+                    Transform::from_translation(Vec3::from(pd.pos))
+                        .with_scale(Vec3::splat(pd.radius / 6.4726)),
+                    crate::InGame,
+                ))
+                .id()
+        } else {
+            // 当前星球：采样真实体素地形；其他星球：程序化回退
+            let sample_world = if pd.id == current_planet { world } else { None };
+            let tex = planet_texture(images, pd.biome, 1000 + pd.id as u32 * 137, sample_world);
+            // 星球淡入（出大气/跃迁抵达时球面 0→1 平滑出现，避免贴图瞬间突变）
+            let mat = mats.add(StandardMaterial {
+                base_color_texture: Some(tex),
+                base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
+                perceptual_roughness: 1.0,
+                metallic: 0.0,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+            let root = commands
+                .spawn((
+                    Mesh3d(meshes.add(Sphere::new(pd.radius))),
+                    MeshMaterial3d(mat.clone()),
+                    Transform::from_translation(Vec3::from(pd.pos)),
+                    SphereFade {
+                        mat: mat.clone(),
+                        t: 0.0,
+                    },
+                    crate::InGame,
+                ))
+                .id();
+            root
+        };
+        // 起源星地球模型自带云层壳；atmo 若作为子实体挂在带 23 倍缩放的
+        // 模型实体下会被等比放大成巨型壳，因此起源星跳过（其他行星根实体
+        // 无缩放，正常生成 ×1.37 的淡光晕）。
+        let atmo = if is_origin {
+            None
+        } else {
+            Some(
+                commands
+                    .spawn((
+                        Mesh3d(meshes.add(Sphere::new(pd.radius * 1.37))),
+                        MeshMaterial3d(mats.add(StandardMaterial {
+                            // 太空侧大气更透明：仅勉强可见
+                            base_color: Color::srgba(b.sky.0, b.sky.1, b.sky.2, 0.05),
+                            unlit: true,
+                            alpha_mode: AlphaMode::Add,
+                            cull_mode: None,
+                            ..default()
+                        })),
+                        Transform::default(),
+                        crate::InGame,
+                    ))
+                    .id(),
+            )
+        };
+        if let Some(a) = atmo {
+            commands.entity(root).add_child(a);
+        }
         planets.push(PlanetVis {
             def: pd.clone(),
             entity: root,
@@ -2020,6 +2172,7 @@ pub fn spawn_space_scene(
         sun_glow,
         asteroids,
         dir_light,
+        galaxy_seed: galaxy.seed,
     }
 }
 
@@ -2097,6 +2250,7 @@ pub fn despawn_space_scene(
 
 pub fn space_input_system(
     mouse: Res<AccumulatedMouseMotion>,
+    mouse_btn: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut input: ResMut<SpaceInput>,
     mode: Res<FlightMode>,
@@ -2114,7 +2268,12 @@ pub fn space_input_system(
         input.pulse = false;
         return;
     }
-    let delta = mouse.delta;
+    // 右键自由视角：鼠标只驱动镜头（ShipCam），不触发飞船偏航/俯仰
+    let delta = if mouse_btn.pressed(MouseButton::Right) {
+        Vec2::ZERO
+    } else {
+        mouse.delta
+    };
     if delta.x.abs() < 200.0 && delta.y.abs() < 200.0 {
         input.mouse_dx += delta.x;
         input.mouse_dy += delta.y;
@@ -2149,10 +2308,14 @@ fn ship_recall_target(world: &VoxelWorld, player: &Player) -> Option<Vec3> {
             let candidate = player.pos + direction * radius;
             let x = candidate.x.floor() as i32;
             let z = candidate.z.floor() as i32;
-            let Some(ground_y) = world.creature_ground_at(x, z) else {
+            let Some(_) = world.creature_ground_at(x, z) else {
                 continue;
             };
-            let pos = Vec3::new(x as f32 + 0.5, parked_ship_y(ground_y), z as f32 + 0.5);
+            let pos = Vec3::new(
+                x as f32 + 0.5,
+                parked_y_at(world, x as f32 + 0.5, z as f32 + 0.5),
+                z as f32 + 0.5,
+            );
             if pos.xz().distance(player.pos.xz()) >= SHIP_BOX[0] + 2.0 {
                 return Some(pos);
             }
@@ -2195,13 +2358,12 @@ pub fn ship_recall_system(
         player.toast("附近没有安全的飞船降落位置".to_string());
         return;
     };
-    let from_y = world.top_at(
-        game.ship_pos.x.floor() as i32,
-        game.ship_pos.z.floor() as i32,
-    );
     let from = Vec3::new(
         game.ship_pos.x,
-        game.ship_pos.y.max(parked_ship_y(from_y)),
+        game
+            .ship_pos
+            .y
+            .max(parked_y_at(&world, game.ship_pos.x, game.ship_pos.z)),
         game.ship_pos.z,
     );
     recall.from = from;
@@ -2464,7 +2626,8 @@ pub fn start_atmo(from_space: bool, ship: &mut ShipState, game: &SpaceGame, worl
         ship.pitch = -0.18;
         ship.speed = 24.0;
     } else {
-        ship.pos = game.ship_pos;
+        // 起飞时抬高 1 单位：避免停在地形凹陷/贴地时，起飞瞬间刮地卡住飞不起来
+        ship.pos = game.ship_pos + Vec3::Y * 1.0;
         ship.yaw = ship.board_yaw;
         ship.pitch = 0.42;
         ship.speed = 14.0;
@@ -2668,7 +2831,7 @@ pub fn atmo_land_trigger_system(
         crate::audio::play(&mut commands, sfx.error.clone(), 0.5, None);
         return;
     }
-    let landing_y = parked_ship_y(gy);
+    let landing_y = parked_y_at(&world, ship.pos.x, ship.pos.z);
     land.t = 0.0;
     land.from = ship.pos;
     land.to = Vec3::new(ship.pos.x, landing_y, ship.pos.z);
@@ -2687,6 +2850,7 @@ pub fn atmo_system(
     settings: Res<save::Settings>,
     mut player: Query<&mut Player>,
     mut flight_cam: ResMut<FlightCamera>,
+    cam: Res<ShipCam>,
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
 ) {
@@ -2725,23 +2889,27 @@ pub fn atmo_system(
         }
     }
     // 鼠标侧倾（视觉银行）存入真实 roll —— 模型反向携带（JS：Euler z = -atmo.roll）
-    let target_roll = input.mouse_dx * -0.04 * settings.mouse_sens;
+    let bank_in = if input.mouse_dx.abs() < 0.6 { 0.0 } else { input.mouse_dx };
+    let target_roll = bank_in * -0.04 * settings.mouse_sens;
     ship.roll += (target_roll - ship.roll) * (dt * 5.0).min(1.0);
     // A/D 滚转微调缓慢自动回正（转向时加速配平）
     let steer = input.mouse_dx.abs() + input.mouse_dy.abs();
     decay_cam_roll(&mut ship.cam_roll, dt, steer, true);
     input.mouse_dx = 0.0;
     input.mouse_dy = 0.0;
-    // 速度
+    // 速度：油门→满速；刹车→0（可完全停下）；松键→缓速滑行至停止
     let max_s = if input.boost { 55.0 } else { 30.0 };
-    let target = if input.thrust {
-        max_s
+    let (target, k) = if input.thrust {
+        (max_s, 2.2)
     } else if input.brake {
-        3.0
+        (0.0, 3.0)
     } else {
-        ship.speed.min(max_s)
+        (0.0, 0.5)
     };
-    ship.speed += (target - ship.speed) * (dt * 2.2).min(1.0);
+    ship.speed += (target - ship.speed) * (dt * k).min(1.0);
+    if target == 0.0 && ship.speed.abs() < 0.06 {
+        ship.speed = 0.0;
+    }
     // 位移：细分步进防高速穿墙（单步 ≤ 0.5 格）。船体 AABB 半宽 1.6/1.1/1.9，
     // 高速（Boost 110 格/秒）单帧位移可达 1.8+ 格，终点碰撞检测会跳过 1 格厚的墙。
     let fwd = ship_forward(ship.yaw, ship.pitch);
@@ -2767,8 +2935,7 @@ pub fn atmo_system(
     ship_voxel_collision(&mut ship, &world, dt);
     // 相机：携带 A/D 滚转微调（模型与镜头整体横滚，缓慢自动回正——JS camQ * trim 同口径）
     let cam_q = ship_quat(ship.yaw, ship.pitch, 0.0) * Quat::from_rotation_z(ship.cam_roll);
-    let off = cam_q * Vec3::new(0.0, 3.2, 11.0);
-    let mut cam_pos = ship.pos + off;
+    let (mut cam_pos, cam_rot) = ship_camera_pose(&cam, ship.pos, cam_q);
     if ship.reentry_t > 0.0 {
         ship.reentry_t -= dt;
         let shake = ship.reentry_t.min(1.0) * 0.35;
@@ -2777,7 +2944,7 @@ pub fn atmo_system(
         cam_pos.y +=
             (crate::rng::Rng::new((time.elapsed_secs() * 997.0) as u32).next() - 0.5) * shake;
     }
-    *flight_cam = FlightCamera::set(cam_pos, cam_q, 72.0 + ship.speed * 0.15);
+    *flight_cam = FlightCamera::set(cam_pos, cam_rot, 72.0 + ship.speed * 0.15);
     // 玩家镜像（HUD/星空因子）
     if let Ok(mut p) = player.single_mut() {
         p.pos = ship.pos;
@@ -2847,6 +3014,7 @@ pub struct SpaceSysParams<'w, 's> {
     pub sfx: Res<'w, crate::audio::Sfx>,
     pub warp_anim: ResMut<'w, WarpAnim>,
     pub station_defense: ResMut<'w, crate::station::StationDefense>,
+    pub ship_cam: Res<'w, ShipCam>,
 }
 
 pub fn space_system(mut p: SpaceSysParams) {
@@ -2854,6 +3022,8 @@ pub fn space_system(mut p: SpaceSysParams) {
         return;
     }
     let dt = p.time.delta_secs();
+    // 离站冷却：避免刚离站又撞进泊入区被拉回来
+    p.game.dock_cd = (p.game.dock_cd - dt).max(0.0);
     let sens = p.settings.mouse_sens * 0.0022;
     // 姿态：NMS 式——鼠标俯仰/偏航 + A/D 绕前进轴滚转，均作用于机体本地轴
     let d_roll = (if p.input.roll_left {
@@ -2875,8 +3045,10 @@ pub fn space_system(mut p: SpaceSysParams) {
     p.ship.yaw = ny;
     p.ship.roll = nr;
     // 视觉侧倾（NMS 式转向银行）与换系滚转微调 —— 模型/相机整体携带（JS Space.update 同口径）
+    // 鼠标抖动死区：微小移动不触发侧倾，避免飞行时船体轻微摆动（抖）
+    let bank_in = if p.input.mouse_dx.abs() < 0.6 { 0.0 } else { p.input.mouse_dx };
     p.ship.vis_bank +=
-        (p.input.mouse_dx * -0.045 * p.settings.mouse_sens - p.ship.vis_bank) * (dt * 5.0).min(1.0);
+        (bank_in * -0.045 * p.settings.mouse_sens - p.ship.vis_bank) * (dt * 5.0).min(1.0);
     let steer = p.input.mouse_dx.abs() + p.input.mouse_dy.abs();
     decay_cam_roll(&mut p.ship.cam_roll, dt, steer, false);
     p.input.mouse_dx = 0.0;
@@ -2887,16 +3059,14 @@ pub fn space_system(mut p: SpaceSysParams) {
     } else {
         MAX_SPEED
     };
-    let mut target = 0.0;
-    if p.input.thrust {
-        target = max_s;
-    }
-    if p.input.brake {
-        target = 4.0;
-    }
-    if !p.input.thrust && !p.input.brake {
-        target = p.ship.speed.min(max_s);
-    }
+    // 油门→满速；刹车→0（可完全停下）；松键→缓速滑行至停止
+    let (mut target, k) = if p.input.thrust {
+        (max_s, 2.5)
+    } else if p.input.brake {
+        (0.0, 3.2)
+    } else {
+        (0.0, 0.55)
+    };
     // 脉冲引擎
     let mut tritium_use = 0;
     if p.input.pulse {
@@ -2929,7 +3099,11 @@ pub fn space_system(mut p: SpaceSysParams) {
         pl.inv.remove_item("tritium", tritium_use);
     }
     p.ship.speed +=
-        (target - p.ship.speed) * (dt * (if p.ship.pulsing { 1.2 } else { 2.5 })).min(1.0);
+        (target - p.ship.speed) * (dt * (if p.ship.pulsing { 1.2 } else { k })).min(1.0);
+    // 微小速度直接归零：彻底停稳，消除残余漂移与位置抖动
+    if target == 0.0 && p.ship.speed.abs() < 0.06 {
+        p.ship.speed = 0.0;
+    }
     // 移动
     let fwd = ship_forward(p.ship.yaw, p.ship.pitch);
     let spd = p.ship.speed;
@@ -2939,6 +3113,7 @@ pub fn space_system(mut p: SpaceSysParams) {
             &mut p.ship.pos,
             sc.station_pos,
             p.station_defense.active(),
+            p.game.galaxy.seed,
         );
         if station_hit {
             // The next frame must not immediately re-enter the same wall or
@@ -2977,10 +3152,10 @@ pub fn space_system(mut p: SpaceSysParams) {
     // 相机（真实滚转 + 转向银行 + 换系滚转微调整体携带，与 JS Space.update 一致）
     let ship_q = ship_quat(p.ship.yaw, p.ship.pitch, p.ship.roll)
         * Quat::from_rotation_z(p.ship.cam_roll + p.ship.vis_bank);
-    let cam_off = ship_q * Vec3::new(0.0, 3.2, 11.0);
+    let (cam_pos, cam_rot) = ship_camera_pose(&p.ship_cam, p.ship.pos, ship_q);
     let target_fov =
         75.0 - 5.0 + (p.ship.speed / PULSE_SPEED) * 40.0 + if p.input.boost { 6.0 } else { 0.0 };
-    *p.flight_cam = FlightCamera::set(p.ship.pos + cam_off, ship_q, target_fov);
+    *p.flight_cam = FlightCamera::set(cam_pos, cam_rot, target_fov);
     if let Ok(mut pl) = p.player.single_mut() {
         pl.pos = p.ship.pos;
     }
@@ -3013,9 +3188,10 @@ pub fn space_system(mut p: SpaceSysParams) {
         );
         return;
     }
-    // 空间站自动泊入（飞入泊入区即触发，与 JS Station.tryBegin 一致）
+    // 空间站自动泊入（靠近站顶即触发，无需进入机库）
     if let Some(sc) = p.scene.as_ref()
-        && crate::station::in_dock_zone(&p.ship.pos, sc.station_pos)
+        && p.game.dock_cd <= 0.0
+        && crate::station::station_dock_zone(&p.ship.pos, sc.station_pos, p.game.galaxy.seed)
     {
         if p.station_defense.active() {
             if p.station_defense.warn_cd <= 0.0 {
@@ -3029,7 +3205,15 @@ pub fn space_system(mut p: SpaceSysParams) {
             }
             return;
         }
-        let st = crate::station::begin_dock(&mut p.next_mode, &p.ship.pos, sc.station_pos);
+        let st = crate::station::begin_dock(
+            &mut p.next_mode,
+            &p.ship.pos,
+            p.ship.yaw,
+            sc.station_pos,
+            p.game.galaxy.seed,
+        );
+        // 泊入后 8 秒内不重复触发（离站后飞行缓冲）
+        p.game.dock_cd = 8.0;
         p.commands.insert_resource(st);
         crate::audio::play(&mut p.commands, p.sfx.click.clone(), 0.6, None);
         return;
@@ -3610,6 +3794,7 @@ pub fn ship_parked_system(
     mut ship_state: ResMut<ShipState>,
     mut recall: ResMut<ShipRecall>,
     world: Option<Res<VoxelWorld>>,
+    mut last_check: Local<Vec3>,
 ) {
     if *mode != FlightMode::Planet && *mode != FlightMode::Seated {
         return;
@@ -3636,16 +3821,16 @@ pub fn ship_parked_system(
     ship_state.speed = 0.0;
     ship_state.pulsing = false;
     if let Some(w) = world {
-        let gy = w.top_at(
-            game.ship_pos.x.floor() as i32,
-            game.ship_pos.z.floor() as i32,
-        );
-        let safe_y = parked_ship_y(gy);
-        if game.ship_pos.y < safe_y {
-            // 修复旧存档/旧版本落点过低的问题，并同步游戏状态；只修正
-            // 下陷位置，不强行抬高合法的发射平台或特殊停泊点。
-            game.ship_pos.y = safe_y;
-            ship_state.pos.y = safe_y;
+        // 位置未变化时复用上次结果（top_at 需整列扫描，避免每帧重复计算）
+        if last_check.distance_squared(game.ship_pos) > 0.25 {
+            let safe_y = parked_y_at(&w, game.ship_pos.x, game.ship_pos.z);
+            if game.ship_pos.y < safe_y {
+                // 修复旧存档/旧版本落点过低的问题，并同步游戏状态；只修正
+                // 下陷位置，不强行抬高合法的发射平台或特殊停泊点。
+                game.ship_pos.y = safe_y;
+                ship_state.pos.y = safe_y;
+            }
+            *last_check = game.ship_pos;
         }
     }
 }
@@ -3658,13 +3843,14 @@ pub fn spawn_initial_ship(
     mats: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     world: &VoxelWorld,
+    anchor: Vec3,
     ship_data: &ShipData,
 ) -> (Entity, Vec<Entity>, Vec3) {
-    let spawn = world.find_spawn(96, 96);
+    // 船放在玩家出生点旁边，避免独立 find_spawn 与玩家存档位置脱节
     let pos = Vec3::new(
-        spawn.x + 4.0,
-        parked_ship_y(world.top_at((spawn.x + 4.0) as i32, (spawn.z + 4.0) as i32)),
-        spawn.z + 4.0,
+        anchor.x + 4.0,
+        parked_y_at(world, anchor.x + 4.0, anchor.z + 4.0),
+        anchor.z + 4.0,
     );
     let cls = data::ship_class_by_key(&ship_data.cls);
     let (e, flames) = spawn_external_ship(

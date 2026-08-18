@@ -640,7 +640,14 @@ impl WorldGen {
 
     /// RLE decode into data; returns false on corruption/length mismatch.
     pub fn rle_decode(data: &mut [u8], pairs: &[u16]) -> bool {
-        if !pairs.len().is_multiple_of(2) || pairs.chunks_exact(2).any(|p| p[1] > u8::MAX as u16) {
+        if !pairs.len().is_multiple_of(2)
+            || pairs.chunks_exact(2).any(|p| {
+                p[1] > u8::MAX as u16
+                    || !crate::data::BLOCKS
+                        .iter()
+                        .any(|block| block.id == p[1] as u8)
+            })
+        {
             return false;
         }
         let total: u64 = pairs.iter().step_by(2).map(|&r| r as u64).sum();
@@ -1117,6 +1124,11 @@ impl World {
         if !(0..WORLD_H).contains(&y) {
             return;
         }
+        // Unknown IDs are never valid voxel data. Network packets and old
+        // saves both pass through this boundary, so reject them here too.
+        if data::block_by_id(id).id != id {
+            return;
+        }
         let cx = x.div_euclid(CHUNK);
         let cz = z.div_euclid(CHUNK);
         self.ensure_chunk(cx, cz);
@@ -1124,6 +1136,9 @@ impl World {
         let lx = x.rem_euclid(CHUNK);
         let lz = z.rem_euclid(CHUNK);
         let c = self.chunks.get_mut(&key).unwrap();
+        if c.data[lidx(lx, y, lz)] == id {
+            return;
+        }
         c.data[lidx(lx, y, lz)] = id;
         c.modified = true;
         c.need_save = true;
@@ -1214,6 +1229,16 @@ impl World {
         dir: Vec3,
         max_dist: f32,
     ) -> Option<([i32; 3], [i32; 3], f32)> {
+        if !origin.is_finite()
+            || !dir.is_finite()
+            || origin.abs().max_element() > 1_000_000.0
+            || dir.length_squared() < 1e-12
+            || !max_dist.is_finite()
+            || max_dist <= 0.0
+        {
+            return None;
+        }
+        let dir = dir.normalize();
         let mut x = origin.x.floor() as i32;
         let mut y = origin.y.floor() as i32;
         let mut z = origin.z.floor() as i32;
@@ -1784,6 +1809,20 @@ mod tests {
         let mut dec = [0u8; CHUNK_CELLS];
         assert!(WorldGen::rle_decode(&mut dec, &enc));
         assert_eq!(data, dec);
+    }
+
+    #[test]
+    fn rle_rejects_unknown_block_ids() {
+        let mut data = [0u8; CHUNK_CELLS];
+        assert!(!WorldGen::rle_decode(&mut data, &[CHUNK_CELLS as u16, 255]));
+    }
+
+    #[test]
+    fn raycast_rejects_invalid_input() {
+        let world = World::new(1, "lush", 3);
+        assert!(world.raycast(Vec3::ZERO, Vec3::ZERO, 10.0).is_none());
+        assert!(world.raycast(Vec3::NAN, Vec3::Z, 10.0).is_none());
+        assert!(world.raycast(Vec3::ZERO, Vec3::Z, f32::NAN).is_none());
     }
 
     #[test]

@@ -1105,7 +1105,9 @@ fn disembark(st: &mut StationState, player: &mut Query<&mut Player>) {
         let term = st.station_pos + Vec3::from(DOCK_TERMINAL);
         p.yaw = (-(term.x - sx)).atan2(-(term.z - sz));
         p.pitch = 0.0;
-        p.pos = st.walk.as_ref().unwrap().pos;
+        if let Some(walk) = st.walk.as_ref() {
+            p.pos = walk.pos;
+        }
         p.vel = Vec3::ZERO;
     }
     st.phase = StationPhase::Walk;

@@ -557,29 +557,54 @@ impl MachineState {
     }
 
     pub fn from_save(kind: MachineKind, d: &MachineDataSave) -> Self {
+        let clean_slot = |slot: &Option<Slot>| {
+            slot.as_ref().and_then(|slot| {
+                let max = data::item_by_key(&slot.item)?.stack;
+                (slot.n > 0).then(|| Slot {
+                    item: slot.item.clone(),
+                    n: slot.n.clamp(1, max),
+                })
+            })
+        };
+        let clean_slots = |slots: &[Option<Slot>], max_len: usize| {
+            slots
+                .iter()
+                .take(max_len)
+                .map(clean_slot)
+                .collect::<Vec<_>>()
+        };
+        let finite = |value: f32, fallback: f32, max: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, max)
+            } else {
+                fallback
+            }
+        };
         match kind {
             MachineKind::Furnace => Self::Furnace(FurnaceState {
-                input: d.input.clone(),
-                fuel: d.fuel.clone(),
-                output: d.output.clone(),
-                prog: d.prog,
-                burn: d.burn,
-                burn_max: d.burn_max,
+                input: clean_slot(&d.input),
+                fuel: clean_slot(&d.fuel),
+                output: clean_slot(&d.output),
+                prog: finite(d.prog, 0.0, 1.0),
+                burn: finite(d.burn, 0.0, 86_400.0),
+                burn_max: finite(d.burn_max, 0.0, 86_400.0),
                 recipe: None, // 配方由输入物品自动匹配恢复
                 on: false,
             }),
             MachineKind::Miner => Self::Miner(MinerState {
-                output: d.output.clone(),
-                prog: d.prog,
-                deposit: d.deposit,
+                output: clean_slot(&d.output),
+                prog: finite(d.prog, 0.0, 1.0),
+                deposit: d.deposit.clamp(0, 300),
             }),
             MachineKind::Belt => Self::Belt(BeltState {
                 items: d
                     .items
                     .iter()
+                    .take(128)
+                    .filter(|(item, t)| data::item_by_key(item).is_some() && t.is_finite())
                     .map(|(i, t)| BeltItem {
                         item: i.clone(),
-                        t: *t,
+                        t: t.clamp(0.0, 1.0),
                     })
                     .collect(),
             }),
@@ -589,41 +614,58 @@ impl MachineState {
                     .recipe
                     .as_deref()
                     .and_then(|rid| data::RECIPES.iter().find(|r| r.id == rid).map(|r| r.id)),
-                input: d.input_map.clone(),
-                output: d.output.clone(),
-                prog: d.prog,
+                input: d
+                    .input_map
+                    .iter()
+                    .filter(|(item, n)| data::item_by_key(item).is_some() && **n > 0)
+                    .map(|(item, n)| (item.clone(), (*n).min(1_000_000)))
+                    .collect(),
+                output: clean_slot(&d.output),
+                prog: finite(d.prog, 0.0, 1.0),
             }),
             MachineKind::Chest => Self::Chest(ChestState {
                 slots: if d.slots.is_empty() {
                     vec![None; 24]
                 } else {
-                    d.slots.clone()
+                    clean_slots(&d.slots, 24)
                 },
             }),
-            MachineKind::Reactor => Self::Reactor(ReactorState { fuel: d.fuel_s }),
+            MachineKind::Reactor => Self::Reactor(ReactorState {
+                fuel: finite(d.fuel_s, 0.0, 86_400.0),
+            }),
             MachineKind::Burner => Self::Burner(BurnerState {
-                fuel: d.fuel.clone(),
-                burn: d.burn,
-                burn_max: d.burn_max,
+                fuel: clean_slot(&d.fuel),
+                burn: finite(d.burn, 0.0, 86_400.0),
+                burn_max: finite(d.burn_max, 0.0, 86_400.0),
             }),
             MachineKind::Beacon => Self::Beacon(BeaconState {
                 label: d.label.clone().unwrap_or_else(|| "标记点".into()),
                 gal: d.gal,
             }),
             MachineKind::Lumberbot => Self::Lumberbot(LumberbotState {
-                cargo: d.cargo,
-                pos: d.bot_pos.unwrap_or_default(),
+                cargo: d.cargo.clamp(0, 40),
+                pos: d
+                    .bot_pos
+                    .filter(|pos| pos.iter().all(|v| v.is_finite()))
+                    .map(|pos| {
+                        [
+                            pos[0].clamp(-1_000_000.0, 1_000_000.0),
+                            pos[1].clamp(-256.0, 512.0),
+                            pos[2].clamp(-1_000_000.0, 1_000_000.0),
+                        ]
+                    })
+                    .unwrap_or_default(),
                 ..default()
             }),
             MachineKind::Collector => Self::Collector(CollectorState {
                 slots: if d.slots.is_empty() {
                     vec![None; 12]
                 } else {
-                    d.slots.clone()
+                    clean_slots(&d.slots, 12)
                 },
             }),
             MachineKind::Medbay => Self::Medbay(MedbayState {
-                heal_acc: d.heal_acc,
+                heal_acc: finite(d.heal_acc, 0.0, 86_400.0),
             }),
             _ => Self::Plain,
         }
@@ -1102,7 +1144,7 @@ fn crafter_tick(
 
 fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
     m.active = !b.items.is_empty();
-    b.items.sort_by(|a, c| c.t.partial_cmp(&a.t).unwrap());
+    b.items.sort_by(|a, c| c.t.total_cmp(&a.t));
     let mut i = 0;
     while i < b.items.len() {
         let max_t = if i == 0 {
@@ -1742,6 +1784,12 @@ pub fn deserialize_machines(
 ) -> Vec<(Entity, MachineSave)> {
     let mut out = Vec::new();
     for s in saves {
+        if s.y < 0
+            || s.y >= data::WORLD_H
+            || MachineKind::from_block_key(&s.kind) == MachineKind::Other
+        {
+            continue;
+        }
         let kind = MachineKind::from_block_key(&s.kind);
         let e = commands
             .spawn((
@@ -1870,6 +1918,34 @@ mod tests {
                 (MachineState::Beacon(a), MachineState::Beacon(b)) => assert_eq!(a.label, b.label),
                 _ => panic!("roundtrip kind mismatch"),
             }
+        }
+    }
+
+    #[test]
+    fn machine_state_save_is_sanitized() {
+        let data = MachineDataSave {
+            prog: f32::NAN,
+            burn: f32::INFINITY,
+            items: vec![("not-an-item".into(), f32::NAN), ("iron_ore".into(), 4.0)],
+            slots: vec![Some(Slot {
+                item: "not-an-item".into(),
+                n: i32::MAX,
+            })],
+            ..default()
+        };
+        match MachineState::from_save(MachineKind::Belt, &data) {
+            MachineState::Belt(b) => {
+                assert_eq!(b.items.len(), 1);
+                assert_eq!(b.items[0].item, "iron_ore");
+            }
+            _ => panic!("expected belt state"),
+        }
+        match MachineState::from_save(MachineKind::Furnace, &data) {
+            MachineState::Furnace(f) => {
+                assert_eq!(f.prog, 0.0);
+                assert_eq!(f.burn, 0.0);
+            }
+            _ => panic!("expected furnace state"),
         }
     }
 

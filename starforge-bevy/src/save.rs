@@ -362,7 +362,23 @@ pub fn save_char(
 }
 
 pub fn load_char(name: &str) -> Option<CharData> {
-    read_json(&char_path(name))
+    let mut data: CharData = read_json(&char_path(name))?;
+    data.hot_idx = data.hot_idx.clamp(-1, 8);
+    data.inv.truncate(crate::inventory::INV_SLOTS);
+    data.player_ship.inv.truncate(12);
+    data.ship_garage.truncate(64);
+    if let Some((_, progress)) = &mut data.researching {
+        if !progress.is_finite() {
+            *progress = 0.0;
+        }
+        *progress = progress.clamp(0.0, 1_000_000.0);
+    }
+    data.play_time = if data.play_time.is_finite() {
+        data.play_time.max(0.0)
+    } else {
+        0.0
+    };
+    Some(data)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -434,7 +450,44 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
 }
 
 pub fn load_world(name: &str) -> Option<WorldData> {
-    read_json(&world_path(name))
+    let mut data: WorldData = read_json(&world_path(name))?;
+    // A valid chunk RLE contains at most two entries per voxel. Rejecting
+    // malformed entries here prevents a corrupt save from being retained and
+    // re-parsed forever during streaming.
+    if data.mods.len() > 200_000 {
+        return None;
+    }
+    data.mods.retain(|key, pairs| {
+        let mut parts = key.split(',');
+        let valid_key = parts
+            .next()
+            .and_then(|x| x.parse::<i32>().ok())
+            .zip(parts.next().and_then(|z| z.parse::<i32>().ok()))
+            .is_some_and(|(x, z)| x.abs() <= 1_000_000 && z.abs() <= 1_000_000);
+        valid_key
+            && pairs.len()
+                <= crate::data::CHUNK as usize
+                    * crate::data::CHUNK as usize
+                    * crate::data::WORLD_H as usize
+                    * 2
+    });
+    data.day_t = if data.day_t.is_finite() {
+        data.day_t.rem_euclid(1.0)
+    } else {
+        0.0
+    };
+    data.galaxy_count = data.galaxy_count.clamp(1, 1024);
+    data.marks.truncate(4096);
+    data.flags = data.flags.into_iter().take(4096).collect();
+    data.market = data
+        .market
+        .into_iter()
+        .filter(|(_, value)| value.is_finite() && *value >= 0.0 && *value <= 1_000_000.0)
+        .take(4096)
+        .collect();
+    data.placed = data.placed.into_iter().take(4096).collect();
+    data.archives = data.archives.into_iter().take(256).collect();
+    Some(data)
 }
 
 pub fn list_worlds() -> Vec<String> {
@@ -464,12 +517,50 @@ fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
     match serde_json::to_string_pretty(data) {
-        Ok(json) => std::fs::write(path, json).is_ok(),
+        Ok(json) => {
+            let Some(parent) = path.parent() else {
+                return false;
+            };
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("save.json");
+            let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+            let result = (|| {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&tmp)?;
+                file.write_all(json.as_bytes())?;
+                file.sync_all()?;
+                match std::fs::rename(&tmp, path) {
+                    Ok(()) => Ok(()),
+                    Err(_) if path.exists() => {
+                        // Windows does not replace an existing file with
+                        // rename. The target is removed only after the fully
+                        // written temporary file is synced.
+                        std::fs::remove_file(path)?;
+                        std::fs::rename(&tmp, path)
+                    }
+                    Err(e) => Err(e),
+                }
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            result.is_ok()
+        }
         Err(_) => false,
     }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Option<T> {
+    const MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
+    if std::fs::metadata(path).ok()?.len() > MAX_SAVE_BYTES {
+        return None;
+    }
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -519,9 +610,33 @@ impl Default for Settings {
 }
 
 pub fn load_settings() -> Settings {
-    read_json(&saves_dir().join("settings.json")).unwrap_or_default()
+    let mut settings: Settings = read_json(&saves_dir().join("settings.json")).unwrap_or_default();
+    settings.view_dist = settings.view_dist.clamp(3, 32);
+    settings.mouse_sens = if settings.mouse_sens.is_finite() {
+        settings.mouse_sens.clamp(0.05, 5.0)
+    } else {
+        1.0
+    };
+    settings.volume = if settings.volume.is_finite() {
+        settings.volume.clamp(0.0, 1.0)
+    } else {
+        0.8
+    };
+    settings
 }
 
 pub fn save_settings(s: &Settings) -> bool {
-    write_json(&saves_dir().join("settings.json"), s)
+    let mut safe = s.clone();
+    safe.view_dist = safe.view_dist.clamp(3, 32);
+    safe.mouse_sens = if safe.mouse_sens.is_finite() {
+        safe.mouse_sens.clamp(0.05, 5.0)
+    } else {
+        1.0
+    };
+    safe.volume = if safe.volume.is_finite() {
+        safe.volume.clamp(0.0, 1.0)
+    } else {
+        0.8
+    };
+    write_json(&saves_dir().join("settings.json"), &safe)
 }

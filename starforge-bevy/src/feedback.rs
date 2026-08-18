@@ -74,14 +74,18 @@ pub fn spawn_block_burst(
             ..default()
         }));
     }
-    let shard_mesh = cache.shard_mesh.clone().expect("shard mesh initialized");
-    let flash_mesh = cache.flash_mesh.clone().expect("flash mesh initialized");
-    let shard_material = cache.shard_materials[palette]
-        .clone()
-        .expect("shard material initialized");
-    let flash_material = cache.flash_materials[palette]
-        .clone()
-        .expect("flash material initialized");
+    let Some(shard_mesh) = cache.shard_mesh.clone() else {
+        return;
+    };
+    let Some(flash_mesh) = cache.flash_mesh.clone() else {
+        return;
+    };
+    let Some(shard_material) = cache.shard_materials.get(palette).and_then(Clone::clone) else {
+        return;
+    };
+    let Some(flash_material) = cache.flash_materials.get(palette).and_then(Clone::clone) else {
+        return;
+    };
     commands.spawn((
         Mesh3d(flash_mesh),
         MeshMaterial3d(flash_material),

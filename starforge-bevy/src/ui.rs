@@ -290,7 +290,7 @@ pub fn hud_system(
     if ui.panel != Panel::None {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -1118,7 +1118,7 @@ pub fn inventory_panel_system(
     if ui_state.panel != Panel::Inventory {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -1618,7 +1618,7 @@ pub fn tech_panel_system(
     if ui_state.panel != Panel::Tech {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -1774,7 +1774,9 @@ pub fn tech_panel_system(
                         start = Some(t.id);
                     }
                 } else if in_research {
-                    let (_, prog) = research.active.as_ref().unwrap();
+                    let Some((_, prog)) = research.active.as_ref() else {
+                        return;
+                    };
                     painter.text(
                         rect.min + egui::vec2(38.0, 48.0),
                         egui::Align2::LEFT_TOP,
@@ -1797,7 +1799,9 @@ pub fn tech_panel_system(
         ui_state.panel = Panel::None;
     }
     if let Some(id) = start {
-        let tech = data::TECHS.iter().find(|t| t.id == id).unwrap();
+        let Some(tech) = data::TECHS.iter().find(|t| t.id == id) else {
+            return;
+        };
         if let Ok(mut p) = player.single_mut() {
             if p.inv.pay_items(tech.cost) {
                 research.active = Some((id.to_string(), 0.0));
@@ -1832,7 +1836,7 @@ pub fn machine_panel_system(
     };
     let kind = m.kind;
     let pos = m.pos;
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -2214,7 +2218,10 @@ pub fn machine_panel_system(
     let Ok(mut p) = player.single_mut() else {
         return;
     };
-    let mclone = q.get(e).map(|(m, _)| m.clone()).unwrap();
+    let Some(mclone) = q.get(e).ok().map(|(m, _)| m.clone()) else {
+        ui_state.panel = Panel::None;
+        return;
+    };
     let Ok((_m, mut st)) = q.get_mut(e) else {
         return;
     };
@@ -2222,7 +2229,7 @@ pub fn machine_panel_system(
         match a {
             MachinePanelAction::InsertFuel => {
                 if let Some(i) = ui_state.selected_inv
-                    && let Some(s) = p.inv.slots[i].clone()
+                    && let Some(s) = p.inv.slots.get(i).cloned().flatten()
                 {
                     if data::fuel_value(&s.item) > 0.0 {
                         if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
@@ -2236,7 +2243,7 @@ pub fn machine_panel_system(
             }
             MachinePanelAction::InsertInput => {
                 if let Some(i) = ui_state.selected_inv
-                    && let Some(s) = p.inv.slots[i].clone()
+                    && let Some(s) = p.inv.slots.get(i).cloned().flatten()
                 {
                     if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
                         p.inv.remove_item(&s.item, 1);
@@ -2305,7 +2312,7 @@ pub fn machine_panel_system(
             }
             MachinePanelAction::ChestPut => {
                 if let Some(i) = ui_state.selected_inv
-                    && let Some(s) = p.inv.slots[i].clone()
+                    && let Some(s) = p.inv.slots.get(i).cloned().flatten()
                     && crate::factory::machine_insert(&mclone, &mut st, &s.item)
                 {
                     p.inv.remove_item(&s.item, 1);
@@ -2358,7 +2365,7 @@ pub fn machine_panel_system(
                 }
             }
             MachinePanelAction::InsertItem(i) => {
-                if let Some(s) = p.inv.slots[i].clone() {
+                if let Some(s) = p.inv.slots.get(i).cloned().flatten() {
                     if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
                         p.inv.remove_item(&s.item, 1);
                         audio::play(&mut commands, sfx.click.clone(), 0.4, None);
@@ -2520,7 +2527,7 @@ pub fn pause_panel_system(
     if ui_state.panel != Panel::Pause {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -2937,8 +2944,9 @@ pub fn scan_system(
                 ..default()
             }));
         }
-        let mesh = state.marker_mesh.clone().unwrap();
-        let mat = state.marker_mat.clone().unwrap();
+        let (Some(mesh), Some(mat)) = (state.marker_mesh.clone(), state.marker_mat.clone()) else {
+            return;
+        };
         for (cell, id) in &out {
             commands.spawn((
                 Mesh3d(mesh.clone()),
@@ -2999,7 +3007,7 @@ pub fn trade_panel_system(
     if ui_state.panel != Panel::Trade {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -3158,7 +3166,7 @@ pub fn garage_panel_system(
     if ui_state.panel != Panel::Garage {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -3261,7 +3269,7 @@ pub fn creative_panel_system(
     if ui_state.panel != Panel::Creative {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -3383,7 +3391,7 @@ pub fn planet_map_system(
     if ui_state.panel != Panel::Map {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }
@@ -3673,7 +3681,7 @@ pub fn galaxy_map_system(
         ui_state.panel = Panel::None;
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !egui_fonts_ready(ctx) {
         return;
     }

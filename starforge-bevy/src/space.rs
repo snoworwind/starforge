@@ -274,6 +274,14 @@ pub struct SpaceGame {
 
 impl SpaceGame {
     pub fn new(galaxy: Galaxy) -> Self {
+        let galaxy = if galaxy.planets.is_empty() {
+            // A generated galaxy is never empty, but this keeps a malformed
+            // future save or test fixture from turning every planet lookup
+            // into an underflow.
+            data::home_galaxy()
+        } else {
+            galaxy
+        };
         Self {
             galaxy,
             current_planet: 0,
@@ -533,7 +541,9 @@ pub fn bolt_system(
         });
         *bolt_assets = Some((mesh, mat, drop_mat));
     }
-    let (bolt_mesh, bolt_mat, drop_mat) = bolt_assets.clone().unwrap();
+    let Some((bolt_mesh, bolt_mat, drop_mat)) = bolt_assets.clone() else {
+        return;
+    };
     // 开火（JS shoot：双发 ±0.9 偏移，聚向准星）
     if mouse.pressed(MouseButton::Left) && ship.fire_cd <= 0.0 {
         let (cooldown, offsets): (f32, &[f32]) = match ship_asset.data.cls.as_str() {

@@ -742,7 +742,7 @@ fn menu_system(
     mut next: ResMut<NextState<GameState>>,
     settings: Res<save::Settings>,
 ) {
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !ui::egui_fonts_ready(ctx) {
         return;
     }
@@ -1212,7 +1212,7 @@ fn loading_system(
         commands.insert_resource(mats.clone());
         ls.mats = Some(mats);
     }
-    let mats = ls.mats.clone().unwrap();
+    let Some(mats) = ls.mats.clone() else { return };
     let mut done = false;
     for _ in 0..8 {
         let pcx = world::cf(ls.spawn.x);
@@ -1232,7 +1232,7 @@ fn loading_system(
             break;
         }
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !ui::egui_fonts_ready(ctx) {
         return;
     }
@@ -2309,12 +2309,14 @@ fn quit_to_menu_system(
     mut ev: MessageReader<ui::QuitToMenuEvent>,
     mut commands: Commands,
     in_game: Query<Entity, With<InGame>>,
+    mut network: ResMut<network::NetworkState>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     for _ in ev.read() {
         for e in &in_game {
             commands.entity(e).despawn();
         }
+        network.reset();
         commands.remove_resource::<World>();
         commands.remove_resource::<TerrainMaterials>();
         commands.remove_resource::<daynight::DayTime>();
@@ -2342,8 +2344,13 @@ fn quit_to_menu_system(
         commands.remove_resource::<factory::TickAcc>();
         commands.remove_resource::<weather::ClimateRuntime>();
         commands.remove_resource::<creatures::SentinelSpawner>();
-        commands.remove_resource::<network::NetworkState>();
         commands.remove_resource::<ui::ScanState>();
+        commands.insert_resource(creatures::SentinelSpawner::default());
+        commands.insert_resource(weather::ClimateRuntime::default());
+        commands.insert_resource(space::VisitorRespawn::default());
+        commands.insert_resource(space::VisitorTraffic::default());
+        commands.insert_resource(station::StationDefense::default());
+        commands.insert_resource(factory::TickAcc::default());
         commands.insert_resource(space::WarpAnim::default());
         commands.insert_resource(space::WarpVisuals::default());
         commands.insert_resource(Research::default());

@@ -68,7 +68,12 @@ impl FlightMode {
     pub fn ship_cam(&self) -> bool {
         matches!(
             self,
-            Self::Atmo | Self::AtmoLand | Self::Space | Self::Warping | Self::Station
+            Self::Seated
+                | Self::Atmo
+                | Self::AtmoLand
+                | Self::Space
+                | Self::Warping
+                | Self::Station
         )
     }
     /// 需要飞船飞行输入的模式
@@ -132,6 +137,8 @@ pub struct ShipState {
     pub pulsing: bool,
     pub tritium_drain: f32,
     pub board_yaw: f32,
+    /// 座舱第三人称镜头累计时间。
+    pub seated_t: f32,
     pub presaved: bool,
     /// 船体生命（JS VIS_HP：C20/B34/A52/S80）
     pub hp: f32,
@@ -161,6 +168,7 @@ impl Default for ShipState {
             pulsing: false,
             tritium_drain: 0.0,
             board_yaw: 0.0,
+            seated_t: 0.0,
             presaved: false,
             hp: 20.0,
             hp_max: 20.0,
@@ -349,6 +357,8 @@ pub struct LaserBolt {
     pub life: f32,
     pub speed: f32,
     pub dmg: f32,
+    /// 大气弹与太空弹属于不同渲染/碰撞场景。
+    pub space_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -484,7 +494,7 @@ pub fn bolt_system(
     >,
     mut aux: BoltAux,
 ) {
-    if *mode != FlightMode::Space {
+    if !matches!(*mode, FlightMode::Space | FlightMode::Atmo) {
         return;
     }
     let dt = time.delta_secs();
@@ -524,6 +534,7 @@ pub fn bolt_system(
                     life: 1.6,
                     speed: 500.0 * smul,
                     dmg,
+                    space_only: *mode == FlightMode::Space,
                 },
                 crate::InGame,
             ));
@@ -536,6 +547,11 @@ pub fn bolt_system(
         .map(|(e, b, tf)| (e, b.clone(), tf.translation))
         .collect();
     for (e, b, pos) in snap {
+        // 场景交接时清掉另一套场景的弹体，避免大气弹残留到太空或地面。
+        if b.space_only != (*mode == FlightMode::Space) {
+            commands.entity(e).despawn();
+            continue;
+        }
         let np = pos + b.dir * b.speed * dt;
         let alive = b.life - dt > 0.0;
         // 访客船命中
@@ -1719,6 +1735,7 @@ fn board_ship(
     sfx: &crate::audio::Sfx,
 ) {
     *next_mode = FlightMode::Seated;
+    ship_state.seated_t = 0.0;
     ship_state.board_yaw = ship_state.yaw;
     let ex = game.ship_pos.x + 2.2;
     let ez = game.ship_pos.z;
@@ -2755,6 +2772,7 @@ pub fn atmoland_system(
     mut big_ev: MessageWriter<BigMessageEvent>,
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
+    mut player: Query<&mut Player>,
 ) {
     if *next_mode != FlightMode::AtmoLand {
         return;
@@ -2764,6 +2782,12 @@ pub fn atmoland_system(
     let t = land.t.min(1.0);
     let ease = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
     ship.pos = land.from.lerp(land.to, ease);
+    // 让地面玩家实体与降落中的飞船保持同一坐标；否则流式中心和相机在
+    // AtmoLand → Seated 的交接帧仍使用登船前的旧位置。
+    if let Ok(mut p) = player.single_mut() {
+        p.pos = ship.pos;
+        p.vel = Vec3::ZERO;
+    }
     ship.pitch = 0.0;
     ship.roll = 0.0;
     ship.cam_roll = 0.0;
@@ -2780,6 +2804,7 @@ pub fn atmoland_system(
         game.landed_planet = game.current_planet as i32;
         // JS: atmoLandStart 提前 boardYaw = atmo.yaw（下船朝向与降落航向一致）
         ship.board_yaw = ship.yaw;
+        ship.seated_t = 0.0;
         *next_mode = FlightMode::Seated;
         big_ev.write(BigMessageEvent {
             title: "降落完成".into(),
@@ -2788,6 +2813,24 @@ pub fn atmoland_system(
         });
         crate::audio::play(&mut commands, sfx.jump.clone(), 0.6, None);
     }
+}
+
+/// 降落完成后保持 JS 版的座舱第三人称镜头，直到玩家按 E 下船。
+/// 不能让 Planet/Seated 的第一人称相机系统在交接期间抢写相机，否则会出现
+/// 一帧落地镜头、一帧玩家镜头来回切换的抖动。
+pub fn seated_camera_system(
+    time: Res<Time>,
+    mode: Res<FlightMode>,
+    mut ship: ResMut<ShipState>,
+    mut flight_cam: ResMut<FlightCamera>,
+) {
+    if *mode != FlightMode::Seated {
+        return;
+    }
+    ship.seated_t += time.delta_secs();
+    let cam_q = ship_quat(ship.board_yaw, -0.12, 0.0);
+    let cam_off = cam_q * Vec3::new(0.0, 2.9 + (ship.seated_t * 1.4).sin() * 0.05, 9.2);
+    *flight_cam = FlightCamera::set(ship.pos + cam_off, cam_q, 75.0);
 }
 
 // ---------- 相机驱动 ----------
@@ -2916,6 +2959,10 @@ pub fn ship_sync_system(
         FlightMode::Space | FlightMode::Warping => {
             ship_quat(ship.yaw, ship.pitch, ship.roll)
                 * Quat::from_rotation_z(ship.cam_roll + ship.vis_bank)
+        }
+        FlightMode::Seated => {
+            let base = ship_quat(ship.board_yaw, -0.12, 0.0);
+            base * Quat::from_rotation_z((ship.seated_t * 2.2).sin() * 0.006)
         }
         _ => ship_quat(ship.yaw, ship.pitch, ship.roll),
     };

@@ -65,7 +65,12 @@ fn safe_player_position(pos: [f32; 3]) -> Option<Vec3> {
 
 /// Chunk terrain meshes (cleared on planet switch).
 #[derive(Component)]
-pub struct ChunkMesh;
+pub struct ChunkMesh {
+    /// 区块坐标用于高速移动时立即隐藏旧视距外网格，避免等待延迟 despawn
+    /// 命令执行期间把旧地形和新地形叠在一起。
+    pub cx: i32,
+    pub cz: i32,
+}
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 enum GameState {
@@ -400,6 +405,10 @@ fn main() {
         .add_systems(
             Update,
             space::atmoland_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            space::seated_camera_system.run_if(in_state(GameState::Playing)),
         )
         .add_systems(
             Update,
@@ -1814,7 +1823,7 @@ fn spawn_chunk_mesh(
             aabb,
             NoAutoAabb,
             Visibility::default(),
-            ChunkMesh,
+            ChunkMesh { cx, cz },
             InGame,
         ))
         .id()
@@ -1845,6 +1854,10 @@ fn stream_system(
     }
     // 预载环已网格化（mesh 到 view+1），预算比 JS 浏览器版（4/2）更高——原生端单帧开销可控，
     // 跨区块后新视距环 ~6 帧内全部就绪，不再长时间空荡
+    let jump = (pcx - world.last_pcx)
+        .abs()
+        .max((pcz - world.last_pcz).abs());
+    let fast_recenter = jump > world.view_dist + 2;
     stream_world_step(
         &mut world,
         pcx,
@@ -1853,8 +1866,8 @@ fn stream_system(
         &mut meshes,
         &atlas.atlas,
         &mats,
-        12,
-        6,
+        if fast_recenter { 48 } else { 12 },
+        if fast_recenter { 16 } else { 6 },
     );
     world.last_pcx = pcx;
     world.last_pcz = pcz;
@@ -1918,7 +1931,7 @@ fn far_mesh_system(
     let tcx = (px / world::FAR_SNAP).round() * world::FAR_SNAP;
     let tcz = (pz / world::FAR_SNAP).round() * world::FAR_SNAP;
     if let Ok((e, mut fm, mut vis, mut mmat)) = far_q.single_mut() {
-        *vis = if show {
+        *vis = if show && fm.row >= world::FAR_N {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -1929,11 +1942,15 @@ fn far_mesh_system(
             fm.target_cx = tcx;
             fm.target_cz = tcz;
             fm.row = 0;
+            *vis = Visibility::Hidden;
         }
         if fm.row >= world::FAR_N && (tcx != fm.cx || tcz != fm.cz) {
             fm.target_cx = tcx;
             fm.target_cz = tcz;
             fm.row = 0;
+            // 不把新中心的部分行写入当前可见网格，避免高速穿越时出现
+            // 半幅旧地形 + 半幅新地形的撕裂/跳变。
+            *vis = Visibility::Hidden;
         }
         if fm.row < world::FAR_N {
             let from = fm.row;
@@ -1953,6 +1970,9 @@ fn far_mesh_system(
             if fm.row >= world::FAR_N {
                 fm.cx = fm.target_cx;
                 fm.cz = fm.target_cz;
+                if show {
+                    *vis = Visibility::Visible;
+                }
             }
         }
         // 挖空环已移入片元着色器（far_hole_* uniform，curve_system 每帧更新）——
@@ -2117,9 +2137,12 @@ fn stars_ok() -> bool {
 /// 否则冲出大气后平面地形残影留在宇宙里，与太空星球球形外壳错位同屏。
 fn ground_scene_visibility_system(
     mode: Res<FlightMode>,
+    world: Res<World>,
+    player: Query<&Player>,
+    ship: Res<ShipState>,
     mut commands: Commands,
     mut q: Query<
-        (Entity, Option<&mut Visibility>),
+        (Entity, Option<&mut Visibility>, Option<&ChunkMesh>),
         Or<(
             With<ChunkMesh>,
             With<creatures::Creature>,
@@ -2130,13 +2153,32 @@ fn ground_scene_visibility_system(
         )>,
     >,
 ) {
-    let show = mode.ground_scene();
-    let vis = if show {
-        Visibility::Visible
+    let (px, pz) = if matches!(
+        *mode,
+        FlightMode::Atmo | FlightMode::AtmoLand | FlightMode::Seated
+    ) {
+        (ship.pos.x, ship.pos.z)
     } else {
-        Visibility::Hidden
+        player
+            .single()
+            .map(|p| (p.pos.x, p.pos.z))
+            .unwrap_or((ship.pos.x, ship.pos.z))
     };
-    for (e, v) in &mut q {
+    let pcx = world::cf(px);
+    let pcz = world::cf(pz);
+    let show = mode.ground_scene();
+    for (e, v, chunk) in &mut q {
+        // 视距外网格先隐藏，再由 stream_world_step 延迟回收；高速穿越时不会
+        // 出现旧区块残影、与新位置地形重叠或闪烁。
+        let chunk_show = show
+            && chunk
+                .map(|c| World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 1)
+                .unwrap_or(true);
+        let vis = if chunk_show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
         match v {
             Some(mut v) => {
                 if *v != vis {

@@ -3290,6 +3290,9 @@ pub struct MapState {
     pub gal: bool,
     pub pending: Option<(i32, i32)>,
     pub sel: Option<usize>,
+    /// 星系地图当前悬停/点击选择。必须跨帧保存，否则点击星点后下一帧
+    /// `galaxy_map_system` 会用旧的跃迁锁定值覆盖它，导致锁定按钮失效。
+    pub galaxy_sel: Option<u32>,
 }
 
 /// 地图可见区域（世界生成范围，JS genStructures x∈[-650,650] z∈[-220,220]）。
@@ -3591,7 +3594,7 @@ pub fn galaxy_map_system(
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UiState>,
     mut game: ResMut<crate::space::SpaceGame>,
-    mut ship: ResMut<crate::space::ShipState>,
+    mut map: ResMut<MapState>,
     mode: Res<crate::space::FlightMode>,
     time: Res<Time>,
 ) {
@@ -3608,7 +3611,11 @@ pub fn galaxy_map_system(
     }
     let mut close = false;
     let mut lock_req: Option<u32> = None;
-    let mut selected: Option<u32> = game.warp_lock.as_ref().map(|lock| lock.seed);
+    // 选择状态不能是局部变量：egui 每帧重绘，按钮点击通常发生在选中星点的
+    // 下一帧。优先恢复已有锁定目标，否则保留用户刚选中的星点。
+    if map.galaxy_sel.is_none() {
+        map.galaxy_sel = game.warp_lock.as_ref().map(|lock| lock.seed);
+    }
     egui::Window::new("◈ 星系地图")
         .default_size([600.0, 540.0])
         .resizable(false)
@@ -3696,7 +3703,7 @@ pub fn galaxy_map_system(
                     .map(|entry| entry.0)
             });
             for (seed, pos, depth, visited) in &stars {
-                let is_selected = selected == Some(*seed);
+                let is_selected = map.galaxy_sel == Some(*seed);
                 let is_hovered = hovered == Some(*seed);
                 painter.line_segment(
                     [center, *pos],
@@ -3745,10 +3752,10 @@ pub fn galaxy_map_system(
             if response.clicked()
                 && let Some(seed) = hovered
             {
-                selected = Some(seed);
+                map.galaxy_sel = Some(seed);
             }
             ui.small("星域会缓慢自转；金色为已到访星系，绿色为当前锁定目标。");
-            if let Some(seed) = selected {
+            if let Some(seed) = map.galaxy_sel {
                 ui.horizontal(|ui| {
                     ui.label(format!("目标：{} · 种子 {}", data::galaxy_name(seed), seed));
                     if ui.button("◎ 锁定跃迁目标").clicked() {
@@ -3766,6 +3773,6 @@ pub fn galaxy_map_system(
             seed,
             name: data::galaxy_name(seed),
         });
-        let _ = &mut ship;
+        map.galaxy_sel = Some(seed);
     }
 }

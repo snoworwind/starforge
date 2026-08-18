@@ -93,7 +93,7 @@ pub struct CreatureAnimationLibrary {
 /// Link an instantiated animation player back to its gameplay entity. This
 /// avoids assuming that the player is a direct child of the creature root.
 #[derive(Component)]
-struct CreatureAnimationTarget {
+pub(crate) struct CreatureAnimationTarget {
     owner: Entity,
     idle: AnimationNodeIndex,
     walk: AnimationNodeIndex,
@@ -531,6 +531,11 @@ fn materialize_herd(
     let Some(h) = spawner.herds.get(&nid) else {
         return false;
     };
+    // 物化通过 Commands 延迟写入 ECS，但 Herd.entity 会立即记录返回的
+    // Entity。这个幂等保护覆盖同一帧的补足/重载路径，杜绝重复兽群实体。
+    if h.entity.is_some() {
+        return false;
+    }
     let h = h.clone();
     // 地形被破坏（水/树）→ 保持休眠，等恢复
     let ix = h.x.floor() as i32;
@@ -644,6 +649,9 @@ pub fn creature_spawn_system(
     }
     // 2. 周期补足（1.2s）：活跃数低于目标密度时，物化最近的 24~128m 内休眠兽群
     spawner.timer -= dt;
+    // Commands::spawn 在本系统返回后才会进入 Query；记录本帧刚提交的兽群，
+    // 避免下面的句柄校验把它误判为“实体已丢失”并重复物化。
+    let mut spawned_this_tick: Vec<u64> = Vec::new();
     if spawner.timer <= 0.0 {
         spawner.timer = SPAWN_INTERVAL;
         let active = creatures.iter().filter(|(_, c, _)| !c.fading).count();
@@ -668,7 +676,7 @@ pub fn creature_spawn_system(
             }
             if let Some((d, nid)) = best {
                 println!("CREATURE topup active={active} spawn herd {nid} d={d:.0}");
-                materialize_herd(
+                if materialize_herd(
                     &mut spawner,
                     nid,
                     &mut commands,
@@ -676,7 +684,9 @@ pub fn creature_spawn_system(
                     &mut graphs,
                     &mut animation_library,
                     &world,
-                );
+                ) {
+                    spawned_this_tick.push(nid);
+                }
             }
         }
     }
@@ -684,20 +694,36 @@ pub fn creature_spawn_system(
     // 3. 卸载休眠（>128m：回写位置/血量并淡出；实体淡出完成后由 despawn 系统清空 entity）/ 重载（<96m）
     let mut to_reload: Vec<u64> = Vec::new();
     for (nid, h) in &mut spawner.herds {
+        if spawned_this_tick.contains(nid) {
+            continue;
+        }
         let d = ((h.x - p.pos.x).powi(2) + (h.z - p.pos.z).powi(2)).sqrt();
         if let Some(e) = h.entity {
-            if d > UNLOAD_D
-                && let Ok((_, mut c, tf)) = creatures.get_mut(e)
-            {
-                if c.fading {
-                    continue; // 已在淡出卸载中，由 despawn 系统收尾
+            match creatures.get_mut(e) {
+                Ok((_, mut c, tf)) => {
+                    if d < RELOAD_D && c.fading {
+                        // 高速穿越时玩家可能在淡出完成前折返；取消卸载，
+                        // 否则生物会在眼前消失且要等下一轮生成才能回来。
+                        c.fading = false;
+                        c.fade_t = 0.0;
+                    } else if d > UNLOAD_D && !c.fading {
+                        h.x = tf.translation.x;
+                        h.z = tf.translation.z;
+                        h.hp = c.hp;
+                        c.fading = true; // 淡出 0.8s 后卸载（数据已回写）
+                        c.fade_t = 0.0;
+                        println!("CREATURE unload herd {nid} d={d:.0} (fade-out)");
+                    }
                 }
-                h.x = tf.translation.x;
-                h.z = tf.translation.z;
-                h.hp = c.hp;
-                c.fading = true; // 淡出 0.8s 后卸载（数据已回写，随时可重载）
-                c.fade_t = 0.0;
-                println!("CREATURE unload herd {nid} d={d:.0} (fade-out)");
+                Err(_) => {
+                    // 场景切换/区块快速流式时实体可能已被命令队列删除。
+                    // 清掉僵尸 Entity 句柄，否则该兽群会永久被认为“已物化”，
+                    // 这正是生物偶发消失后不再刷新的根因。
+                    h.entity = None;
+                    if d < RELOAD_D {
+                        to_reload.push(*nid);
+                    }
+                }
             }
         } else if d < RELOAD_D {
             to_reload.push(*nid);

@@ -175,7 +175,18 @@ pub fn curve_system(
 ) {
     let Ok(p) = player.single() else { return };
     *wave_t += time.delta_secs();
-    let cam_y = p.eye().y;
+    // 飞船模式下 Player 只在飞行系统末尾做镜像更新，若仍使用 p.pos，
+    // 高速跨区块时曲率中心会落后一帧甚至停在旧位置，造成地形/远景撕裂。
+    let (center_x, center_z, cam_y) = if matches!(
+        *mode,
+        crate::space::FlightMode::Atmo
+            | crate::space::FlightMode::AtmoLand
+            | crate::space::FlightMode::Seated
+    ) {
+        (ship.pos.x, ship.pos.z, ship.pos.y + crate::player::EYE)
+    } else {
+        (p.pos.x, p.pos.z, p.eye().y)
+    };
     let amt = ((cam_y - 62.0) / (150.0 - 62.0)).clamp(0.0, 1.0);
     // 出大气过渡：最后 60 格地形/远景淡出（球面 LOD 无缝接棒，避免飞出大气瞬间贴图突变）
     let fade =
@@ -189,7 +200,7 @@ pub fn curve_system(
     for handle in [&mats.solid, &mats.water, &mats.far] {
         if let Some(mut m) = materials.get_mut(handle) {
             let c = &mut m.extension.curve;
-            c.center = Vec2::new(p.pos.x, p.pos.z);
+            c.center = Vec2::new(center_x, center_z);
             c.amt = amt;
             c.grow = 1.0;
             c.fade = fade;
@@ -199,8 +210,8 @@ pub fn curve_system(
             c.far_hole_on = if handle == &mats.far { 1.0 } else { 0.0 };
             c.far_hole_r0 = r0;
             c.far_hole_r1 = r1;
-            c.far_hole_cx = p.pos.x;
-            c.far_hole_cz = p.pos.z;
+            c.far_hole_cx = center_x;
+            c.far_hole_cz = center_z;
         }
     }
 }

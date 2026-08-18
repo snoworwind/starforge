@@ -4,10 +4,11 @@
 原生 Windows 可执行文件，保留原作的球面体素星球、采矿建造、背包合成、科技树、生存系统、像素美术，
 并已移植**太空飞船、空间站、星系跃迁、任务线、完整工厂电力网、太空战斗与外部 CC0/CC-BY 素材库**。
 
-> 注意：外部飞船和空间站模型总计约 557 MB，因体积过大不包含在 Git 仓库中。
+> 注意：外部飞船、空间站与起源星地球模型因体积较大不包含在 Git 仓库中。
 > 请从本文档下方 `外部模型下载` 中的对应来源页面下载，并按
 > `assets/licenses/models-directory-audit.md` 的目录结构解压到
-> `assets/models/external/`，否则运行时会找不到 glTF、纹理和动画资源。
+> `assets/models/external/`（地球模型解压到 `assets/models/earth/`），
+> 否则运行时会找不到 glTF、纹理和动画资源。
 
 ## 运行
 
@@ -26,8 +27,8 @@ assets/
 ```
 
 程序会固定从 `starforge-bevy.exe` 所在目录的 `assets/` 读取模型、纹理、动画和着色器，
-不依赖启动时的当前工作目录。外部飞船/空间站模型也必须放在该目录下的
-`assets/models/external/`；模型下载和目录映射见本文档的“外部模型下载”及 `CREDITS.md`。
+不依赖启动时的当前工作目录。外部飞船/空间站/地球模型也必须放在该目录下的
+`assets/models/external/`（地球模型为 `assets/models/earth/`）；模型下载和目录映射见本文档的“外部模型下载”及 `CREDITS.md`。
 
 首次构建需编译全部依赖（约 10~30 分钟，取决于机器）。需要 Rust ≥ 1.85（stable 即可）。
 
@@ -70,15 +71,19 @@ assets/
 | `J`（太空） | 脉冲引擎（消耗氚，冲刺至 900 u/s） |
 | `C`（太空） | 扫描（最近天体距离） |
 | `M`（太空） | 星系地图（锁定目标星系，脉冲冲刺对准即自动跃迁，需曲率电池） |
-| `E`（太空） | 靠近星球无缝再入；飞入空间站泊入区自动停靠 |
+| `F`（飞行） | 第一人称 / 第三人称镜头切换 |
+| `滚轮`（第三人称） | 镜头距离缩放（6~60） |
+| `鼠标右键`（飞行，按住） | 自由环视（只转镜头，不改变飞船航向） |
+| `N`（太空/停泊） | 打开换船电脑 |
+| `E`（太空） | 靠近星球无缝再入；靠近空间站顶部自动停泊 |
 
 ### 空间站
 
 | 键位 | 功能 |
 |---|---|
-| `W`（泊位） | 离站 |
-| `空格`（站内） | 站内喷气背包 |
-| `E` | 下船 / 登船 / 交易终端 / 换船电脑 / 与游商、站员交谈（买船） |
+| `W`（停泊） | 离站 |
+| `E`（停泊） | 打开空间站服务（贸易终端 / 买船中心 / 换船电脑） |
+| `N`（太空/停泊） | 打开换船电脑 |
 
 ## 已移植（相对原版）
 
@@ -92,7 +97,7 @@ assets/
 - **太空飞船**：CC-BY-4.0 外部 glTF 飞船模型（等级差异化 C/B/A/S，含材质、纹理和动画）、登船/下船、燃料加注、大气层飞行（经纬环绕、地形碰撞细分步进防高速穿墙、转向侧倾压弯、再入俯冲保护、冲出大气交棒）、太空飞行（姿态/滚转/脉冲引擎/氚消耗）、恒星高温危险、**小行星群（GLB 陨石，可击碎掉落氚/金）**；
 - **太空战斗**：鼠标左键双发激光弹道、武器威力随等级（C1/B1/A2/S4）、高速线段碰撞、**访客船队巡航/进站/停靠/离站 + 可击毁（战利品直入货仓 + 信用点，35-65s 补员）**，站体遇袭会升起护盾并封闭泊入通道；
 - **无缝换系**：体素 ↔ 球面坐标精确互逆映射（有往返测试），大气层 ⇄ 太空零传送；**多星球**：同星系多星球再入，星球档案（建筑/机器/区块改动/地图标记）随离开归档、返回恢复；跨星系档案（`galaxyArchives`）；
-- **空间站**：自动泊入（Catmull-Rom 泊入曲线）、站内第一人称行走（机库/大厅/停机坪、站内喷气背包、固定优先级交互）、贸易终端（23 种商品买卖 + 市场漂移、蓝图购买：物流/光伏/精炼/核裂变）、换船电脑（机库 12~24 格货仓）、游商购船（C/B/A/S 随机等级）、站员对话；
+- **空间站**：靠近站顶即自动悬停泊入（无需进机库/强制落地）、按模型实际包围盒的逐网格碰撞（镂空区域可穿越）、停泊后 `E` 打开服务菜单（贸易终端 / 买船中心 / 换船电脑）、`N` 键快捷换船、游商船停靠休息（不再对话卖船）、太空访客船停靠休息后离站；
 - **星系与曲率跃迁**：初始星系 5 行星 + 空间站；随机星系生成（4~7 颗星球、市场波动、站体与星球分离校验）；可交互的旋转 3D 投影星图（55 邻域 + 已到访标记 + 回家锁定）、脉冲冲刺自动跃迁、180 条发光曲速星线与动态拉伸、抵达新星系（跨星系标记随档案换档）；
 - **21 步主线任务线**：采集/合成/放置/研究/事件全类型推进、任务日志 HUD、奖励 ₪；**村庄支线委托**（村民 NPC、收集换报酬）；**遗迹守卫**（骷髅哨兵：追击/接触伤害/战利品）；
 - **星球全息地图（M）**：2D 全景地图（村庄/遗迹/信标/飞船/玩家箭头）、点击添加标记（名称/全星系显示）、标记列表（切换范围/删除）、存档持久化；
@@ -107,10 +112,11 @@ assets/
 
 ### 外部模型下载
 
-外部飞船和空间站模型因体积较大不随 Git 仓库分发。请从下表对应的来源页面下载模型压缩包，解压后保留 `scene.gltf`、`scene.bin`、`textures/` 和 `license.txt`，并放入 `assets/models/external/` 下对应目录。完整 URL、作者署名和目录映射见 `CREDITS.md` 与 `assets/licenses/models-directory-audit.md`。
+外部飞船、空间站与起源星地球模型因体积较大不随 Git 仓库分发。请从下表对应的来源页面下载模型压缩包，解压后保留 `scene.gltf`、`scene.bin`、`textures/` 和 `license.txt`，并放入 `assets/models/external/` 下对应目录（地球模型解压到 `assets/models/earth/`）。完整 URL、作者署名和目录映射见 `CREDITS.md` 与 `assets/licenses/models-directory-audit.md`。
 
 | 目录 | 来源 |
 |---|---|
+| `assets/models/earth/` | [Earth（起源星）](https://sketchfab.com/3d-models/earth-4de1bcbd22a444abb4f089b9b78ec96a) |
 | `assets/models/external/ships/space_ship_b/` | [Space Ship B](https://sketchfab.com/3d-models/space-ship-356a3acb00164c698d657146caa5ebf3) |
 | `assets/models/external/ships/space_ship_c/` | [Space Ship C](https://sketchfab.com/3d-models/space-ship-63ce372c1aa843e98bf1548109e055d8) |
 | `assets/models/external/ships/space_ship_torb/` | [Space Ship “Torb”](https://sketchfab.com/3d-models/space-ship-torb-fb9cac9500d147528b6cdef8385cf926) |
@@ -126,6 +132,7 @@ assets/
 | 音效（assets/audio/，32 条） | Kenney UI Audio / Sci-Fi Sounds | CC0 1.0 |
 | 随仓库提供的飞船/宇航员/陨石模型 | Kenney Space Kit | CC0 1.0 |
 | 外部飞船/空间站模型 | Sketchfab（作者见 `CREDITS.md`） | CC-BY-4.0，必须署名 |
+| 起源星地球模型（assets/models/earth/） | Sketchfab（作者：SebastianSosnowski） | CC-BY-4.0，必须署名 |
 | NPC 角色（冒险者 5 款） | KayKit Character Pack: Adventurers | CC0 |
 | 遗迹守卫（骷髅） | KayKit Character Pack: Skeletons | CC0 |
 | 生物模型（羊驼/鹿/狐/狼，带骨骼动画） | Quaternius Ultimate Animated Animal Pack | CC0 1.0 |

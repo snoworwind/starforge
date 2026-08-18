@@ -278,6 +278,7 @@ fn main() {
         .insert_resource(weather::ClimateRuntime::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())
+        .init_resource::<char::NpcAnimationLibrary>()
         .init_resource::<creatures::CreatureAnimationLibrary>()
         .add_systems(Startup, startup)
         .add_systems(
@@ -379,7 +380,7 @@ fn main() {
                             ui::ghost_system.run_if(in_planet_mode),
                             beam_system.run_if(in_planet_mode),
                             prompt_system.run_if(in_planet_mode),
-                            ui::hud_system,
+                            (ui::hud_system, ui::ship_label_system).chain(),
                             ui::inventory_panel_system,
                             ui::tech_panel_system,
                             ui::machine_panel_system,
@@ -1652,7 +1653,10 @@ fn prompt_system(
         ui_state.prompt = None;
         return;
     }
-    let Ok(p) = player.single() else { return };
+    let Ok(p) = player.single() else {
+        ui_state.prompt = None;
+        return;
+    };
     // 飞船优先（与登船判定半径一致：JS 4.5）
     if p.pos.distance(game.ship_pos) < 4.5 {
         ui_state.prompt = Some("[E] 检查飞船 / 登船".into());
@@ -1872,12 +1876,16 @@ fn stream_system(
     if !world.stream_dirty && pcx == world.last_pcx && pcz == world.last_pcz {
         return;
     }
-    // 预载环已网格化（mesh 到 view+1），预算比 JS 浏览器版（4/2）更高——原生端单帧开销可控，
-    // 跨区块后新视距环 ~6 帧内全部就绪，不再长时间空荡
+    // During atmospheric flight the ship can cross several chunks per second.
+    // Keep each streaming slice small so terrain generation never stalls the
+    // render frame; walking keeps the larger budget for quick world loading.
     let jump = (pcx - world.last_pcx)
         .abs()
         .max((pcz - world.last_pcz).abs());
     let fast_recenter = jump > world.view_dist + 2;
+    let atmo = matches!(*mode, FlightMode::Atmo | FlightMode::AtmoLand);
+    let (normal_gen, normal_mesh) = if atmo { (4, 2) } else { (12, 6) };
+    let (fast_gen, fast_mesh) = if atmo { (8, 2) } else { (48, 16) };
     stream_world_step(
         &mut world,
         pcx,
@@ -1886,8 +1894,12 @@ fn stream_system(
         &mut meshes,
         &atlas.atlas,
         &mats,
-        if fast_recenter { 48 } else { 12 },
-        if fast_recenter { 16 } else { 6 },
+        if fast_recenter { fast_gen } else { normal_gen },
+        if fast_recenter {
+            fast_mesh
+        } else {
+            normal_mesh
+        },
     );
     world.last_pcx = pcx;
     world.last_pcz = pcz;

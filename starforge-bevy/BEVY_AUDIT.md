@@ -21,7 +21,7 @@
 - UI 中过期库存索引不再 panic；关键 egui context 获取改为可恢复分支。
 - 工厂传送带排序使用 `total_cmp`，避免异常浮点值触发 `partial_cmp().unwrap()`。
 
-验证结果：新增回归测试后共 43 个测试全部通过；`cargo fmt --check`、`cargo check`、`cargo clippy --all-targets -- -D warnings` 全部通过。`--smoke` 已完成加载、地面→太空切换、区块隐藏和太空清屏断言（输出 `SMOKE_CHECK ... hidden=true`）。
+验证结果：新增回归测试后共 44 个测试全部通过；`cargo fmt --check`、`cargo check`、`cargo clippy --all-targets -- -D warnings` 全部通过。`--smoke` 已完成加载、地面→太空切换、区块隐藏、太空清屏和保存断言（输出 `SMOKE_CHECK ... hidden=true` 与 `SMOKE_OK frames=481`）。
 
 ## 分阶段后续计划
 
@@ -33,9 +33,13 @@
 
 补充 Bevy App 集成测试：Loading → Playing、Planet ↔ Space、返回菜单、空间站进出、断联重连；为 `InGame` 实体数量和资源存在性建立断言；增加真实窗口/无窗口 smoke 测试。
 
+第二轮已落实：无窗口 smoke 已覆盖 Loading → Playing、地面→太空切换、区块隐藏、清屏和保存断言；新增飞行/弹道回归测试，并修复 NPC 场景动画初始化、泊入方向和交互提示生命周期。
+
 ### P2（性能与可维护性）
 
 将地形生成/网格构建从主线程分帧或异步化；把网络 JSON 协议改为带版本/长度/压缩策略的二进制或受控编码；将存档写入搬到后台任务并加入备份/恢复；拆分过大的 UI/space 系统并减少每帧全量查询。
+
+第二轮已落实部分 P2：大气飞行时降低区块生成/网格化单帧预算，避免高速跨区块造成长帧；新增独立飞船位置标记系统，避免继续膨胀主 HUD 系统。
 
 ### P3（安全与产品化）
 

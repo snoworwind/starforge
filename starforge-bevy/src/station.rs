@@ -15,7 +15,10 @@ use crate::ui::{Panel, UiState};
 const DOCK_SLOT: [f32; 3] = [0.0, 10.0, 79.0];
 const DOCK_INNER_WAIT: [f32; 3] = [0.0, 12.0, 44.0];
 const DOCK_PAD: [f32; 3] = [20.0, 3.2, 30.0];
-const DOCK_PAD_YAW: f32 = std::f32::consts::PI;
+// The ship's nose is local -Z.  The landing pad faces the hangar interior
+// (towards decreasing Z), so yaw 0 makes the ship enter nose-first and stop
+// facing into the bay instead of backing in.
+const DOCK_PAD_YAW: f32 = 0.0;
 const DOCK_EXIT: [f32; 3] = [0.0, 12.0, 150.0];
 
 /// 站内存档位置：机库出口（JS：站态存 dock exit，读档不再重泊入）。
@@ -100,7 +103,8 @@ fn station_cols() -> Vec<ColBox> {
 }
 
 /// 空间站实体碰撞（飞船按半径 SHIP_R 的球处理）。
-pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: bool) {
+pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: bool) -> bool {
+    let mut corrected = false;
     let p = *pos - station_pos;
     // Active station shield: a 213-unit bubble centered slightly above and
     // behind the hangar. Ships already in the bay are not pushed out.
@@ -112,7 +116,7 @@ pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: b
             let distance = delta.length();
             if distance < 213.0 && distance > 1e-4 {
                 *pos = center + delta * (213.0 / distance);
-                return;
+                return true;
             }
         }
     }
@@ -126,8 +130,10 @@ pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: b
                 let push = (r - d) / d;
                 pos.x += (p.x - c.x) * push;
                 pos.z += (p.z - c.z) * push;
+                corrected = true;
             } else {
                 pos.x += r;
+                corrected = true;
             }
         }
     }
@@ -146,6 +152,7 @@ pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: b
             pos.x += dn.x * push;
             pos.y += dn.y * push;
             pos.z += dn.z * push;
+            corrected = true;
         } else {
             let pens = [
                 p.x - cb.min[0],
@@ -170,8 +177,10 @@ pub fn resolve_station_collision(pos: &mut Vec3, station_pos: Vec3, shield_up: b
                 4 => pos.z -= push,
                 _ => pos.z += push,
             }
+            corrected = true;
         }
     }
+    corrected
 }
 
 /// 泊入触发区（inBay / inGate）。
@@ -990,6 +999,7 @@ pub fn station_system(
     sfx: Res<crate::audio::Sfx>,
 ) {
     if *next_mode != FlightMode::Station {
+        ui_state.prompt = None;
         // 离站清理：NPC/访客飞船/对话全清
         for pil in st.pilots.iter_mut() {
             if let Some(e) = pil.entity.take() {
@@ -1013,6 +1023,7 @@ pub fn station_system(
     let dt = time.delta_secs();
     match st.phase {
         StationPhase::Dock => {
+            ui_state.prompt = None;
             st.t += dt / st.dur;
             let t = st.t.min(1.0);
             let ease = t * t * (3.0 - 2.0 * t);
@@ -1039,7 +1050,9 @@ pub fn station_system(
         StationPhase::Parked => {
             ship.pos = st.pad;
             ship.yaw = st.pad_yaw;
+            ui_state.prompt = Some("[E] 下船 · W 离站".into());
             if ui_state.locked() {
+                ui_state.prompt = None;
                 return;
             }
             if keys.just_pressed(KeyCode::KeyE) {
@@ -1058,6 +1071,7 @@ pub fn station_system(
             }
         }
         StationPhase::Leave => {
+            ui_state.prompt = None;
             st.t += dt / st.dur;
             let t = st.t.min(1.0);
             let ease = t * t * (3.0 - 2.0 * t);
@@ -1142,7 +1156,10 @@ fn walk_tick(
         return;
     };
     let o = st.station_pos;
-    let Some(w) = st.walk.as_mut() else { return };
+    let Some(w) = st.walk.as_mut() else {
+        ui_state.prompt = None;
+        return;
+    };
     w.board_cd -= dt;
     if ui_state.locked() {
         // 面板打开时视角维持

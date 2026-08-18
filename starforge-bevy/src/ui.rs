@@ -25,6 +25,11 @@ pub struct UiState {
     pub big: Option<(String, String, f32)>,
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct HudCamera<'w, 's> {
+    query: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<Camera3d>>,
+}
+
 #[derive(Default, PartialEq, Clone, Copy)]
 pub enum Panel {
     #[default]
@@ -507,30 +512,6 @@ pub fn hud_system(
                     .size(13.0),
                 );
             }
-            if *mode == crate::space::FlightMode::Planet
-                && let Some(g) = game.as_ref()
-                && g.ship_pos != Vec3::ZERO
-            {
-                let delta = g.ship_pos - p.pos;
-                let distance = delta.length();
-                let dir = delta.normalize_or_zero();
-                let ahead = p.forward().dot(dir);
-                let side = p.forward().cross(dir).y;
-                let arrow = if distance < 8.0 {
-                    "▣ 已抵达飞船"
-                } else if ahead > 0.72 {
-                    "▲ 飞船在前方"
-                } else if side > 0.0 {
-                    "◀ 向左转向飞船"
-                } else {
-                    "▶ 向右转向飞船"
-                };
-                ui.label(
-                    egui::RichText::new(format!("{} · {:.0}m", arrow, distance))
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
-                );
-            }
             let hh = (day.0 * 24.0) as i32;
             let mm = ((day.0 * 24.0 * 60.0) as i32) % 60;
             ui.label(egui::RichText::new(format!("⏰ {:02}:{:02}", hh, mm)).size(13.0));
@@ -554,9 +535,10 @@ pub fn hud_system(
     // 任务日志 top-right
     if let Some(qs) = quests.as_ref() {
         egui::Area::new(egui::Id::new("quests"))
-            .fixed_pos(egui::pos2(screen.max.x - 262.0, 12.0))
+            .fixed_pos(egui::pos2((screen.max.x - 262.0).max(8.0), 12.0))
             .interactable(false)
             .show(ctx, |ui| {
+                ui.set_max_width(254.0_f32.min(screen.width().max(180.0)));
                 ui.label(
                     egui::RichText::new("◈ 任务日志")
                         .size(13.0)
@@ -643,9 +625,13 @@ pub fn hud_system(
             }
         };
         egui::Area::new(egui::Id::new("pulsehint"))
-            .fixed_pos(egui::pos2(screen.max.x - 280.0, screen.max.y - 96.0))
+            .fixed_pos(egui::pos2(
+                (screen.max.x - 300.0).max(8.0),
+                screen.max.y - 96.0,
+            ))
             .interactable(false)
             .show(ctx, |ui| {
+                ui.set_min_width(260.0_f32.min(screen.width().max(180.0)));
                 ui.label(
                     egui::RichText::new(alt_text)
                         .size(13.0)
@@ -728,9 +714,13 @@ pub fn hud_system(
         }
         // 操作提示
         egui::Area::new(egui::Id::new("flighthint"))
-                .fixed_pos(egui::pos2(screen.center().x - 220.0, screen.max.y - 60.0))
+                .fixed_pos(egui::pos2(
+                    (screen.center().x - 250.0).max(8.0),
+                    screen.max.y - 60.0,
+                ))
                 .interactable(false)
                 .show(ctx, |ui| {
+                    ui.set_min_width(500.0_f32.min(screen.width().max(220.0)));
                     let hint = match *mode {
                         crate::space::FlightMode::Atmo => "W/S 油门 · Shift 加力 · A/D 滚转 · E 降落 · 拉升冲出大气层",
                         crate::space::FlightMode::Space => "W/S 油门 · Shift 加力 · J 脉冲 · C 扫描 · M 星系图 · 左键 开火 · 飞向空间站自动泊入 · 冲向星球再入",
@@ -763,13 +753,16 @@ pub fn hud_system(
 
     // prompt (interact hint) above hotbar
     if let Some(prompt) = &ui.prompt {
+        let prompt_width = screen.width().clamp(280.0, 520.0);
         egui::Area::new(egui::Id::new("prompt"))
             .fixed_pos(egui::pos2(
-                screen.center().x - 120.0,
+                screen.center().x - prompt_width * 0.5,
                 screen.max.y - slot_px - 52.0,
             ))
             .interactable(false)
             .show(ctx, |ui| {
+                ui.set_min_width(prompt_width);
+                ui.set_max_width(prompt_width);
                 ui.label(
                     egui::RichText::new(prompt.clone())
                         .size(15.0)
@@ -863,14 +856,16 @@ pub fn hud_system(
 
     // 大字提示
     if let Some((title, sub, _t)) = &ui.big {
+        let message_width = screen.width().clamp(300.0, 600.0);
         egui::Area::new(egui::Id::new("bigmsg"))
             .fixed_pos(egui::pos2(
-                screen.center().x - 300.0,
+                screen.center().x - message_width * 0.5,
                 screen.height() * 0.30,
             ))
             .interactable(false)
             .show(ctx, |ui| {
-                ui.set_width(600.0);
+                ui.set_width(message_width);
+                ui.set_max_width(message_width);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new(title.clone())
@@ -886,6 +881,66 @@ pub fn hud_system(
                 });
             });
     }
+}
+
+/// Draw the parked ship's marker in world-relative screen space.  Keeping it
+/// as a separate system avoids inflating the main HUD system's parameter list
+/// and lets the marker follow the real camera projection.
+pub fn ship_label_system(
+    mut contexts: EguiContexts,
+    mode: Res<crate::space::FlightMode>,
+    game: Option<Res<crate::space::SpaceGame>>,
+    ui_state: Res<UiState>,
+    camera: HudCamera,
+) {
+    if *mode != crate::space::FlightMode::Planet || ui_state.locked() {
+        return;
+    }
+    let Some(game) = game else { return };
+    if game.ship_pos == Vec3::ZERO {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    if !egui_fonts_ready(ctx) {
+        return;
+    }
+    let Ok((camera, camera_transform)) = camera.query.single() else {
+        return;
+    };
+    let Ok(viewport) = camera.world_to_viewport(camera_transform, game.ship_pos + Vec3::Y * 4.0)
+    else {
+        return;
+    };
+    let screen = ctx.content_rect();
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let pos = egui::pos2(viewport.x / ppp, viewport.y / ppp);
+    if pos.x <= -180.0
+        || pos.x >= screen.width() + 180.0
+        || pos.y <= -60.0
+        || pos.y >= screen.height() + 60.0
+    {
+        return;
+    }
+    let label_width = 300.0_f32.min(screen.width().max(220.0));
+    egui::Area::new(egui::Id::new("ship_world_label"))
+        .fixed_pos(egui::pos2(
+            (pos.x - label_width * 0.5).clamp(4.0, (screen.width() - label_width - 4.0).max(4.0)),
+            (pos.y - 28.0).clamp(4.0, (screen.height() - 28.0).max(4.0)),
+        ))
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.set_width(label_width);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "▣ 飞船  ({:.0}, {:.0}, {:.0})",
+                        game.ship_pos.x, game.ship_pos.y, game.ship_pos.z
+                    ))
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0x7d, 0xff, 0x8a)),
+                );
+            });
+        });
 }
 
 /// 大字提示消息接收 + 计时衰减。
@@ -3301,7 +3356,7 @@ pub fn creative_panel_system(
                         .num_columns(8)
                         .spacing([4.0, 4.0])
                         .show(ui, |ui| {
-                            for item in data::ITEMS {
+                            for (i, item) in data::ITEMS.iter().enumerate() {
                                 let (rect, resp) = ui.allocate_exact_size(
                                     egui::vec2(48.0, 48.0),
                                     egui::Sense::click(),
@@ -3339,6 +3394,9 @@ pub fn creative_panel_system(
                                     give.push((item.key.to_string(), 64));
                                 } else if resp.secondary_clicked() {
                                     give.push((item.key.to_string(), 1));
+                                }
+                                if (i + 1) % 8 == 0 {
+                                    ui.end_row();
                                 }
                             }
                         });

@@ -23,6 +23,9 @@ impl Rng {
     /// Integer in [0, n).
     #[inline]
     pub fn range(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
         ((self.next() * n as f32) as usize).min(n - 1)
     }
 
@@ -213,6 +216,11 @@ mod tests {
             let v = r.next();
             assert!((v - e).abs() < 1e-6, "got {v}, expected {e}");
         }
+    }
+
+    #[test]
+    fn empty_range_is_safe() {
+        assert_eq!(Rng::new(1).range(0), 0);
     }
 
     #[test]

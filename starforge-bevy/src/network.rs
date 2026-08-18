@@ -24,6 +24,9 @@ const DEFAULT_ADDR: &str = "127.0.0.1:17889";
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_PACKET: usize = 60_000;
 const MAX_PLAYERS: usize = 32;
+const MAX_BLOCK_LOG: usize = 100_000;
+const MAX_PENDING_BLOCKS: usize = 20_000;
+const MAX_BLOCKS_PER_SECOND: usize = 1_000;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,6 +198,13 @@ impl NetworkState {
         self.pending_blocks.clear();
         self.status = "未连接".to_string();
     }
+
+    /// Reset transport and remote-avatar bookkeeping while keeping the
+    /// resource alive across menu -> game transitions.
+    pub fn reset(&mut self) {
+        self.stop_transport();
+        self.remote_entities.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -284,7 +294,9 @@ fn valid_block(update: &BlockUpdate) -> bool {
         && update.x.abs() <= 1_000_000
         && update.z.abs() <= 1_000_000
         && (0..crate::data::WORLD_H).contains(&update.y)
-        && update.id <= 61
+        && crate::data::BLOCKS
+            .iter()
+            .any(|block| block.id == update.id)
         && update.dir <= 3
 }
 
@@ -302,6 +314,8 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
             let mut block_log: HashMap<(usize, i32, i32, i32), BlockUpdate> = HashMap::new();
             let mut next_id = 1u64;
             let mut last_snapshot = Instant::now();
+            let mut block_window = Instant::now();
+            let mut block_count = 0usize;
             let mut buf = [0u8; MAX_PACKET];
             loop {
                 if stop_rx.try_recv().is_ok() {
@@ -444,10 +458,19 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                             if !valid_block(&update) {
                                 continue;
                             }
-                            block_log.insert(
-                                (update.planet, update.x, update.y, update.z),
-                                update.clone(),
-                            );
+                            if block_window.elapsed() >= Duration::from_secs(1) {
+                                block_window = Instant::now();
+                                block_count = 0;
+                            }
+                            if block_count >= MAX_BLOCKS_PER_SECOND {
+                                continue;
+                            }
+                            block_count += 1;
+                            let key = (update.planet, update.x, update.y, update.z);
+                            if !block_log.contains_key(&key) && block_log.len() >= MAX_BLOCK_LOG {
+                                continue;
+                            }
+                            block_log.insert(key, update.clone());
                             broadcast(&socket, &clients, &ServerPacket::Block { update });
                         }
                         ClientPacket::Disconnect => {
@@ -621,6 +644,9 @@ fn apply_block(
     commands: &mut Commands,
     machines: &Query<(Entity, &Machine)>,
 ) {
+    if !valid_block(update) {
+        return;
+    }
     world.set(update.x, update.y, update.z, update.id);
     if update.id == crate::data::ids::AIR {
         if let Some((entity, _)) = machines
@@ -643,6 +669,34 @@ fn apply_block(
                 update.dir,
             );
         }
+    }
+}
+
+fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
+    if !valid_block(&update) {
+        return;
+    }
+    let pending = net.pending_blocks.values().map(Vec::len).sum::<usize>();
+    if pending >= MAX_PENDING_BLOCKS {
+        // Drop the oldest available batch entry. UDP is lossy by design; a
+        // bounded client is preferable to an unbounded memory queue.
+        if let Some((_, updates)) = net
+            .pending_blocks
+            .iter_mut()
+            .find(|(_, updates)| !updates.is_empty())
+        {
+            updates.remove(0);
+        }
+    }
+    net.pending_blocks
+        .entry(update.planet)
+        .or_default()
+        .push(update);
+}
+
+fn clear_remote_entities(net: &mut NetworkState, commands: &mut Commands) {
+    for entity in net.remote_entities.drain().map(|(_, entity)| entity) {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -670,6 +724,8 @@ pub fn network_system(
     for event in events {
         match event {
             ClientEvent::Error(error) => {
+                clear_remote_entities(&mut net, &mut commands);
+                net.stop_transport();
                 net.status = error.clone();
                 net.chat.push(format!("⚠ {error}"));
                 net.connected = false;
@@ -682,6 +738,8 @@ pub fn network_system(
                     net.chat.push(format!("已连接到 {host_name}"));
                 }
                 ServerPacket::Reject { reason } => {
+                    clear_remote_entities(&mut net, &mut commands);
+                    net.stop_transport();
                     net.status = format!("连接被拒绝：{reason}");
                     let status = net.status.clone();
                     net.chat.push(status);
@@ -691,17 +749,11 @@ pub fn network_system(
                 ServerPacket::Chat { name, text } => net.chat.push(format!("{name}：{text}")),
                 ServerPacket::Notice { text } => net.chat.push(text),
                 ServerPacket::Block { update } => {
-                    net.pending_blocks
-                        .entry(update.planet)
-                        .or_default()
-                        .push(update);
+                    queue_pending_block(&mut net, update);
                 }
                 ServerPacket::WorldDelta { blocks } => {
                     for update in blocks {
-                        net.pending_blocks
-                            .entry(update.planet)
-                            .or_default()
-                            .push(update);
+                        queue_pending_block(&mut net, update);
                     }
                 }
                 ServerPacket::Pong => {}
@@ -839,7 +891,7 @@ pub fn network_ui_system(
     if ui_state.panel != Panel::Network {
         return;
     }
-    let ctx = contexts.ctx_mut().expect("egui primary context");
+    let Ok(ctx) = contexts.ctx_mut() else { return };
     if !crate::ui::egui_fonts_ready(ctx) {
         return;
     }
@@ -963,8 +1015,7 @@ pub fn network_ui_system(
 }
 
 pub fn disconnect_system(mut net: ResMut<NetworkState>) {
-    net.stop_transport();
-    net.remote_entities.clear();
+    net.reset();
 }
 
 #[cfg(test)]
@@ -1004,6 +1055,14 @@ mod tests {
             y: crate::data::WORLD_H,
             z: 0,
             id: 1,
+            dir: 0,
+        }));
+        assert!(!valid_block(&BlockUpdate {
+            planet: 0,
+            x: 0,
+            y: 1,
+            z: 0,
+            id: 60,
             dir: 0,
         }));
     }

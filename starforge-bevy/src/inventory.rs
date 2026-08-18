@@ -38,8 +38,8 @@ impl Inventory {
     pub fn from_slots(slots: Vec<Option<Slot>>) -> Self {
         let mut inventory = Self::default();
         for slot in slots.into_iter().take(INV_SLOTS).flatten() {
-            if slot.n > 0 {
-                inventory.add_item(&slot.item, slot.n);
+            if slot.n > 0 && data::item_by_key(&slot.item).is_some() {
+                inventory.add_item(&slot.item, slot.n.min(1_000_000));
             }
         }
         inventory

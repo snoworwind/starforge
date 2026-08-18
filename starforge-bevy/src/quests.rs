@@ -292,7 +292,9 @@ pub fn side_quest_system(
                                     p.inv.remove_item(&sq.item, sq.need);
                                     p.credits += sq.reward;
                                     p.toast(format!("村庄感谢你！+₪{}", sq.reward));
-                                    quests.side.as_mut().unwrap().done = true;
+                                    if let Some(side) = quests.side.as_mut() {
+                                        side.done = true;
+                                    }
                                     crate::audio::play(
                                         &mut commands,
                                         sfx.pickup.clone(),

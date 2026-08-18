@@ -167,7 +167,8 @@ impl Player {
         if self.hot_idx < 0 {
             None
         } else {
-            Some(self.hot_idx as usize)
+            let idx = self.hot_idx as usize;
+            (idx < self.inv.slots.len()).then_some(idx)
         }
     }
 
@@ -181,7 +182,7 @@ impl Player {
 
     /// Apply damage: shield first, then hp. Returns true if the player died.
     pub fn damage(&mut self, n: f32) -> bool {
-        if self.dead || n <= 0.0 || self.creative() {
+        if self.dead || !n.is_finite() || n <= 0.0 || self.creative() {
             return false;
         }
         let mut rem = n;
@@ -385,7 +386,9 @@ pub fn movement_system(
 }
 
 pub fn collision_system(time: Res<Time>, mut q: Query<&mut Player>, world: Res<World>) {
-    let dt = time.delta_secs();
+    // A long frame must not turn one collision step into a several-hundred
+    // metre teleport. This also bounds the recovery loop below.
+    let dt = time.delta_secs().clamp(0.0, 0.1);
     for mut p in &mut q {
         if p.dead {
             continue;
@@ -439,7 +442,10 @@ pub fn collision_system(time: Res<Time>, mut q: Query<&mut Player>, world: Res<W
             }
             np.y = p.pos.y;
             p.vel.y = 0.0;
-            while collides(np.x, np.y, np.z) {
+            for _ in 0..2048 {
+                if !collides(np.x, np.y, np.z) {
+                    break;
+                }
                 np.y += 0.05;
             }
         }

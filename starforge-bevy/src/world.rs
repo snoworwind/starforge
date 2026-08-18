@@ -615,7 +615,7 @@ impl WorldGen {
 
     /// RLE decode into data; returns false on corruption/length mismatch.
     pub fn rle_decode(data: &mut [u8], pairs: &[u16]) -> bool {
-        if pairs.len() % 2 != 0 || pairs.chunks_exact(2).any(|p| p[1] > u8::MAX as u16) {
+        if !pairs.len().is_multiple_of(2) || pairs.chunks_exact(2).any(|p| p[1] > u8::MAX as u16) {
             return false;
         }
         let total: u64 = pairs.iter().step_by(2).map(|&r| r as u64).sum();

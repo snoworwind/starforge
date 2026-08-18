@@ -1397,10 +1397,10 @@ fn spawn_scene(
         if !wd.market.is_empty() {
             game.galaxy.market = wd.market.clone();
         }
-        if let Some(sp) = wd.ship_pos {
-            if sp.iter().all(|v| v.is_finite()) {
-                game.ship_pos = Vec3::new(sp[0], sp[1], sp[2]);
-            }
+        if let Some(sp) = wd.ship_pos
+            && sp.iter().all(|v| v.is_finite())
+        {
+            game.ship_pos = Vec3::new(sp[0], sp[1], sp[2]);
         }
         // 地图标记 / 跃迁锁定 / 跨星系档案 / 放置计数（JS mapMarks/warpLock/galaxyArchives/placedCount）
         game.marks = wd.marks.clone();

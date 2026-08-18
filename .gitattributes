@@ -3,3 +3,9 @@
 *.rs text eol=lf
 *.wgsl text eol=lf
 Cargo.lock text eol=lf
+
+# The legacy JavaScript implementation is retained for reference/tests but
+# should not be counted as project source by GitHub Linguist.
+legacy-web/**/*.js linguist-vendored
+*.gltf linguist-vendored
+*.glb linguist-vendored

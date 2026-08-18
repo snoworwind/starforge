@@ -36,7 +36,7 @@ use bevy::window::{CursorOptions, PresentMode};
 use bevy_egui::{EguiContexts, EguiPlugin, egui};
 use materials::{TerrainMat, TerrainMaterials};
 use player::Player;
-use space::{FlightCamera, FlightMode, ShipAsset, ShipState, SpaceGame, SpaceInput};
+use space::{FlightCamera, FlightMode, ShipAsset, ShipRecall, ShipState, SpaceGame, SpaceInput};
 use ui::{Research, ScanPulse, UiState};
 use world::{VoxelMesh, World};
 
@@ -233,17 +233,25 @@ fn main() {
     }));
     let smoke = std::env::args().any(|a| a == "--smoke");
     let play = std::env::args().any(|a| a == "--play");
+    let asset_dir = executable_asset_dir();
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.1)))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "STARFORGE 星穹熔炉 · Bevy 移植版".into(),
-                resolution: (1280, 720).into(),
-                present_mode: PresentMode::AutoVsync,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(bevy::asset::AssetPlugin {
+                    file_path: asset_dir,
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "STARFORGE 星穹熔炉 · Bevy 移植版".into(),
+                        resolution: (1280, 720).into(),
+                        present_mode: PresentMode::AutoVsync,
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         .add_plugins(EguiPlugin::default())
         .add_plugins(MaterialPlugin::<TerrainMat>::default())
         .insert_resource(save::load_settings())
@@ -264,6 +272,7 @@ fn main() {
         .add_message::<network::BlockChanged>()
         .insert_resource(FlightMode::default())
         .insert_resource(ShipState::default())
+        .insert_resource(ShipRecall::default())
         .insert_resource(SpaceInput::default())
         .insert_resource(FlightCamera::default())
         .insert_resource(player::PlayerCameraMode::default())
@@ -360,6 +369,7 @@ fn main() {
                                 // 太空
                                 space::space_input_system,
                                 space::ship_interact_system,
+                                space::ship_recall_system,
                                 space::seated_system,
                                 space::atmo_land_trigger_system,
                             )
@@ -511,9 +521,10 @@ fn ground_mode(mode: Res<FlightMode>) -> bool {
     *mode == FlightMode::Planet
 }
 
-/// 生物在地面和座舱状态都应继续模拟；座舱只暂停玩家的地面操作。
+/// 只要地表场景仍可见，生物就继续运行完整 AI；飞船飞过大气层时不能
+/// 只播放骨骼动画而冻结位置。
 fn creature_mode(mode: Res<FlightMode>) -> bool {
-    *mode == FlightMode::Planet || *mode == FlightMode::Seated
+    mode.ground_scene()
 }
 
 fn in_planet_mode(mode: Res<FlightMode>) -> bool {
@@ -528,6 +539,22 @@ fn walk_look_mode(mode: Res<FlightMode>) -> bool {
     *mode == FlightMode::Planet || *mode == FlightMode::Seated || *mode == FlightMode::Station
 }
 
+/// 发布版资源根目录固定在可执行文件旁，避免受启动时当前工作目录或
+/// `CARGO_MANIFEST_DIR` 环境变量影响。
+fn executable_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+}
+
+fn executable_asset_dir() -> String {
+    executable_dir()
+        .map(|dir| dir.join("assets"))
+        .unwrap_or_else(|| std::path::PathBuf::from("assets"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 // ---------- Startup ----------
 
 fn startup(
@@ -540,10 +567,7 @@ fn startup(
 ) {
     // Self-extract the WGSL shader assets next to the executable so the
     // AssetServer finds them regardless of the working directory.
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
+    if let Some(dir) = executable_dir() {
         let shader_dir = dir.join("assets").join("shaders");
         let _ = std::fs::create_dir_all(&shader_dir);
         let _ = std::fs::write(
@@ -558,28 +582,29 @@ fn startup(
             shader_dir.join("terrain_fragment.wgsl"),
             include_str!("../assets/shaders/terrain_fragment.wgsl"),
         );
-        // GLB 模型同样自解压到 exe 旁（仅首次；源码在 <crate>/target/<profile>/ 下时向上两级即 crate 根）
+        // 本地开发构建时把模型目录复制到 exe 旁（源码在
+        // <crate>/target/<profile>/ 下时向上两级即 crate 根）。发布包则应
+        // 直接携带 exe 旁的 assets/models，不依赖源代码目录。
         let models_dir = dir.join("assets").join("models");
-        // Existing target folders may come from an older build and therefore
-        // already contain legacy NPC assets while missing the new creature set.
-        // Copy when any required Quaternius file is absent, not only when the
-        // directory itself is absent.
-        let creature_files = ["alpaca", "deer", "fox", "wolf"];
-        if creature_files.iter().any(|name| {
-            !models_dir
-                .join("creatures")
-                .join(format!("quaternius_{name}.gltf"))
-                .exists()
-        }) {
+        let required_model_files = [
+            "creatures/quaternius_alpaca.gltf",
+            "creatures/quaternius_deer.gltf",
+            "creatures/quaternius_fox.gltf",
+            "creatures/quaternius_wolf.gltf",
+            "creatures/sentinel.glb",
+            "asteroids/meteor.glb",
+            "asteroids/meteor_detailed.glb",
+            "external/ships/space_ship_b/scene.gltf",
+            "external/stations/space_station/scene.gltf",
+        ];
+        if required_model_files
+            .iter()
+            .any(|path| !models_dir.join(path).exists())
+        {
             let mut src: Option<std::path::PathBuf> = None;
             let via_exe = dir.join("..").join("..").join("assets").join("models");
             if via_exe.is_dir() {
                 src = Some(via_exe);
-            } else if let Ok(cwd) = std::env::current_dir() {
-                let via_cwd = cwd.join("assets").join("models");
-                if via_cwd.is_dir() {
-                    src = Some(via_cwd);
-                }
             }
             if let Some(s) = src {
                 let _ = copy_dir_all(&s, &models_dir);

@@ -29,6 +29,9 @@ pub const SUN_POS: Vec3 = Vec3::new(6000.0, 2400.0, 1800.0);
 pub const SUN_R: f32 = 450.0;
 pub const EXIT_Y: f32 = 220.0;
 pub const HANDOFF_Y: f32 = 150.0;
+/// 地面召回飞船的最大玩家—飞船距离。
+pub const SHIP_RECALL_MAX_DISTANCE: f32 = 128.0;
+const SHIP_RECALL_DURATION: f32 = 2.4;
 /// 相机远平面：需覆盖远景地形（±1536 格）与太空天体（行星 1500~2600u、星光 9000u）
 pub const CAM_FAR: f32 = 12000.0;
 pub const WRAP_X: f32 = std::f32::consts::PI * 2.0 / 0.004; // ≈1570.8
@@ -205,6 +208,16 @@ pub struct ShipAsset {
     pub entity: Option<Entity>,
     pub flames: Vec<Entity>,
     pub data: ShipData,
+}
+
+/// 地面召回飞船的短暂飞行轨迹。
+#[derive(Resource, Default)]
+pub struct ShipRecall {
+    pub from: Vec3,
+    pub to: Vec3,
+    pub apex_y: f32,
+    pub t: f32,
+    pub active: bool,
 }
 
 /// A downloaded glTF scene's animation is attached after Bevy has materialized
@@ -743,18 +756,17 @@ pub fn bolt_system(
             commands.entity(e).despawn();
             continue;
         }
-        // 大气层射击也能命中地表生物：伤害交给统一 creature_despawn_system
-        // 处理掉落与永久灭绝记录，避免飞船击杀绕过野生动物存档逻辑。
+        // 大气层射击也能命中地表生物：用覆盖整个可见身体的球形代理，
+        // 避免高速弹丸只擦过脚/头部时漏判；伤害和掉落仍交给统一的
+        // creature_despawn_system 处理。
         let mut hit_creature: Option<(Entity, Vec3)> = None;
         for (ce, creature, creature_tf) in &aux.creatures {
+            let creature_center =
+                creature_tf.translation + Vec3::Y * (creature.height.max(1.0) * 0.5);
+            let hit_radius = (creature.radius.max(0.6) * 2.0).max(creature.height.max(1.0) * 0.62);
             if *mode == FlightMode::Atmo
                 && creature.hp > 0.0
-                && segment_hits_sphere(
-                    pos,
-                    np,
-                    creature_tf.translation + Vec3::Y * creature.height * 0.45,
-                    creature.radius.max(0.6) * 1.8,
-                )
+                && segment_hits_sphere(pos, np, creature_center, hit_radius)
             {
                 hit_creature = Some((ce, creature_tf.translation));
                 break;
@@ -1611,33 +1623,8 @@ pub fn spawn_ship(
         Transform::from_xyz(wing_span * 0.52, 0.05, -0.3),
     );
 
-    // 尾焰：仍返回实体列表，现有 ship_sync_system 会按速度和脉冲引擎动态拉伸。
-    let flame_mat = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.18, 0.78, 1.0, 0.72),
-        emissive: LinearRgba::new(0.08, 0.6, 1.0, 1.0) * 3.0,
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
-    });
-    let mut flames = Vec::new();
-    let flame_count = if engine_count == 1 { 1 } else { 2 };
-    for i in 0..flame_count {
-        let x = if flame_count == 1 {
-            0.0
-        } else if i == 0 {
-            -engine_x
-        } else {
-            engine_x
-        };
-        flames.push(ship_part(
-            commands,
-            root,
-            meshes.add(Cuboid::new(0.34, 0.34, 1.65)),
-            flame_mat.clone(),
-            Transform::from_xyz(x, -0.1, 3.05),
-        ));
-    }
-    (root, flames)
+    // 外部模型不再附加旧版方块尾焰；尾焰实体列表保留为空以兼容旧调用方。
+    (root, Vec::new())
 }
 
 /// Spawn a licensed glTF ship from `assets/models/external`.
@@ -1648,71 +1635,60 @@ pub fn spawn_ship(
 /// saves keep working without migration.
 pub fn spawn_external_ship(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
+    _meshes: &mut Assets<Mesh>,
+    _mats: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     pos: Vec3,
     yaw: f32,
     cls: &ShipClass,
     model: Option<&str>,
 ) -> (Entity, Vec<Entity>) {
-    let (path, scale, model_rotation, flame_z, flame_count) = match model {
+    let (path, scale, model_rotation) = match model {
         Some("ship_striker") => (
             "models/external/ships/space_ship_torb/scene.gltf",
             0.18,
             Quat::IDENTITY,
-            2.2,
-            2,
         ),
         Some("ship_dispatcher") => (
             "models/external/ships/space_ship_b/scene.gltf",
             1.0,
-            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            3.0,
-            2,
+            // B 模型的机头推测沿 -X，转到游戏本地 -Z。
+            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
         ),
         Some("ship_insurgent") => (
             "models/external/ships/supermatic_sky_cruiser/scene.gltf",
             1.1,
-            Quat::IDENTITY,
-            3.2,
-            2,
+            // A 模型的长轴已是 Z，但推测机头朝 +Z，翻转 180°。
+            Quat::from_rotation_y(std::f32::consts::PI),
         ),
         Some("ship") => (
             "models/external/ships/space_ship_c/scene.gltf",
             0.45,
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-            3.0,
-            1,
+            // C 模型的机头推测沿 +Y，转到游戏本地 -Z，再绕最长轴翻转 180°。
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                * Quat::from_rotation_y(std::f32::consts::PI),
         ),
         _ => match cls.key {
             "S" => (
                 "models/external/ships/unsa_destroyer/scene.gltf",
                 0.00028,
                 Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-                5.0,
-                2,
             ),
             "A" => (
                 "models/external/ships/supermatic_sky_cruiser/scene.gltf",
                 1.1,
-                Quat::IDENTITY,
-                3.2,
-                2,
+                Quat::from_rotation_y(std::f32::consts::PI),
             ),
             "B" => (
                 "models/external/ships/space_ship_b/scene.gltf",
                 1.0,
-                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-                3.0,
-                2,
+                Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
             ),
             _ => (
                 "models/external/ships/space_ship_c/scene.gltf",
                 0.45,
-                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                3.0,
-                1,
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                    * Quat::from_rotation_y(std::f32::consts::PI),
             ),
         },
     };
@@ -1732,33 +1708,8 @@ pub fn spawn_external_ship(
         .id();
     attach_external_animation(commands, scene, path);
     commands.entity(root).add_child(scene);
-
-    let flame_mat = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.18, 0.78, 1.0, 0.72),
-        emissive: LinearRgba::new(0.08, 0.6, 1.0, 1.0) * 3.0,
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
-    });
-    let flame_mesh = meshes.add(Cuboid::new(0.34, 0.34, 1.65));
-    let mut flames = Vec::new();
-    for i in 0..flame_count {
-        let x = if flame_count == 1 {
-            0.0
-        } else if i == 0 {
-            -0.9
-        } else {
-            0.9
-        };
-        flames.push(ship_part(
-            commands,
-            root,
-            flame_mesh.clone(),
-            flame_mat.clone(),
-            Transform::from_xyz(x, -0.1, flame_z),
-        ));
-    }
-    (root, flames)
+    // 外部 glTF 已经包含材质/纹理/动画，不再生成旧版方块尾焰。
+    (root, Vec::new())
 }
 
 /// 程序化星球贴图（128×256，噪声着色 + 极冠）。
@@ -2171,6 +2122,99 @@ pub fn space_input_system(
 
 // ---------- 地面：登船 / 下船 ----------
 
+fn ship_recall_target(world: &VoxelWorld, player: &Player) -> Option<Vec3> {
+    let forward = player.forward().normalize_or_zero();
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+    let diagonal_a = (forward + right).normalize_or_zero();
+    let diagonal_b = (forward - right).normalize_or_zero();
+    let directions = [
+        forward,
+        -forward,
+        right,
+        -right,
+        diagonal_a,
+        -diagonal_a,
+        diagonal_b,
+        -diagonal_b,
+    ];
+    for radius in [8.0, 10.0, 12.0, 14.0] {
+        for direction in directions {
+            let candidate = player.pos + direction * radius;
+            let x = candidate.x.floor() as i32;
+            let z = candidate.z.floor() as i32;
+            let Some(ground_y) = world.creature_ground_at(x, z) else {
+                continue;
+            };
+            let pos = Vec3::new(x as f32 + 0.5, parked_ship_y(ground_y), z as f32 + 0.5);
+            if pos.xz().distance(player.pos.xz()) >= SHIP_BOX[0] + 2.0 {
+                return Some(pos);
+            }
+        }
+    }
+    None
+}
+
+/// H 键召回地面飞船。只有在玩家仍处于飞船的有效通信距离内才允许召回，
+/// 召回过程用一条抛物线飞行轨迹把船送到玩家附近的安全地面。
+pub fn ship_recall_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<FlightMode>,
+    ui: Res<UiState>,
+    world: Option<Res<VoxelWorld>>,
+    mut player: Query<&mut Player>,
+    mut game: ResMut<SpaceGame>,
+    mut ship: ResMut<ShipState>,
+    mut recall: ResMut<ShipRecall>,
+) {
+    if *mode != FlightMode::Planet
+        || ui.locked()
+        || !keys.just_pressed(KeyCode::KeyH)
+        || recall.active
+    {
+        return;
+    }
+    let Some(world) = world else { return };
+    let Ok(mut player) = player.single_mut() else {
+        return;
+    };
+    let distance = player.pos.distance(game.ship_pos);
+    if distance > SHIP_RECALL_MAX_DISTANCE {
+        player.toast(format!(
+            "距离飞船过远（{distance:.0}/{SHIP_RECALL_MAX_DISTANCE:.0}），无法召回"
+        ));
+        return;
+    }
+    let Some(target) = ship_recall_target(&world, &player) else {
+        player.toast("附近没有安全的飞船降落位置".to_string());
+        return;
+    };
+    let from_y = world.top_at(
+        game.ship_pos.x.floor() as i32,
+        game.ship_pos.z.floor() as i32,
+    );
+    let from = Vec3::new(
+        game.ship_pos.x,
+        game.ship_pos.y.max(parked_ship_y(from_y)),
+        game.ship_pos.z,
+    );
+    recall.from = from;
+    recall.to = target;
+    recall.apex_y = from.y.max(target.y) + 12.0;
+    recall.t = 0.0;
+    recall.active = true;
+    game.ship_pos = from;
+    ship.pos = from;
+    ship.speed = 0.0;
+    ship.pulsing = false;
+    ship.yaw = player.yaw;
+    ship.board_yaw = player.yaw;
+    ship.pitch = 0.0;
+    ship.roll = 0.0;
+    ship.cam_roll = 0.0;
+    ship.vis_bank = 0.0;
+    player.toast("飞船正在飞来……".to_string());
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn ship_interact_system(
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -2521,6 +2565,31 @@ pub fn ship_forward(yaw: f32, pitch: f32) -> Vec3 {
     Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0) * Vec3::NEG_Z
 }
 
+/// 将大气层坐标中的前进向量转换为星球曲面外的世界向量。
+///
+/// 大气层使用平面 `(x, y, z)`：x 是经度方向、z 是纬度方向、y 是径向
+/// 高度；进入太空后这三个轴分别变成当地的东向、径向和北向。直接沿用
+/// 大气层的 yaw/pitch 会把旧的全局轴当成星球切线轴，导致出大气后航向
+/// 在不同经纬度发生错误偏转。
+fn atmo_forward_to_space(atmo_forward: Vec3, lon: f32, lat: f32, radial: Vec3) -> Vec3 {
+    let east = Vec3::new(-lat.cos() * lon.sin(), 0.0, lat.cos() * lon.cos()).normalize_or_zero();
+    let north =
+        Vec3::new(-lat.sin() * lon.cos(), lat.cos(), -lat.sin() * lon.sin()).normalize_or_zero();
+    (east * atmo_forward.x + radial * atmo_forward.y + north * atmo_forward.z).normalize_or_zero()
+}
+
+/// 将世界前进向量还原成本项目使用的 yaw/pitch 表示。
+fn attitude_from_forward(forward: Vec3) -> (f32, f32) {
+    let forward = forward.normalize_or_zero();
+    if forward.length_squared() < 1e-8 {
+        return (0.0, 0.0);
+    }
+    (
+        (-forward.x).atan2(-forward.z),
+        forward.y.clamp(-1.0, 1.0).asin(),
+    )
+}
+
 fn bolt_rotation(dir: Vec3) -> Quat {
     Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize_or_zero())
 }
@@ -2725,6 +2794,14 @@ fn exit_to_space(
     let lon = ship.pos.x * 0.004;
     let lat = (ship.pos.z * 0.004).clamp(-1.15, 1.15);
     let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+    // 先保存越过 EXIT_Y 前一刻的姿态，再按当前经纬度的局部切平面
+    // 转换到星球外部坐标。这样出大气后的方向会继承实际仰角/偏航，
+    // 而不是把大气层的全局 x/y/z 轴直接误当成太空坐标轴。
+    let atmo_forward = ship_forward(ship.yaw, ship.pitch);
+    let space_forward = atmo_forward_to_space(atmo_forward, lon, lat, dir);
+    let (space_yaw, space_pitch) = attitude_from_forward(space_forward);
+    ship.yaw = space_yaw;
+    ship.pitch = space_pitch;
     let center = Vec3::from(planet.pos);
     ship.pos = center + dir * (planet.radius + (ship.pos.y - data::SEA_Y) * s);
     // JS: Space.shipState.speed = Math.max(24, atmo.speed * s)
@@ -3488,17 +3565,11 @@ pub fn warp_arrive_system(
 pub fn ship_sync_system(
     ship: Res<ShipState>,
     ship_asset: Res<ShipAsset>,
-    mut q: Query<(
-        Entity,
-        &mut Transform,
-        Option<&mut MeshMaterial3d<StandardMaterial>>,
-    )>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(Entity, &mut Transform)>,
     mode: Res<FlightMode>,
-    time: Res<Time>,
 ) {
     let Some(e) = ship_asset.entity else { return };
-    let Ok((_, mut tf, _)) = q.get_mut(e) else {
+    let Ok((_, mut tf)) = q.get_mut(e) else {
         return;
     };
     tf.translation = ship.pos;
@@ -3522,32 +3593,35 @@ pub fn ship_sync_system(
         }
         _ => ship_quat(ship.yaw, ship.pitch, ship.roll),
     };
-    // 引擎尾焰（JS Space.update 同口径）：长度随速度 + 脉冲引擎 2.0 加成；
-    // 逐帧随机闪烁 ±10%（0.9~1.1 倍）并随速度做透明度动画 0.4~0.9 —— 修复静态无动画的尾焰。
-    let flame_scale = 0.4 + ship.speed / MAX_SPEED * 0.8 + if ship.pulsing { 2.0 } else { 0.0 };
-    let flick = 0.9 + crate::rng::Rng::new((time.elapsed_secs() * 1000.0) as u32).next() * 0.2;
-    let opacity = 0.4 + (ship.speed / 100.0).min(0.5);
-    for f in &ship_asset.flames {
-        if let Ok((_, mut ftf, mat)) = q.get_mut(*f) {
-            ftf.scale.z = flame_scale * flick;
-            if let Some(m) = mat
-                && let Some(mut mm) = mats.get_mut(m.0.id())
-            {
-                mm.base_color.set_alpha(opacity);
-            }
-        }
-    }
-    let _ = mode;
 }
 
 /// 地面模式时飞船停泊在 ship_pos。
 pub fn ship_parked_system(
+    time: Res<Time>,
     mode: Res<FlightMode>,
     mut game: ResMut<SpaceGame>,
     mut ship_state: ResMut<ShipState>,
+    mut recall: ResMut<ShipRecall>,
     world: Option<Res<VoxelWorld>>,
 ) {
     if *mode != FlightMode::Planet && *mode != FlightMode::Seated {
+        return;
+    }
+    if recall.active {
+        recall.t = (recall.t + time.delta_secs() / SHIP_RECALL_DURATION).min(1.0);
+        let eased = recall.t * recall.t * (3.0 - 2.0 * recall.t);
+        let horizontal = recall.from.lerp(recall.to, eased);
+        let arc = (std::f32::consts::PI * recall.t).sin()
+            * (recall.apex_y - recall.from.y.max(recall.to.y));
+        game.ship_pos = Vec3::new(horizontal.x, horizontal.y + arc, horizontal.z);
+        ship_state.pos = game.ship_pos;
+        ship_state.speed = 0.0;
+        ship_state.pulsing = false;
+        if recall.t >= 1.0 {
+            game.ship_pos = recall.to;
+            ship_state.pos = recall.to;
+            recall.active = false;
+        }
         return;
     }
     // 降落/泊入后船位与状态资源同步

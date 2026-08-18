@@ -4,8 +4,10 @@
 use bevy::gltf::GltfAssetLabel;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
+use bevy::world_serialization::WorldInstanceReady;
 use bevy_world_serialization::prelude::WorldAssetRoot;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::creatures::Creature;
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
@@ -203,6 +205,67 @@ pub struct ShipAsset {
     pub entity: Option<Entity>,
     pub flames: Vec<Entity>,
     pub data: ShipData,
+}
+
+/// A downloaded glTF scene's animation is attached after Bevy has materialized
+/// its child `AnimationPlayer` entity.
+#[derive(Clone, Component)]
+struct ExternalAnimationSetup {
+    model: &'static str,
+}
+
+#[derive(Resource, Default)]
+pub struct ExternalAnimationLibrary {
+    clips: HashMap<&'static str, (Handle<AnimationGraph>, AnimationNodeIndex)>,
+}
+
+/// Connect the single embedded animation clip carried by the external model
+/// to an AnimationGraph and loop it. This is shared by ships and stations.
+fn external_model_animation_ready(
+    ready: On<WorldInstanceReady>,
+    mut commands: Commands,
+    children: Query<&Children>,
+    setups: Query<&ExternalAnimationSetup>,
+    mut players: Query<&mut AnimationPlayer>,
+    asset_server: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut library: ResMut<ExternalAnimationLibrary>,
+) {
+    let Ok(setup) = setups.get(ready.entity) else {
+        return;
+    };
+    let (graph, clip) = if let Some(cached) = library.clips.get(setup.model) {
+        (cached.0.clone(), cached.1)
+    } else {
+        let (graph, nodes) = AnimationGraph::from_clips([
+            asset_server.load(GltfAssetLabel::Animation(0).from_asset(setup.model))
+        ]);
+        let graph = graphs.add(graph);
+        let clip = nodes[0];
+        library.clips.insert(setup.model, (graph.clone(), clip));
+        (graph, clip)
+    };
+    for child in children.iter_descendants(ready.entity) {
+        let Ok(mut player) = players.get_mut(child) else {
+            continue;
+        };
+        let mut transitions = AnimationTransitions::new();
+        transitions.play(&mut player, clip, Duration::ZERO).repeat();
+        commands
+            .entity(child)
+            .insert((AnimationGraphHandle(graph.clone()), transitions));
+    }
+}
+
+pub(crate) fn attach_external_animation(
+    commands: &mut Commands,
+    entity: Entity,
+    model: &'static str,
+) {
+    commands
+        .entity(entity)
+        .insert(ExternalAnimationSetup { model })
+        .observe(external_model_animation_ready);
 }
 
 // ---------- 飞行相机 ----------
@@ -899,7 +962,7 @@ fn visitor_system_legacy(
             let pos = Vec3::from(pd.pos)
                 + Vec3::new(a.cos() * el.cos(), el.sin(), a.sin() * el.cos()) * r;
             let cls = crate::data::roll_ship_class(rng.next());
-            let (ent, flames) = spawn_ship(
+            let (ent, flames) = spawn_external_ship(
                 &mut commands,
                 &mut meshes,
                 &mut mats,
@@ -907,6 +970,7 @@ fn visitor_system_legacy(
                 pos,
                 a,
                 cls,
+                None,
             );
             for f in flames {
                 commands.entity(f).despawn();
@@ -1026,7 +1090,7 @@ pub fn visitor_system(
                     angle.sin() * elevation.cos(),
                 ) * radius;
             let cls = crate::data::roll_ship_class(rng.next());
-            let (entity, _flames) = spawn_ship(
+            let (entity, _flames) = spawn_external_ship(
                 &mut commands,
                 &mut meshes,
                 &mut mats,
@@ -1034,6 +1098,7 @@ pub fn visitor_system(
                 position,
                 angle,
                 cls,
+                None,
             );
             let target = random_cruise_target(&game, &mut rng);
             commands.entity(entity).insert(VisitorShip {
@@ -1575,6 +1640,127 @@ pub fn spawn_ship(
     (root, flames)
 }
 
+/// Spawn a licensed glTF ship from `assets/models/external`.
+///
+/// The old procedural builder above is kept as a reference for the original
+/// silhouette, but all live ship call sites use this asset-backed path. The
+/// logical save-game model names are mapped to the downloaded models so old
+/// saves keep working without migration.
+pub fn spawn_external_ship(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
+    pos: Vec3,
+    yaw: f32,
+    cls: &ShipClass,
+    model: Option<&str>,
+) -> (Entity, Vec<Entity>) {
+    let (path, scale, model_rotation, flame_z, flame_count) = match model {
+        Some("ship_striker") => (
+            "models/external/ships/space_ship_torb/scene.gltf",
+            0.18,
+            Quat::IDENTITY,
+            2.2,
+            2,
+        ),
+        Some("ship_dispatcher") => (
+            "models/external/ships/space_ship_b/scene.gltf",
+            1.0,
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            3.0,
+            2,
+        ),
+        Some("ship_insurgent") => (
+            "models/external/ships/supermatic_sky_cruiser/scene.gltf",
+            1.1,
+            Quat::IDENTITY,
+            3.2,
+            2,
+        ),
+        Some("ship") => (
+            "models/external/ships/space_ship_c/scene.gltf",
+            0.45,
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            3.0,
+            1,
+        ),
+        _ => match cls.key {
+            "S" => (
+                "models/external/ships/unsa_destroyer/scene.gltf",
+                0.00028,
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                5.0,
+                2,
+            ),
+            "A" => (
+                "models/external/ships/supermatic_sky_cruiser/scene.gltf",
+                1.1,
+                Quat::IDENTITY,
+                3.2,
+                2,
+            ),
+            "B" => (
+                "models/external/ships/space_ship_b/scene.gltf",
+                1.0,
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                3.0,
+                2,
+            ),
+            _ => (
+                "models/external/ships/space_ship_c/scene.gltf",
+                0.45,
+                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                3.0,
+                1,
+            ),
+        },
+    };
+    let root = commands
+        .spawn((
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+            Visibility::default(),
+            crate::InGame,
+        ))
+        .id();
+    let scene = commands
+        .spawn((
+            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path))),
+            Transform::from_rotation(model_rotation).with_scale(Vec3::splat(scale)),
+            crate::InGame,
+        ))
+        .id();
+    attach_external_animation(commands, scene, path);
+    commands.entity(root).add_child(scene);
+
+    let flame_mat = mats.add(StandardMaterial {
+        base_color: Color::srgba(0.18, 0.78, 1.0, 0.72),
+        emissive: LinearRgba::new(0.08, 0.6, 1.0, 1.0) * 3.0,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    });
+    let flame_mesh = meshes.add(Cuboid::new(0.34, 0.34, 1.65));
+    let mut flames = Vec::new();
+    for i in 0..flame_count {
+        let x = if flame_count == 1 {
+            0.0
+        } else if i == 0 {
+            -0.9
+        } else {
+            0.9
+        };
+        flames.push(ship_part(
+            commands,
+            root,
+            flame_mesh.clone(),
+            flame_mat.clone(),
+            Transform::from_xyz(x, -0.1, flame_z),
+        ));
+    }
+    (root, flames)
+}
+
 /// 程序化星球贴图（128×256，噪声着色 + 极冠）。
 pub fn planet_texture(
     images: &mut Assets<Image>,
@@ -1825,7 +2011,14 @@ pub fn spawn_space_scene(
         });
     }
     // 空间站
-    let station = crate::station::spawn_station(commands, meshes, mats, Vec3::from(galaxy.station));
+    let station = crate::station::spawn_station_model(
+        commands,
+        meshes,
+        mats,
+        asset_server,
+        Vec3::from(galaxy.station),
+        galaxy.seed,
+    );
     // 小行星（CC0 陨石模型，随机缩放）
     let mut asteroids = Vec::new();
     let mut ar = crate::rng::Rng::new(0xA57E);
@@ -3393,7 +3586,16 @@ pub fn spawn_initial_ship(
         spawn.z + 4.0,
     );
     let cls = data::ship_class_by_key(&ship_data.cls);
-    let (e, flames) = spawn_ship(commands, meshes, mats, asset_server, pos, 0.0, cls);
+    let (e, flames) = spawn_external_ship(
+        commands,
+        meshes,
+        mats,
+        asset_server,
+        pos,
+        0.0,
+        cls,
+        Some(&ship_data.model),
+    );
     (e, flames, pos)
 }
 

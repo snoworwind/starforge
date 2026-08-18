@@ -14,6 +14,11 @@ cargo run -- --smoke
 
 功能、操作、素材许可和测试说明见 [`starforge-bevy/README.md`](starforge-bevy/README.md)。
 
+> 注意：外部飞船和空间站模型体积较大，不包含在 Git 仓库中。首次运行前请按
+> [`starforge-bevy/CREDITS.md`](starforge-bevy/CREDITS.md) 中的来源链接下载，并按
+> [`assets/licenses/models-directory-audit.md`](starforge-bevy/assets/licenses/models-directory-audit.md)
+> 的目录结构解压到 `starforge-bevy/assets/models/external/`。
+
 ## 旧版 Web 归档
 
 旧版源码及其说明见 [`legacy-web/`](legacy-web/)；该目录不再维护或进入 CI，仅作历史归档和迁移核对，不是 Bevy 版的依赖或兼容目标。

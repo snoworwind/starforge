@@ -4,6 +4,10 @@
 > 许可证原文已存档于 `assets/licenses/`。
 > 素材下载日期：2026-08-18（以当前仓库 `assets/` 内文件为准）。
 
+> **外部模型不随 Git 仓库分发。** 飞船和空间站模型总计约 557 MB，因体积过大被排除在仓库之外。
+> 请从下方表格或 `assets/licenses/models-directory-audit.md` 中的对应来源页面下载，按目录名解压到
+> `assets/models/external/`，并保留每个包中的 `license.txt`、`scene.gltf`、`scene.bin` 和 `textures/`。
+
 ## 音效（assets/audio/*.ogg，共 32 条）
 
 | 素材 | 来源 | 许可证 | 署名要求 |
@@ -14,6 +18,25 @@
 > 32 条文件清单：alarm、break_block、click、coin、craft、creature_die、creature_hit、dig、dock、engine_loop、error、explosion、hover、hurt、insert、jet、jump、land、land_ship、laser_hit、open_chest、pickup、place、pulse、research、scan、shoot、step、takeoff、ui_close、ui_open、warp（均为 .ogg）。
 
 ## 3D 模型（assets/models/，含 GLB / glTF）
+
+### `models/` 中导入的 CC-BY-4.0 飞船与空间站
+
+这些模型均允许免费修改和商业使用，但发行物必须保留作者署名；原始
+`license.txt` 随模型目录保留，完整审计见 `assets/licenses/models-directory-audit.md`。
+
+| 文件 | 用途 | 作者 | 来源 |
+|---|---|---|---|
+| `models/external/ships/space_ship_b/` | B 级飞船 | yanix | https://sketchfab.com/3d-models/space-ship-356a3acb00164c698d657146caa5ebf3 |
+| `models/external/ships/space_ship_c/` | C 级飞船 | Comrade1280 | https://sketchfab.com/3d-models/space-ship-63ce372c1aa843e98bf1548109e055d8 |
+| `models/external/ships/space_ship_torb/` | `ship_striker` 变体 | tramkar | https://sketchfab.com/3d-models/space-ship-torb-fb9cac9500d147528b6cdef8385cf926 |
+| `models/external/ships/supermatic_sky_cruiser/` | A 级飞船 | VertaScan | https://sketchfab.com/3d-models/supermatic-sky-cruiser-d8e0d3253dfa45479f7637d3cff32c4c |
+| `models/external/ships/unsa_destroyer/` | S 级飞船 | xaxary | https://sketchfab.com/3d-models/unsa-destroyer-spaceship-0fd8c6ecd9374392a1ed900e82d7417d |
+| `models/external/stations/space_station/` | 家园空间站 | re1monsen | https://sketchfab.com/3d-models/space-station-0da4a24e7edd49159737675ffcc06228 |
+| `models/external/stations/space_station_3/` | 其他星系空间站 | re1monsen | https://sketchfab.com/3d-models/space-station-3-a7a6ad10261149cab31aa394bfcf8940 |
+| `models/external/stations/space_station_4/` | 其他星系空间站 | re1monsen | https://sketchfab.com/3d-models/space-station-4-cf80075368174bf9895f4fd266cf17e3 |
+| `models/external/stations/helveta/` | 其他星系大型空间站 | Inditrion Dradnon | https://sketchfab.com/3d-models/helveta-space-battle-ship-b743d59343834ec593aa6c2c02bf8473 |
+
+> 每个条目的完整 CC-BY-4.0 署名文本在对应目录的 `license.txt` 中。损坏的 `borderlands_style_space_ship_A_level.zip` 未导入。
 
 ### Kenney Space Kit（CC0 1.0，免署名）— https://kenney.nl/assets/space-kit
 

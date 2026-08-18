@@ -1207,9 +1207,10 @@ pub fn creature_system(
                 tf.translation.y += (c.anim_t * 6.0).sin().abs() * 0.1;
                 tf.rotation = Quat::from_rotation_y(yaw);
             } else {
-                // 有腿生物：行走前后摆动
-                let tilt = (c.anim_t * 10.0).sin() * 0.08;
-                tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(tilt);
+                // The glTF walk clip already animates the skeleton.  Tilting
+                // the gameplay root here as well makes the whole body sway
+                // twice, which is especially noticeable on deer/wolves.
+                tf.rotation = Quat::from_rotation_y(yaw);
             }
         } else {
             c.anim_t += dt;
@@ -1223,7 +1224,13 @@ pub fn creature_system(
         } else {
             1.0
         };
-        let breath = 1.0 + (c.anim_t * 3.0).sin() * 0.03;
+        // Keep a subtle idle pulse, but never scale a walking skeleton on the
+        // gameplay root: the clip owns its own body motion.
+        let breath = if moving {
+            1.0
+        } else {
+            1.0 + (c.anim_t * 3.0).sin() * 0.015
+        };
         let hit = if c.hit_t > 0.0 {
             1.0 + (c.hit_t / 0.25) * 0.18
         } else {

@@ -5,7 +5,9 @@
 use crate::save::Appearance;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use bevy::world_serialization::WorldInstanceReady;
 use bevy_world_serialization::prelude::WorldAssetRoot;
+use std::collections::HashMap;
 
 /// 可用 NPC 模型（按位置哈希轮换，保证同位置同外观）。
 pub const NPC_MODELS: [&str; 8] = [
@@ -47,6 +49,65 @@ pub struct HumanoidParts {
     pub leg_r: Entity,
 }
 
+/// KayKit NPC scenes contain a complete armature and animation library, but
+/// glTF scene instantiation does not automatically choose a clip.  Without
+/// this setup every adventurer stays in the authored T-pose (most visibly with
+/// both arms held straight out).
+#[derive(Component)]
+struct NpcAnimationSetup {
+    model: &'static str,
+}
+
+#[derive(Resource, Default)]
+pub struct NpcAnimationLibrary {
+    adventurer: HashMap<&'static str, (Handle<AnimationGraph>, AnimationNodeIndex)>,
+}
+
+fn npc_animation_ready(
+    ready: On<WorldInstanceReady>,
+    mut commands: Commands,
+    children: Query<&Children>,
+    setups: Query<&NpcAnimationSetup>,
+    mut players: Query<&mut AnimationPlayer>,
+    asset_server: Res<AssetServer>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut library: ResMut<NpcAnimationLibrary>,
+) {
+    let Ok(setup) = setups.get(ready.entity) else {
+        return;
+    };
+    // The low-poly astronaut/alien assets are authored in a usable static
+    // pose.  The KayKit adventurers need their idle clip to leave the T-pose.
+    let Some((graph, idle)) = (setup.model.starts_with("models/npc/adventurer_")).then(|| {
+        if let Some((graph, idle)) = library.adventurer.get(setup.model) {
+            return (graph.clone(), *idle);
+        }
+        let (graph, nodes) = AnimationGraph::from_clips([
+            asset_server.load(GltfAssetLabel::Animation(36).from_asset(setup.model))
+        ]);
+        let graph = graphs.add(graph);
+        let idle = nodes[0];
+        library
+            .adventurer
+            .insert(setup.model, (graph.clone(), idle));
+        (graph, idle)
+    }) else {
+        return;
+    };
+    for child in children.iter_descendants(ready.entity) {
+        let Ok(mut player) = players.get_mut(child) else {
+            continue;
+        };
+        let mut transitions = AnimationTransitions::new();
+        transitions
+            .play(&mut player, idle, std::time::Duration::ZERO)
+            .repeat();
+        commands
+            .entity(child)
+            .insert((AnimationGraphHandle(graph.clone()), transitions));
+    }
+}
+
 #[derive(Component)]
 pub struct NpcIdle {
     pub phase: f32,
@@ -79,8 +140,10 @@ pub fn spawn_humanoid(
                 base_y: pos.y + y_off,
                 base_rotation: Quat::from_rotation_y(yaw),
             },
+            NpcAnimationSetup { model },
             crate::InGame,
         ))
+        .observe(npc_animation_ready)
         .id();
     HumanoidParts {
         root,

@@ -31,7 +31,10 @@ pub const HANDOFF_Y: f32 = 150.0;
 pub const CAM_FAR: f32 = 12000.0;
 pub const WRAP_X: f32 = std::f32::consts::PI * 2.0 / 0.004; // ≈1570.8
 pub const WRAP_Z: f32 = 2.3 / 0.004; // =575
-pub const SHIP_BOX: [f32; 3] = [1.6, 1.1, 1.9];
+// Conservative envelope for the largest ship's wings and for yaw/pitch
+// rotations.  The old envelope only covered the central fuselage, allowing
+// the wings to enter one-block walls during high-speed flight.
+pub const SHIP_BOX: [f32; 3] = [3.8, 1.25, 3.8];
 pub const SHIP_R: f32 = 3.0;
 
 /// 体素→太空缩放
@@ -562,7 +565,10 @@ pub fn bolt_system(
             commands.spawn((
                 Mesh3d(bolt_mesh.clone()),
                 MeshMaterial3d(bolt_mat.clone()),
-                Transform::from_translation(origin),
+                // The projectile mesh is modelled along local -Z, just like
+                // the ship.  Keep its nose aligned with the actual travel
+                // vector instead of leaving it in the world-axis rotation.
+                Transform::from_translation(origin).with_rotation(bolt_rotation(fwd)),
                 LaserBolt {
                     dir: fwd,
                     life: 1.6,
@@ -669,12 +675,13 @@ pub fn bolt_system(
         // 处理掉落与永久灭绝记录，避免飞船击杀绕过野生动物存档逻辑。
         let mut hit_creature: Option<(Entity, Vec3)> = None;
         for (ce, creature, creature_tf) in &aux.creatures {
-            if creature.hp > 0.0
+            if *mode == FlightMode::Atmo
+                && creature.hp > 0.0
                 && segment_hits_sphere(
                     pos,
                     np,
-                    creature_tf.translation + Vec3::Y * creature.height * 0.4,
-                    creature.radius * 1.25,
+                    creature_tf.translation + Vec3::Y * creature.height * 0.45,
+                    creature.radius.max(0.6) * 1.8,
                 )
             {
                 hit_creature = Some((ce, creature_tf.translation));
@@ -683,7 +690,12 @@ pub fn bolt_system(
         }
         if let Some((ce, cpos)) = hit_creature {
             if let Ok((_, mut creature, _)) = aux.creatures.get_mut(ce) {
-                creature.hp -= b.dmg * 2.0;
+                // Use the same weapon damage as ship-vs-ship combat.  The
+                // previous multiplier was not the cause of misses; the
+                // overly small body sphere was.  A generous capsule proxy
+                // makes fast atmospheric shots reliably register on the
+                // visible body without requiring pixel-perfect aim.
+                creature.hp -= b.dmg;
                 creature.hit_t = 0.25;
                 if creature.hp <= 0.0 {
                     crate::audio::play(&mut commands, aux.sfx.creature_die.clone(), 0.8, None);
@@ -2217,7 +2229,7 @@ pub fn start_atmo(from_space: bool, ship: &mut ShipState, game: &SpaceGame, worl
 
 // ---------- 大气层飞行 ----------
 
-fn ship_voxel_collision(ship: &mut ShipState, world: &VoxelWorld, dt: f32) {
+fn ship_voxel_collision(ship: &mut ShipState, world: &VoxelWorld, _dt: f32) -> bool {
     let p = ship.pos;
     let x0 = (p.x - SHIP_BOX[0]).floor() as i32;
     let x1 = (p.x + SHIP_BOX[0]).floor() as i32;
@@ -2277,25 +2289,38 @@ fn ship_voxel_collision(ship: &mut ShipState, world: &VoxelWorld, dt: f32) {
         }
     }
     if let Some((axis, _amt, push)) = best {
+        let normal = match axis {
+            0 => Vec3::new(push.signum(), 0.0, 0.0),
+            1 => Vec3::new(0.0, push.signum(), 0.0),
+            _ => Vec3::new(0.0, 0.0, push.signum()),
+        };
         match axis {
             0 => ship.pos.x += push,
             1 => ship.pos.y += push,
             _ => ship.pos.z += push,
         }
-        if hit_below {
-            let fwd = ship_forward(ship.yaw, ship.pitch);
-            if fwd.y < -0.15 {
-                ship.speed = (ship.speed * (1.0 - (dt * 2.5).min(1.0))).max(3.0);
-                if ship.pitch < 0.0 {
-                    ship.pitch += dt * 1.6;
-                }
+        let fwd = ship_forward(ship.yaw, ship.pitch);
+        // A correction without cancelling the component that entered the
+        // block produces the classic one-frame forward/backward jitter.  Stop
+        // at the contact plane; the pilot can turn away and resume smoothly.
+        if fwd.dot(normal) < -0.05 {
+            ship.speed = 0.0;
+            if hit_below && ship.pitch < 0.0 {
+                ship.pitch = 0.0;
             }
         }
+        true
+    } else {
+        false
     }
 }
 
 pub fn ship_forward(yaw: f32, pitch: f32) -> Vec3 {
     Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0) * Vec3::NEG_Z
+}
+
+fn bolt_rotation(dir: Vec3) -> Quat {
+    Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize_or_zero())
 }
 
 /// 机体姿态四元数。注意：glam 的 `from_euler(YXZ, a, b, c)` = Ry(a)·Rx(b)·Rz(c)，
@@ -2446,7 +2471,9 @@ pub fn atmo_system(
     let steps = (dist / 0.5).ceil().max(1.0) as u32;
     for _ in 0..steps {
         ship.pos += fwd * (dist / steps as f32);
-        ship_voxel_collision(&mut ship, &world, dt);
+        if ship_voxel_collision(&mut ship, &world, dt) && ship.speed <= 0.0 {
+            break;
+        }
     }
     // 星球是圆的：经纬环绕
     if ship.pos.x > WRAP_X / 2.0 {
@@ -2622,11 +2649,16 @@ pub fn space_system(mut p: SpaceSysParams) {
     let spd = p.ship.speed;
     p.ship.pos += fwd * spd * dt;
     if let Some(sc) = p.scene.as_ref() {
-        crate::station::resolve_station_collision(
+        let station_hit = crate::station::resolve_station_collision(
             &mut p.ship.pos,
             sc.station_pos,
             p.station_defense.active(),
         );
+        if station_hit {
+            // The next frame must not immediately re-enter the same wall or
+            // shield boundary, otherwise high-speed flight visibly jitters.
+            p.ship.speed = 0.0;
+        }
         let sun_d = p.ship.pos.distance(SUN_POS);
         if sun_d < SUN_R + 40.0 {
             let mut v = p.ship.pos - SUN_POS;
@@ -3472,6 +3504,15 @@ mod tests {
     #[test]
     fn galaxy_name_home() {
         assert_eq!(data::galaxy_name(data::HOME_GALAXY_SEED), "起源星系");
+    }
+
+    #[test]
+    fn projectile_nose_follows_travel_direction() {
+        for dir in [Vec3::NEG_Z, Vec3::X, Vec3::Y, Vec3::new(1.0, 2.0, -3.0)] {
+            let dir = dir.normalize();
+            let nose = bolt_rotation(dir) * Vec3::NEG_Z;
+            assert!(nose.distance(dir) < 1e-5, "{nose:?} vs {dir:?}");
+        }
     }
 
     #[test]

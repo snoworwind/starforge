@@ -37,6 +37,15 @@ pub const WRAP_Z: f32 = 2.3 / 0.004; // =575
 pub const SHIP_BOX: [f32; 3] = [3.8, 1.25, 3.8];
 pub const SHIP_R: f32 = 3.0;
 
+/// 飞船根节点中心相对地面方块索引的安全停泊高度。
+///
+/// `top_at` 返回的是最高方块的 y 索引，方块顶面在 `y + 1`。飞船碰撞
+/// 包络的底面还要再向上留出 `SHIP_BOX[1]`，否则降落/起飞时会先与地面
+/// 相交，导致船体陷入地形并被碰撞修正卡住。
+pub fn parked_ship_y(ground_y: i32) -> f32 {
+    ground_y as f32 + 1.0 + SHIP_BOX[1]
+}
+
 /// 体素→太空缩放
 pub fn voxel_scale(planet: &PlanetDef) -> f32 {
     planet.radius * 0.004
@@ -2390,7 +2399,7 @@ pub fn atmo_land_trigger_system(
         crate::audio::play(&mut commands, sfx.error.clone(), 0.5, None);
         return;
     }
-    let landing_y = gy as f32 + 1.2;
+    let landing_y = parked_ship_y(gy);
     land.t = 0.0;
     land.from = ship.pos;
     land.to = Vec3::new(ship.pos.x, landing_y, ship.pos.z);
@@ -3341,7 +3350,7 @@ pub fn ship_sync_system(
 /// 地面模式时飞船停泊在 ship_pos。
 pub fn ship_parked_system(
     mode: Res<FlightMode>,
-    game: Res<SpaceGame>,
+    mut game: ResMut<SpaceGame>,
     mut ship_state: ResMut<ShipState>,
     world: Option<Res<VoxelWorld>>,
 ) {
@@ -3357,8 +3366,12 @@ pub fn ship_parked_system(
             game.ship_pos.x.floor() as i32,
             game.ship_pos.z.floor() as i32,
         );
-        if (game.ship_pos.y - gy as f32).abs() > 3.0 {
-            ship_state.pos.y = gy as f32 + 1.0;
+        let safe_y = parked_ship_y(gy);
+        if game.ship_pos.y < safe_y {
+            // 修复旧存档/旧版本落点过低的问题，并同步游戏状态；只修正
+            // 下陷位置，不强行抬高合法的发射平台或特殊停泊点。
+            game.ship_pos.y = safe_y;
+            ship_state.pos.y = safe_y;
         }
     }
 }
@@ -3376,7 +3389,7 @@ pub fn spawn_initial_ship(
     let spawn = world.find_spawn(96, 96);
     let pos = Vec3::new(
         spawn.x + 4.0,
-        world.top_at((spawn.x + 4.0) as i32, (spawn.z + 4.0) as i32) as f32 + 1.0,
+        parked_ship_y(world.top_at((spawn.x + 4.0) as i32, (spawn.z + 4.0) as i32)),
         spawn.z + 4.0,
     );
     let cls = data::ship_class_by_key(&ship_data.cls);
@@ -3471,6 +3484,14 @@ mod tests {
         assert_eq!(data::roll_ship_class(0.6).key, "B");
         assert_eq!(data::roll_ship_class(0.85).key, "A");
         assert_eq!(data::roll_ship_class(0.99).key, "S");
+    }
+
+    #[test]
+    fn parked_ship_clears_ground_collision_envelope() {
+        let ground_y = 10;
+        let y = parked_ship_y(ground_y);
+        let ground_top = ground_y as f32 + 1.0;
+        assert!(y - SHIP_BOX[1] >= ground_top);
     }
 
     #[test]

@@ -336,16 +336,16 @@ fn main() {
                                 player::placement_system.run_if(ground_mode),
                                 player::hotbar_system.run_if(ground_mode),
                                 stream_system.run_if(ground_scene_mode),
-                                creatures::creature_spawn_system.run_if(ground_mode),
-                                creatures::creature_system.run_if(ground_mode),
-                                creatures::creature_sound_system.run_if(ground_mode),
-                                creatures::creature_animation_system.run_if(ground_mode),
-                                creatures::sentinel_system.run_if(ground_mode),
+                                creatures::creature_spawn_system.run_if(creature_mode),
+                                creatures::creature_system.run_if(creature_mode),
+                                creatures::creature_sound_system.run_if(creature_mode),
+                                creatures::creature_animation_system.run_if(creature_mode),
+                                creatures::sentinel_system.run_if(creature_mode),
                             )
                                 .chain(),
                             (
-                                creatures::creature_despawn_system.run_if(ground_mode),
-                                creatures::drops_system.run_if(ground_mode),
+                                creatures::creature_despawn_system.run_if(creature_mode),
+                                creatures::drops_system.run_if(creature_mode),
                                 factory::factory_system.run_if(ground_mode),
                                 factory::machine_sync_system.run_if(ground_mode),
                                 factory::lumberbot_visual_system.run_if(ground_mode),
@@ -506,6 +506,11 @@ fn main() {
 
 fn ground_mode(mode: Res<FlightMode>) -> bool {
     *mode == FlightMode::Planet
+}
+
+/// 生物在地面和座舱状态都应继续模拟；座舱只暂停玩家的地面操作。
+fn creature_mode(mode: Res<FlightMode>) -> bool {
+    *mode == FlightMode::Planet || *mode == FlightMode::Seated
 }
 
 fn in_planet_mode(mode: Res<FlightMode>) -> bool {

@@ -67,10 +67,12 @@ fn safe_player_position(pos: [f32; 3]) -> Option<Vec3> {
 /// Chunk terrain meshes (cleared on planet switch).
 #[derive(Component)]
 pub struct ChunkMesh {
-    /// 区块坐标用于高速移动时立即隐藏旧视距外网格，避免等待延迟 despawn
-    /// 命令执行期间把旧地形和新地形叠在一起。
+    /// 区块坐标用于流式卸载。
     pub cx: i32,
     pub cz: i32,
+    /// Prevents one frame of the previous planet leaking through while its
+    /// chunk entities are waiting for deferred despawn.
+    pub world_seed: u32,
 }
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -1752,6 +1754,7 @@ fn stream_world_step(
                         meshes,
                         cx,
                         cz,
+                        world.seed,
                         m,
                         mats.solid.clone(),
                         false,
@@ -1759,7 +1762,17 @@ fn stream_world_step(
                     )
                 });
                 c.water_mesh = water_m.map(|m| {
-                    spawn_chunk_mesh(commands, meshes, cx, cz, m, mats.water.clone(), true, y_min)
+                    spawn_chunk_mesh(
+                        commands,
+                        meshes,
+                        cx,
+                        cz,
+                        world.seed,
+                        m,
+                        mats.water.clone(),
+                        true,
+                        y_min,
+                    )
                 });
                 c.dirty = false;
                 mesh_left -= 1;
@@ -1818,6 +1831,7 @@ fn spawn_chunk_mesh(
     meshes: &mut Assets<Mesh>,
     cx: i32,
     cz: i32,
+    world_seed: u32,
     vm: VoxelMesh,
     mat: Handle<TerrainMat>,
     _water: bool,
@@ -1847,7 +1861,7 @@ fn spawn_chunk_mesh(
             aabb,
             NoAutoAabb,
             Visibility::default(),
-            ChunkMesh { cx, cz },
+            ChunkMesh { cx, cz, world_seed },
             InGame,
         ))
         .id()
@@ -2170,8 +2184,6 @@ fn stars_ok() -> bool {
 fn ground_scene_visibility_system(
     mode: Res<FlightMode>,
     world: Res<World>,
-    player: Query<&Player>,
-    ship: Res<ShipState>,
     mut commands: Commands,
     mut q: Query<
         (Entity, Option<&mut Visibility>, Option<&ChunkMesh>),
@@ -2185,27 +2197,15 @@ fn ground_scene_visibility_system(
         )>,
     >,
 ) {
-    let (px, pz) = if matches!(
-        *mode,
-        FlightMode::Atmo | FlightMode::AtmoLand | FlightMode::Seated
-    ) {
-        (ship.pos.x, ship.pos.z)
-    } else {
-        player
-            .single()
-            .map(|p| (p.pos.x, p.pos.z))
-            .unwrap_or((ship.pos.x, ship.pos.z))
-    };
-    let pcx = world::cf(px);
-    let pcz = world::cf(pz);
     let show = mode.ground_scene();
     for (e, v, chunk) in &mut q {
-        // 视距外网格先隐藏，再由 stream_world_step 延迟回收；高速穿越时不会
-        // 出现旧区块残影、与新位置地形重叠或闪烁。
-        let chunk_show = show
-            && chunk
-                .map(|c| World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 1)
-                .unwrap_or(true);
+        // Keep the old, already-rendered terrain visible while the next
+        // streaming ring is generated.  Hiding it immediately at a chunk
+        // boundary exposed the far mesh for a few frames, making the terrain
+        // appear to turn into a different biome.  stream_world_step still
+        // removes meshes outside the unload radius; the seed check only
+        // suppresses stale meshes from a previous planet during the handoff.
+        let chunk_show = show && chunk.map(|c| c.world_seed == world.seed).unwrap_or(true);
         let vis = if chunk_show {
             Visibility::Visible
         } else {

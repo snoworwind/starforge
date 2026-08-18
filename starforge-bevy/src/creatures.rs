@@ -823,9 +823,7 @@ fn register_cell(spawner: &mut CreatureSpawner, world: &World, cx: i32, cz: i32,
             wz = ccz + ang.sin() * dist;
             let ix = wx.floor() as i32;
             let iz = wz.floor() as i32;
-            let gy = world.top_at(ix, iz);
-            let dd = data::block_by_id(world.get(ix, gy, iz));
-            ok = !dd.liquid && dd.key != "log" && dd.key != "leaves";
+            ok = world.creature_ground_at(ix, iz).is_some();
             if ok {
                 break;
             }
@@ -917,11 +915,9 @@ fn materialize_herd(
     // 地形被破坏（水/树）→ 保持休眠，等恢复
     let ix = h.x.floor() as i32;
     let iz = h.z.floor() as i32;
-    let gy = world.top_at(ix, iz);
-    let dd = data::block_by_id(world.get(ix, gy, iz));
-    if dd.liquid || dd.key == "log" || dd.key == "leaves" {
+    let Some(gy) = world.creature_ground_at(ix, iz) else {
         return false;
-    }
+    };
     let kind = data::biome_animal_kind(world.biome().key);
     let (model, scale, y_off) = creature_model(kind);
     // 命中盒按新模型的统一目标高度估算，避免旧静态网格的尺寸参数残留。
@@ -1169,8 +1165,33 @@ pub fn creature_system(
             }
         }
         let mut pos = tf.translation;
+        let current_ground = world.creature_ground_at(pos.x.floor() as i32, pos.z.floor() as i32);
+        let mut ground = current_ground;
         if c.walking {
-            pos += c.vel * dt;
+            // Horizontal movement is accepted only when the destination is a
+            // loaded, dry, non-tree surface and the step is small enough.  The
+            // old code sampled `top_at` after moving, so a tree canopy or a
+            // water column became an instant elevator.
+            let candidate = pos + Vec3::new(c.vel.x * dt, 0.0, c.vel.z * dt);
+            let next_ground =
+                world.creature_ground_at(candidate.x.floor() as i32, candidate.z.floor() as i32);
+            let step_ok = match (current_ground, next_ground) {
+                (Some(from), Some(to)) => (to - from).abs() <= 1,
+                _ => false,
+            };
+            if step_ok {
+                pos.x = candidate.x;
+                pos.z = candidate.z;
+                ground = next_ground;
+            } else {
+                // Turn away from an impassable column without changing the
+                // creature's vertical state.  A short cooldown avoids
+                // repeatedly pushing into the same tree/water edge.
+                c.dir = -c.dir;
+                c.vel.x = c.dir.x * c.speed;
+                c.vel.z = c.dir.z * c.speed;
+                c.ai_t = c.ai_t.min(0.35);
+            }
         }
         // home 领地（JS 野生生物 26 格外折返）
         if (pos - c.home).xz().length() > 26.0 {
@@ -1183,7 +1204,19 @@ pub fn creature_system(
         pos += Vec3::Y * c.vel.y * dt;
         // 贴地：原点 = 地面 + 1 + foot（脚底正好在方块顶面）——
         // 修复旧实现把原点钳到 地面+1，导致 origin 在脚底上方 0.5+ 格的模型（鹿/蟹）半身陷入地下
-        let ground = world.top_at(pos.x.floor() as i32, pos.z.floor() as i32);
+        if ground.is_none() {
+            ground = world.creature_ground_at(pos.x.floor() as i32, pos.z.floor() as i32);
+        }
+        let Some(ground) = ground else {
+            // The streaming ring is still catching up.  Do not snap to an
+            // unloaded column (which would otherwise look like a terrain
+            // teleport); hold position until the real chunk is available.
+            pos.x = tf.translation.x;
+            pos.z = tf.translation.z;
+            c.vel.y = c.vel.y.min(0.0);
+            tf.translation = pos;
+            continue;
+        };
         let floor_y = ground as f32 + 1.0 + c.foot;
         if pos.y <= floor_y + 0.01 {
             pos.y = floor_y + 0.01;
@@ -1393,7 +1426,9 @@ pub fn sentinel_system(
             if !has {
                 let x = cell[0];
                 let z = cell[2];
-                let top = world.top_at(x, z);
+                let Some(top) = world.creature_ground_at(x, z) else {
+                    return;
+                };
                 let animation = creature_animation_setup(
                     "sentinel",
                     &asset_server,
@@ -1455,7 +1490,19 @@ pub fn sentinel_system(
         let dist = tf.translation.distance(ppos);
         if dist < 16.0 {
             let dir = (ppos - tf.translation).normalize_or_zero();
-            tf.translation += dir * 4.7 * dt; // speed 1.8 × 2.6 追击
+            let next = tf.translation + dir * 4.7 * dt; // speed 1.8 × 2.6 追击
+            let from_ground = world.creature_ground_at(
+                tf.translation.x.floor() as i32,
+                tf.translation.z.floor() as i32,
+            );
+            let to_ground = world.creature_ground_at(next.x.floor() as i32, next.z.floor() as i32);
+            if let (Some(from), Some(to)) = (from_ground, to_ground)
+                && (to - from).abs() <= 1
+            {
+                tf.translation.x = next.x;
+                tf.translation.z = next.z;
+                tf.translation.y = to as f32 + 1.0;
+            }
             let yaw = dir.x.atan2(dir.z);
             tf.rotation = Quat::from_rotation_y(yaw);
             if dist < 1.9 {

@@ -15,6 +15,7 @@ pub struct CurveUniform {
     pub grow: f32,      // vertical squash/stretch about SEA_Y
     pub wave_time: f32, // water wave time
     pub wave_on: f32,   // 1.0 enables water waves
+    pub water_on: f32,  // enables animated surface sheen/reflection pass
     pub fade: f32,      // global alpha fade
     pub edge_r: f32,    // radial edge fade radius (blocks)
     pub pad: f32,
@@ -118,7 +119,8 @@ impl TerrainMaterials {
                 double_sided: true,
                 cull_mode: None,
                 alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 0.4,
+                perceptual_roughness: 0.18,
+                metallic: 0.12,
                 ..default()
             },
             extension: TerrainExtension {
@@ -128,6 +130,7 @@ impl TerrainMaterials {
                     fade: 1.0,
                     edge_r: 9999.0,
                     wave_on: 1.0,
+                    water_on: 1.0,
                     ..default()
                 },
             },
@@ -206,6 +209,7 @@ pub fn curve_system(
             c.fade = fade;
             c.edge_r = 9999.0;
             c.wave_time = *wave_t;
+            c.water_on = if handle == &mats.water { 1.0 } else { 0.0 };
             // 远景挖空环（片元着色器计算，替代每帧 CPU 改写 129×129 顶点 alpha）
             c.far_hole_on = if handle == &mats.far { 1.0 } else { 0.0 };
             c.far_hole_r0 = r0;

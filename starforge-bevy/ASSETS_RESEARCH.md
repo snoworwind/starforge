@@ -57,12 +57,11 @@ starforge-bevy/assets/
   - `pub fn play(commands: &mut Commands, handle: Handle<AudioSource>, volume: f32, pitch: Option<f32>)` —— 基于 `AudioPlayer` + `PlaybackSettings { mode: PlaybackMode::Despawn, volume, speed }`
   - `#[derive(Component)] pub struct JetSound;` —— 循环音实体（despawn 即停）
 
-### 1.3 生物 —— `src/creatures.rs`（432 行，程序化立方体）
+### 1.3 生物 —— `src/creatures.rs`（带骨骼动画的 Quaternius glTF）
 
-- `spawn_creature(commands, meshes, materials, world, pos, body: u32, legs: u32, eye: u32, kind)`：
-  生成 1 个身体盒子 + 1 个头盒子 + 2 个眼睛盒子（纯色 `StandardMaterial`，眼睛自发光）。
-- 3 种形状（仅尺寸不同）：`"crab"` (0.55×0.4×0.7)、`"blob"` (0.7×0.5×0.7)、其它 `"strider"` (0.35×1.1×0.35)。
-- **无骨骼、无动画**：只有 `tf.scale` 正弦呼吸假动画 + 朝向旋转。
+- 被动生物使用 Quaternius 的 Alpaca / Deer / Fox / Wolf glTF，文件内嵌网格、材质和骨骼动画。
+- `CreatureAnimationSetup` 使用模型自带的 Idle / Walk 动画；四肢、尾巴、头部随步态一起摆动。
+- 生态类型扩展为 `strider`、`hopper`、`crab`、`beetle`、`manta`、`blob`，由 `data::biome_animal_kind` 确定性映射到四个动画模型。
 - **替换模型时必须保留的 `Creature` 组件**（碰撞/逻辑不依赖模型外观）：
 
 ```rust
@@ -189,7 +188,7 @@ fn spawn_gltf(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 | # | 素材包 | 来源 | 许可证 | 动画 | 格式 | 适配说明 |
 |---|---|---|---|---|---|---|
-| B1 | **Quaternius LowPoly Animated Animals** | https://quaternius.itch.io/lowpoly-animated-animals | **CC0** | ✅ 骨骼动画（Idle/Walk/Run） | FBX/glTF | 30+ 动物（鹿/熊/狐狸/兔/狼/牛/猪/羊/马），直接替换现有程序化动物 |
+| B1 | **Quaternius Ultimate Animated Animal Pack** | https://quaternius.com/packs/ultimateanimatedanimals.html | **CC0** | ✅ 骨骼动画（Idle/Walk/Gallop/Jump/Death 等） | glTF/FBX/Blend/OBJ | 12 种动物，当前已下载 Alpaca/Deer/Fox/Wolf 四个 glTF 并接入 Bevy |
 | B2 | **Kenney Animal Pack Remastered** | https://kenney.nl/assets/animal-pack-remastered | **CC0** | ❌ 静态 | 多格式含 glTF | **方块风格**（鹿/牛/羊/熊等 10+），与 16×16 体素风最契合；无动画可用现有呼吸/浮动假动画 |
 | B3 | **KayKit Character Pack: Adventurers** | https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0 | **CC0** | ✅ 基础动画 | **GLB** + FBX | 4 个低多边形人形角色 → 村民/NPC 位 |
 | B4 | **KayKit Character Pack: Skeletons** | https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0 | **CC0** | ✅ | GLB + FBX | 4 个骷髅 → 敌对怪物位 |

@@ -834,9 +834,12 @@ pub fn item_by_key(key: &str) -> Option<&'static Item> {
 /// 生态动物体型类型（JS BIOMES[].animal.type：strider/crab/blob）。
 pub fn biome_animal_kind(biome_key: &str) -> &'static str {
     match biome_key {
-        "lush" | "alien" | "fungal" | "salt" | "redmoss" | "hive" => "strider",
-        "desert" | "volcanic" | "crystal" | "ashen" | "amber" | "ferrous" | "obsidian" => "crab",
-        "frozen" | "ocean" | "murk" => "blob",
+        "lush" | "fungal" => "strider",
+        "alien" | "redmoss" | "hive" => "hopper",
+        "salt" | "frozen" => "manta",
+        "desert" | "volcanic" | "ashen" | "ferrous" | "obsidian" => "crab",
+        "crystal" | "amber" => "beetle",
+        "ocean" | "murk" => "blob",
         _ => "strider",
     }
 }

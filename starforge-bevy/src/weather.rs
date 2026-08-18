@@ -113,7 +113,7 @@ pub fn climate_system(
         runtime.elapsed = 0.0;
 
         if settings.clouds {
-            let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+            let mesh = meshes.add(Sphere::new(1.0).mesh().ico(3).expect("cloud mesh"));
             let material = materials.add(StandardMaterial {
                 base_color: Color::srgba(1.0, 1.0, 1.0, 0.38),
                 alpha_mode: AlphaMode::Blend,

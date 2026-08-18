@@ -18,11 +18,11 @@ use std::time::Duration;
 /// 24m 生成网格（MC 同款）。
 pub const CRE_CELL: f32 = 24.0;
 /// 首次踏入一格时建立兽群的几率（≈ MC 区块生成生物的 1/10）。
-pub const HERD_CHANCE: f32 = 0.18;
+pub const HERD_CHANCE: f32 = 0.30;
 /// 玩家 128m 范围内活跃兽群数量目标（低于此值才周期补足 → 被杀后缓慢恢复）。
-pub const TARGET_DENSITY: usize = 12;
+pub const TARGET_DENSITY: usize = 20;
 /// 活跃生物上限（安全阀）。
-pub const CRE_CAP: usize = 16;
+pub const CRE_CAP: usize = 28;
 /// 生成环内径：距玩家 < 24m 不生成（Minecraft 同款规则）。
 pub const SPAWN_MIN: f32 = 24.0;
 /// 生成环外径（Minecraft 同款 128m）。
@@ -32,7 +32,7 @@ pub const UNLOAD_D: f32 = 128.0;
 /// 距玩家 < 96m：休眠兽群重载（迟滞带，避免边界抖动）。
 pub const RELOAD_D: f32 = 96.0;
 /// 周期生成间隔（秒），每次最多补 1 个兽群。
-pub const SPAWN_INTERVAL: f32 = 1.2;
+pub const SPAWN_INTERVAL: f32 = 0.8;
 pub const FADE_IN_T: f32 = 1.0;
 pub const FADE_OUT_T: f32 = 0.8;
 /// 扫描细胞半径（覆盖 96m 物化半径 + 游荡）。
@@ -73,6 +73,27 @@ pub struct Creature {
     pub hit_t: f32,
 }
 
+/// A visual limb owned by a procedural creature body.
+/// Static GLB animals in the original asset set have no skeleton, so limbs are
+/// separate child entities and can be driven from the gameplay velocity.
+#[derive(Component)]
+struct CreatureLimb {
+    owner: Entity,
+    base_translation: Vec3,
+    base_rotation: Quat,
+    swing_axis: Vec3,
+    phase: f32,
+    amplitude: f32,
+    lift: f32,
+}
+
+#[derive(Component)]
+struct CreatureBodyPart {
+    owner: Entity,
+    base_translation: Vec3,
+    phase: f32,
+}
+
 /// Animation graph prepared before a creature scene is instantiated.
 ///
 /// The glTF scene owns the `AnimationPlayer`, so this component stays on the
@@ -86,7 +107,10 @@ struct CreatureAnimationSetup {
 
 #[derive(Resource, Default)]
 pub struct CreatureAnimationLibrary {
-    blob: Option<CreatureAnimationSetup>,
+    alpaca: Option<CreatureAnimationSetup>,
+    deer: Option<CreatureAnimationSetup>,
+    fox: Option<CreatureAnimationSetup>,
+    wolf: Option<CreatureAnimationSetup>,
     sentinel: Option<CreatureAnimationSetup>,
 }
 
@@ -108,7 +132,30 @@ fn creature_animation_setup(
     let (cache, model, idle_index, walk_index) = match kind {
         // The asset keeps these clips in a stable order; use handles rather
         // than names so graph construction does not depend on glTF metadata.
-        "blob" => (&mut library.blob, "models/creatures/blob.glb", 2, 3),
+        "blob" | "beetle" | "manta" => (
+            &mut library.alpaca,
+            "models/creatures/quaternius_alpaca.gltf",
+            6,
+            12,
+        ),
+        "strider" => (
+            &mut library.deer,
+            "models/creatures/quaternius_deer.gltf",
+            6,
+            12,
+        ),
+        "hopper" => (
+            &mut library.fox,
+            "models/creatures/quaternius_fox.gltf",
+            5,
+            11,
+        ),
+        "crab" => (
+            &mut library.wolf,
+            "models/creatures/quaternius_wolf.gltf",
+            5,
+            11,
+        ),
         "sentinel" => (
             &mut library.sentinel,
             "models/creatures/sentinel.glb",
@@ -387,29 +434,359 @@ impl CreatureSpawner {
     }
 }
 
-/// 模型参数：(模型路径, 缩放, 脚底偏移)。尺寸为**最终渲染尺寸**（含 GLB 节点变换）。
-/// 缩放口径与 JS buildCreature 一致：模型最长边 = max(w,h,d) × 2.2（strider 2.42 / crab 1.54 / blob 1.54）。
+/// 模型参数：(模型路径, 缩放, 脚底偏移)。模型来自带骨骼动画的 Quaternius glTF。
+/// 这些模型的脚底在 y≈0，统一缩放到约 2 格高，适配原有命中盒和地形贴地逻辑。
 pub fn creature_model(kind: &str) -> (&'static str, f32, f32) {
     match kind {
-        "crab" => (
-            "models/creatures/crab.glb",
-            1.54 / 19.42,
-            8.64 * (1.54 / 19.42),
-        ),
-        "blob" => ("models/creatures/blob.glb", 1.54 / 2.0, 0.0),
-        _ => (
-            "models/creatures/strider.glb",
-            2.42 / 135.37,
-            67.52 * (2.42 / 135.37),
-        ),
+        "strider" => ("models/creatures/quaternius_deer.gltf", 0.52, 0.0),
+        "hopper" => ("models/creatures/quaternius_fox.gltf", 0.52, 0.0),
+        "crab" => ("models/creatures/quaternius_wolf.gltf", 0.5, 0.0),
+        "beetle" | "manta" => ("models/creatures/quaternius_alpaca.gltf", 0.5, 0.0),
+        "blob" => ("models/creatures/quaternius_alpaca.gltf", 0.44, 0.0),
+        _ => ("models/creatures/quaternius_deer.gltf", 0.52, 0.0),
     }
 }
 
 fn species_speed(kind: &str) -> f32 {
     match kind {
-        "crab" => 0.7,
+        "crab" | "beetle" => 0.7,
+        "hopper" => 1.45,
+        "manta" => 1.05,
         "blob" => 0.35,
         _ => 1.8,
+    }
+}
+
+fn rgb_color(value: u32) -> Color {
+    Color::srgb_u8(
+        ((value >> 16) & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        (value & 0xff) as u8,
+    )
+}
+
+fn creature_part(
+    commands: &mut Commands,
+    root: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+) -> Entity {
+    let e = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            transform,
+            crate::InGame,
+        ))
+        .id();
+    commands.entity(root).add_child(e);
+    e
+}
+
+fn creature_body_part(
+    commands: &mut Commands,
+    root: Entity,
+    owner: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    translation: Vec3,
+    scale: Vec3,
+    phase: f32,
+) {
+    let e = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(translation).with_scale(scale),
+            CreatureBodyPart {
+                owner,
+                base_translation: translation,
+                phase,
+            },
+            crate::InGame,
+        ))
+        .id();
+    commands.entity(root).add_child(e);
+}
+
+fn creature_limb(
+    commands: &mut Commands,
+    root: Entity,
+    owner: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    translation: Vec3,
+    rotation: Quat,
+    size: Vec3,
+    swing_axis: Vec3,
+    phase: f32,
+    amplitude: f32,
+    lift: f32,
+) {
+    let e = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(translation)
+                .with_rotation(rotation)
+                .with_scale(size),
+            CreatureLimb {
+                owner,
+                base_translation: translation,
+                base_rotation: rotation,
+                swing_axis,
+                phase,
+                amplitude,
+                lift,
+            },
+            crate::InGame,
+        ))
+        .id();
+    commands.entity(root).add_child(e);
+}
+
+/// Spawn a modular animal body. The old deer/crab assets are single static
+/// meshes, so this gives every visible leg its own transform and animation.
+fn spawn_procedural_creature(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    root: Entity,
+    kind: &str,
+    body_hex: u32,
+    legs_hex: u32,
+    eye_hex: u32,
+) {
+    let body = materials.add(StandardMaterial {
+        base_color: rgb_color(body_hex),
+        perceptual_roughness: 0.82,
+        metallic: if matches!(kind, "crab" | "beetle") {
+            0.2
+        } else {
+            0.0
+        },
+        ..default()
+    });
+    let legs = materials.add(StandardMaterial {
+        base_color: rgb_color(legs_hex),
+        perceptual_roughness: 0.74,
+        metallic: 0.12,
+        ..default()
+    });
+    let eye = materials.add(StandardMaterial {
+        base_color: rgb_color(eye_hex),
+        emissive: rgb_color(eye_hex).to_linear() * 2.0,
+        unlit: true,
+        ..default()
+    });
+    let shell = materials.add(StandardMaterial {
+        base_color: rgb_color(body_hex),
+        perceptual_roughness: 0.46,
+        metallic: 0.42,
+        ..default()
+    });
+
+    match kind {
+        "crab" | "beetle" => {
+            creature_body_part(
+                commands,
+                root,
+                root,
+                meshes.add(Sphere::new(1.0)),
+                body.clone(),
+                Vec3::new(0.0, 0.72, 0.0),
+                Vec3::new(1.05, 0.5, 0.85),
+                0.0,
+            );
+            creature_body_part(
+                commands,
+                root,
+                root,
+                meshes.add(Sphere::new(1.0)),
+                shell,
+                Vec3::new(0.0, 1.02, 0.08),
+                Vec3::new(0.82, 0.3, 0.63),
+                0.8,
+            );
+            for side in [-1.0f32, 1.0] {
+                for (i, z) in [-0.58f32, 0.0, 0.58].into_iter().enumerate() {
+                    creature_limb(
+                        commands,
+                        root,
+                        root,
+                        meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+                        legs.clone(),
+                        Vec3::new(side * 0.78, 0.38, z),
+                        Quat::from_rotation_y(side * 0.82),
+                        Vec3::new(0.18, 0.18, 0.68),
+                        Vec3::Y,
+                        (i as f32 * 1.9)
+                            + if side < 0.0 {
+                                0.0
+                            } else {
+                                std::f32::consts::PI
+                            },
+                        0.45,
+                        0.06,
+                    );
+                }
+                creature_part(
+                    commands,
+                    root,
+                    meshes.add(Sphere::new(0.18)),
+                    legs.clone(),
+                    Transform::from_xyz(side * 0.52, 0.92, -0.76),
+                );
+                creature_part(
+                    commands,
+                    root,
+                    meshes.add(Sphere::new(0.1)),
+                    eye.clone(),
+                    Transform::from_xyz(side * 0.32, 1.22, -0.68),
+                );
+            }
+        }
+        "manta" => {
+            creature_body_part(
+                commands,
+                root,
+                root,
+                meshes.add(Sphere::new(1.0)),
+                body.clone(),
+                Vec3::new(0.0, 0.82, 0.0),
+                Vec3::new(1.35, 0.38, 0.8),
+                0.0,
+            );
+            for side in [-1.0f32, 1.0] {
+                for (i, z) in [-0.45f32, 0.45].into_iter().enumerate() {
+                    creature_limb(
+                        commands,
+                        root,
+                        root,
+                        meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+                        legs.clone(),
+                        Vec3::new(side * 0.94, 0.58, z),
+                        Quat::from_rotation_z(side * 0.55),
+                        Vec3::new(0.72, 0.14, 0.28),
+                        Vec3::Y,
+                        (i as f32 * std::f32::consts::PI) + if side < 0.0 { 0.0 } else { 1.4 },
+                        0.28,
+                        0.04,
+                    );
+                }
+                creature_part(
+                    commands,
+                    root,
+                    meshes.add(Sphere::new(0.1)),
+                    eye.clone(),
+                    Transform::from_xyz(side * 0.38, 1.05, -0.55),
+                );
+            }
+        }
+        "blob" => {
+            creature_body_part(
+                commands,
+                root,
+                root,
+                meshes.add(Sphere::new(1.0)),
+                body.clone(),
+                Vec3::new(0.0, 0.78, 0.0),
+                Vec3::new(0.9, 0.72, 0.9),
+                0.0,
+            );
+            for (i, (x, z)) in [
+                (-0.48f32, -0.42f32),
+                (0.48, -0.42),
+                (-0.52, 0.38),
+                (0.52, 0.38),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                creature_limb(
+                    commands,
+                    root,
+                    root,
+                    meshes.add(Sphere::new(1.0)),
+                    legs.clone(),
+                    Vec3::new(x, 0.34, z),
+                    Quat::IDENTITY,
+                    Vec3::splat(0.28),
+                    Vec3::X,
+                    i as f32 * 1.57,
+                    0.25,
+                    0.08,
+                );
+            }
+            for side in [-1.0f32, 1.0] {
+                creature_part(
+                    commands,
+                    root,
+                    meshes.add(Sphere::new(0.1)),
+                    eye.clone(),
+                    Transform::from_xyz(side * 0.3, 1.0, -0.7),
+                );
+            }
+        }
+        _ => {
+            // Strider / hopper：四足身体，脚相位交错，移动时形成真正的对角步态。
+            let body_scale = if kind == "hopper" {
+                Vec3::new(0.82, 0.72, 1.05)
+            } else {
+                Vec3::new(0.72, 0.92, 0.82)
+            };
+            creature_body_part(
+                commands,
+                root,
+                root,
+                meshes.add(Sphere::new(1.0)),
+                body.clone(),
+                Vec3::new(0.0, 0.98, 0.0),
+                body_scale,
+                0.0,
+            );
+            creature_body_part(
+                commands,
+                root,
+                root,
+                meshes.add(Sphere::new(1.0)),
+                shell,
+                Vec3::new(0.0, 1.12, -0.66),
+                Vec3::new(0.45, 0.48, 0.48),
+                0.7,
+            );
+            for side in [-1.0f32, 1.0] {
+                for (i, z) in [-0.48f32, 0.48].into_iter().enumerate() {
+                    creature_limb(
+                        commands,
+                        root,
+                        root,
+                        meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+                        legs.clone(),
+                        Vec3::new(side * 0.5, 0.38, z),
+                        Quat::from_rotation_z(side * 0.12),
+                        Vec3::new(0.2, if kind == "hopper" { 0.95 } else { 1.15 }, 0.2),
+                        Vec3::X,
+                        (i as f32 * std::f32::consts::PI)
+                            + if side < 0.0 {
+                                0.0
+                            } else {
+                                std::f32::consts::PI
+                            },
+                        0.42,
+                        0.1,
+                    );
+                }
+                creature_part(
+                    commands,
+                    root,
+                    meshes.add(Sphere::new(0.1)),
+                    eye.clone(),
+                    Transform::from_xyz(side * 0.2, 1.38, -0.96),
+                );
+            }
+        }
     }
 }
 
@@ -547,11 +924,11 @@ fn materialize_herd(
     }
     let kind = data::biome_animal_kind(world.biome().key);
     let (model, scale, y_off) = creature_model(kind);
-    // 命中盒随模型尺寸（JS radius = max(w,h,d)*1.3）
-    let (w, hh, d) = match kind {
-        "crab" => (0.55, 1.1, 0.7),
-        "blob" => (0.7, 1.0, 0.7),
-        _ => (0.35, 2.2, 0.35),
+    // 命中盒按新模型的统一目标高度估算，避免旧静态网格的尺寸参数残留。
+    let hh = match kind {
+        "crab" | "beetle" => 1.95,
+        "blob" | "manta" => 1.75,
+        _ => 2.2,
     };
     let animation = creature_animation_setup(kind, asset_server, graphs, library);
     let e = commands
@@ -599,7 +976,6 @@ fn materialize_herd(
         "CREATURE materialize herd {nid} kind={kind} at ({:.1},{:.1})",
         h.x, h.z
     );
-    let _ = (w, d);
     true
 }
 
@@ -855,6 +1231,29 @@ pub fn creature_system(
         };
         tf.scale = Vec3::splat((c.scale * fade_in * breath * hit * fade_out).max(0.001));
     }
+}
+
+/// Low-volume ambient calls keep the wildlife space feeling inhabited without
+/// attaching a separate audio source to every animal.
+pub fn creature_sound_system(
+    time: Res<Time>,
+    mut commands: Commands,
+    creatures: Query<&Creature>,
+    sfx: Res<crate::audio::Sfx>,
+    mut next_call: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    *next_call -= dt;
+    if *next_call > 0.0 || !creatures.iter().any(|c| c.hp > 0.0 && c.walking) {
+        return;
+    }
+    *next_call = 5.0 + (time.elapsed_secs().sin().abs() * 4.0);
+    crate::audio::play(
+        &mut commands,
+        sfx.creature_hit.clone(),
+        0.08,
+        Some(0.78 + time.elapsed_secs().cos().abs() * 0.34),
+    );
 }
 
 /// Despawn dead creatures（击杀 → 掉落 + 兽群标记不复活；淡出完成 → 仅卸载休眠）。

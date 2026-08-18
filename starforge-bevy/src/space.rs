@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use bevy_world_serialization::prelude::WorldAssetRoot;
 use std::collections::HashMap;
 
+use crate::creatures::Creature;
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
 use crate::factory::MachineSave;
 use crate::inventory::Slot;
@@ -460,6 +461,17 @@ pub struct BoltAux<'w, 's> {
     player: Query<'w, 's, &'static mut Player>,
     big_ev: MessageWriter<'w, BigMessageEvent>,
     sfx: Res<'w, crate::audio::Sfx>,
+    creatures: Query<
+        'w,
+        's,
+        (Entity, &'static mut Creature, &'static Transform),
+        (
+            With<Creature>,
+            Without<LaserBolt>,
+            Without<VisitorShip>,
+            Without<Asteroid>,
+        ),
+    >,
 }
 
 /// 太空战斗：左键开火 + 弹道更新 + 命中（访客船/小行星）。
@@ -473,6 +485,7 @@ pub fn bolt_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    mut feedback: ResMut<crate::feedback::FeedbackAssets>,
     mut bolt_assets: Local<
         Option<(
             Handle<Mesh>,
@@ -482,15 +495,20 @@ pub fn bolt_system(
     >,
     mut bolts: Query<
         (Entity, &mut LaserBolt, &mut Transform),
-        (Without<VisitorShip>, Without<Asteroid>),
+        (Without<VisitorShip>, Without<Asteroid>, Without<Creature>),
     >,
     mut visitors: Query<
         (Entity, &mut VisitorShip, &Transform),
-        (Without<LaserBolt>, Without<Asteroid>),
+        (Without<LaserBolt>, Without<Asteroid>, Without<Creature>),
     >,
     asteroids: Query<
         (Entity, &Transform),
-        (With<Asteroid>, Without<LaserBolt>, Without<VisitorShip>),
+        (
+            With<Asteroid>,
+            Without<LaserBolt>,
+            Without<VisitorShip>,
+            Without<Creature>,
+        ),
     >,
     mut aux: BoltAux,
 ) {
@@ -518,12 +536,18 @@ pub fn bolt_system(
     let (bolt_mesh, bolt_mat, drop_mat) = bolt_assets.clone().unwrap();
     // 开火（JS shoot：双发 ±0.9 偏移，聚向准星）
     if mouse.pressed(MouseButton::Left) && ship.fire_cd <= 0.0 {
-        ship.fire_cd = 0.22;
+        let (cooldown, offsets): (f32, &[f32]) = match ship_asset.data.cls.as_str() {
+            "B" => (0.12, &[-0.55, 0.55]),      // rapid twin cannons
+            "A" => (0.20, &[-0.95, 0.0, 0.95]), // tri-beam burst
+            "S" => (0.48, &[0.0]),              // heavy lance
+            _ => (0.22, &[-0.9, 0.9]),
+        };
+        ship.fire_cd = cooldown;
         let (dmg, smul) = weapon_spec(&ship_asset.data.cls);
         let q = ship_quat(ship.yaw, ship.pitch, ship.roll);
         let fwd = ship_forward(ship.yaw, ship.pitch);
         let right = q * Vec3::X;
-        for off in [-0.9f32, 0.9] {
+        for &off in offsets {
             let origin = ship.pos + right * off + Vec3::Y * 0.4;
             commands.spawn((
                 Mesh3d(bolt_mesh.clone()),
@@ -619,6 +643,53 @@ pub fn bolt_system(
             } else {
                 crate::audio::play(&mut commands, aux.sfx.laser_hit.clone(), 0.3, None);
             }
+            crate::feedback::spawn_block_burst(
+                &mut commands,
+                &mut feedback,
+                &mut meshes,
+                &mut mats,
+                pos,
+                crate::data::ids::METAL,
+                time.elapsed_secs() as u32,
+            );
+            commands.entity(e).despawn();
+            continue;
+        }
+        // 大气层射击也能命中地表生物：伤害交给统一 creature_despawn_system
+        // 处理掉落与永久灭绝记录，避免飞船击杀绕过野生动物存档逻辑。
+        let mut hit_creature: Option<(Entity, Vec3)> = None;
+        for (ce, creature, creature_tf) in &aux.creatures {
+            if creature.hp > 0.0
+                && segment_hits_sphere(
+                    pos,
+                    np,
+                    creature_tf.translation + Vec3::Y * creature.height * 0.4,
+                    creature.radius * 1.25,
+                )
+            {
+                hit_creature = Some((ce, creature_tf.translation));
+                break;
+            }
+        }
+        if let Some((ce, cpos)) = hit_creature {
+            if let Ok((_, mut creature, _)) = aux.creatures.get_mut(ce) {
+                creature.hp -= b.dmg * 2.0;
+                creature.hit_t = 0.25;
+                if creature.hp <= 0.0 {
+                    crate::audio::play(&mut commands, aux.sfx.creature_die.clone(), 0.8, None);
+                } else {
+                    crate::audio::play(&mut commands, aux.sfx.creature_hit.clone(), 0.45, None);
+                }
+            }
+            crate::feedback::spawn_block_burst(
+                &mut commands,
+                &mut feedback,
+                &mut meshes,
+                &mut mats,
+                cpos,
+                crate::data::ids::LEAVES,
+                time.elapsed_secs() as u32,
+            );
             commands.entity(e).despawn();
             continue;
         }
@@ -650,6 +721,15 @@ pub fn bolt_system(
                 );
             }
             crate::audio::play(&mut commands, aux.sfx.break_block.clone(), 0.6, None);
+            crate::feedback::spawn_block_burst(
+                &mut commands,
+                &mut feedback,
+                &mut meshes,
+                &mut mats,
+                apos,
+                crate::data::ids::CRYSTAL,
+                time.elapsed_secs() as u32,
+            );
             commands.entity(ae).despawn();
             commands.entity(e).despawn();
             continue;
@@ -915,7 +995,7 @@ pub fn visitor_system(
                     angle.sin() * elevation.cos(),
                 ) * radius;
             let cls = crate::data::roll_ship_class(rng.next());
-            let (entity, flames) = spawn_ship(
+            let (entity, _flames) = spawn_ship(
                 &mut commands,
                 &mut meshes,
                 &mut mats,
@@ -924,12 +1004,6 @@ pub fn visitor_system(
                 angle,
                 cls,
             );
-            commands.entity(entity).insert(WorldAssetRoot(
-                asset_server.load(GltfAssetLabel::Scene(0).from_asset(visitor_model_for(count))),
-            ));
-            for flame in flames {
-                commands.entity(flame).despawn();
-            }
             let target = random_cruise_target(&game, &mut rng);
             commands.entity(entity).insert(VisitorShip {
                 cls: cls.key,
@@ -1182,52 +1256,290 @@ pub fn visitor_model_for(i: usize) -> &'static str {
     V[i % V.len()]
 }
 
-/// 飞船（GLB 模型 + 尾焰），返回 (根实体, 尾焰实体)。
-/// 模型几何分析：Kenney craft 机头朝 -Z（与游戏前进方向一致），无需旋转修正；
-/// 资产已去除 Kenney 建模残留的根节点 t(2,0,1.5) 平移，位置直接落在 pos。
-pub const SHIP_SCALE: f32 = 1.5;
+/// 统一风格的低多边形飞船。返回 (根实体, 动态尾焰实体)。
+///
+/// 这里使用程序化模块而不是继续混用多个免费 GLB：飞行、碰撞、存档仍使用
+/// 原有 ShipState，视觉只依赖等级轮廓和少量材质，后续也方便替换成 Blender GLB。
+pub const SHIP_SCALE: f32 = 1.0;
+
+fn ship_part(
+    commands: &mut Commands,
+    root: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+) -> Entity {
+    let entity = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            transform,
+            crate::InGame,
+        ))
+        .id();
+    commands.entity(root).add_child(entity);
+    entity
+}
+
+fn ship_profile(key: &str) -> (Vec3, f32, f32, f32, usize, Color) {
+    match key {
+        // 宽体探索船：更厚的机身、更大的翼面和额外货舱。
+        "S" => (
+            Vec3::new(3.4, 1.35, 4.6),
+            2.9,
+            5.8,
+            2.3,
+            3,
+            Color::srgb(1.0, 0.72, 0.2),
+        ),
+        // 长航程船：长机身、紫色识别条。
+        "A" => (
+            Vec3::new(2.7, 1.05, 4.2),
+            2.7,
+            4.8,
+            1.9,
+            2,
+            Color::srgb(0.72, 0.48, 1.0),
+        ),
+        // 拦截船：低矮、宽翼、双引擎。
+        "B" => (
+            Vec3::new(2.4, 0.82, 3.6),
+            2.35,
+            5.2,
+            1.7,
+            2,
+            Color::srgb(0.12, 0.86, 0.9),
+        ),
+        // 初始小型调度船：方正、单体、易辨认。
+        _ => (
+            Vec3::new(2.25, 0.95, 3.2),
+            2.2,
+            3.9,
+            1.55,
+            1,
+            Color::srgb(0.62, 0.7, 0.78),
+        ),
+    }
+}
 
 pub fn spawn_ship(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
-    asset_server: &AssetServer,
+    _asset_server: &AssetServer,
     pos: Vec3,
     yaw: f32,
     cls: &ShipClass,
 ) -> (Entity, Vec<Entity>) {
-    let model = ship_model_for(cls.key);
+    let (body_size, nose_z, wing_span, wing_depth, engine_count, accent) = ship_profile(cls.key);
+    let hull_color = match cls.key {
+        "S" => Color::srgb(0.3, 0.25, 0.19),
+        "A" => Color::srgb(0.22, 0.2, 0.3),
+        "B" => Color::srgb(0.16, 0.27, 0.31),
+        _ => Color::srgb(0.32, 0.38, 0.44),
+    };
+    let hull = mats.add(StandardMaterial {
+        base_color: hull_color,
+        perceptual_roughness: 0.52,
+        metallic: 0.72,
+        ..default()
+    });
+    let hull_dark = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.07, 0.1, 0.13),
+        perceptual_roughness: 0.72,
+        metallic: 0.62,
+        ..default()
+    });
+    let canopy = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.08, 0.28, 0.34),
+        emissive: LinearRgba::new(0.02, 0.16, 0.2, 1.0) * 1.2,
+        perceptual_roughness: 0.22,
+        metallic: 0.3,
+        ..default()
+    });
+    let accent_mat = mats.add(StandardMaterial {
+        base_color: accent,
+        emissive: accent.to_linear() * 1.5,
+        unlit: true,
+        ..default()
+    });
+    let engine_mat = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.12, 0.72, 0.9),
+        emissive: LinearRgba::new(0.03, 0.55, 0.9, 1.0) * 3.0,
+        unlit: true,
+        ..default()
+    });
+    let nav_red = mats.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.14, 0.08),
+        emissive: LinearRgba::new(1.0, 0.04, 0.01, 1.0) * 2.5,
+        unlit: true,
+        ..default()
+    });
+    let nav_green = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 1.0, 0.42),
+        emissive: LinearRgba::new(0.05, 0.8, 0.18, 1.0) * 2.5,
+        unlit: true,
+        ..default()
+    });
     let root = commands
         .spawn((
-            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(model))),
-            // 模型全长约 2.1 格，放大 1.5 倍贴近原版 3.6 格机身
-            Transform::from_translation(pos)
-                .with_rotation(Quat::from_rotation_y(yaw))
-                .with_scale(Vec3::splat(SHIP_SCALE)),
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
             Visibility::default(),
             crate::InGame,
         ))
         .id();
-    // 尾焰（保留发光半透明方块，飞行时显隐）
+
+    // 机身、前鼻和座舱：椭球座舱是远处最容易辨认的视觉锚点。
+    ship_part(
+        commands,
+        root,
+        meshes.add(Cuboid::new(body_size.x, body_size.y, body_size.z)),
+        hull.clone(),
+        Transform::from_xyz(0.0, 0.0, 0.35),
+    );
+    ship_part(
+        commands,
+        root,
+        meshes.add(Sphere::new(1.0)),
+        hull.clone(),
+        Transform::from_xyz(0.0, 0.0, -nose_z * 0.76).with_scale(Vec3::new(
+            body_size.x * 0.52,
+            body_size.y * 0.7,
+            body_size.z * 0.52,
+        )),
+    );
+    ship_part(
+        commands,
+        root,
+        meshes.add(Sphere::new(1.0)),
+        canopy,
+        Transform::from_xyz(0.0, body_size.y * 0.48, -0.55).with_scale(Vec3::new(
+            body_size.x * 0.27,
+            body_size.y * 0.23,
+            body_size.z * 0.34,
+        )),
+    );
+
+    // 翼面和尾鳍，等级通过宽度、数量和角度形成轮廓差异。
+    let wing_y = -body_size.y * 0.1;
+    for side in [-1.0f32, 1.0] {
+        let wing_x = side * (wing_span * 0.32);
+        let wing = ship_part(
+            commands,
+            root,
+            meshes.add(Cuboid::new(wing_span * 0.58, 0.22, wing_depth)),
+            hull.clone(),
+            Transform::from_xyz(wing_x, wing_y, 0.25)
+                .with_rotation(Quat::from_rotation_y(side * 0.18)),
+        );
+        if cls.key == "S" {
+            // S 级为宽体货船，外挂舱让侧面轮廓更有分量。
+            ship_part(
+                commands,
+                root,
+                meshes.add(Cuboid::new(0.9, 0.7, 1.75)),
+                hull_dark.clone(),
+                Transform::from_xyz(side * (wing_span * 0.48), -0.1, 0.75),
+            );
+        }
+        let _ = wing;
+    }
+    ship_part(
+        commands,
+        root,
+        meshes.add(Cuboid::new(0.28, 1.1, 1.55)),
+        hull_dark.clone(),
+        Transform::from_xyz(0.0, body_size.y * 0.7, 1.55),
+    );
+    ship_part(
+        commands,
+        root,
+        meshes.add(Cuboid::new(body_size.x * 0.72, 0.16, 0.28)),
+        accent_mat.clone(),
+        Transform::from_xyz(0.0, body_size.y * 0.54, -0.1),
+    );
+
+    // 引擎舱、喷口和武器挂点。
+    let engine_x = if engine_count == 1 {
+        0.0
+    } else {
+        body_size.x * 0.32
+    };
+    for i in 0..engine_count {
+        let side = if engine_count == 1 {
+            0.0
+        } else if i == 0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let x = side * engine_x;
+        ship_part(
+            commands,
+            root,
+            meshes.add(Cylinder::new(0.34, 1.3)),
+            hull_dark.clone(),
+            Transform::from_xyz(x, -0.1, 1.8)
+                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        );
+        ship_part(
+            commands,
+            root,
+            meshes.add(Cylinder::new(0.2, 0.15)),
+            engine_mat.clone(),
+            Transform::from_xyz(x, -0.1, 2.48)
+                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        );
+    }
+    for side in [-1.0f32, 1.0] {
+        ship_part(
+            commands,
+            root,
+            meshes.add(Cuboid::new(0.16, 0.16, 0.72)),
+            accent_mat.clone(),
+            Transform::from_xyz(side * body_size.x * 0.42, 0.12, -1.45),
+        );
+    }
+    ship_part(
+        commands,
+        root,
+        meshes.add(Sphere::new(0.11)),
+        nav_red,
+        Transform::from_xyz(-wing_span * 0.52, 0.05, -0.3),
+    );
+    ship_part(
+        commands,
+        root,
+        meshes.add(Sphere::new(0.11)),
+        nav_green,
+        Transform::from_xyz(wing_span * 0.52, 0.05, -0.3),
+    );
+
+    // 尾焰：仍返回实体列表，现有 ship_sync_system 会按速度和脉冲引擎动态拉伸。
     let flame_mat = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.4, 0.8, 1.0, 0.7),
-        emissive: LinearRgba::new(0.3, 0.6, 1.0, 1.0) * 2.0,
+        base_color: Color::srgba(0.18, 0.78, 1.0, 0.72),
+        emissive: LinearRgba::new(0.08, 0.6, 1.0, 1.0) * 3.0,
         alpha_mode: AlphaMode::Blend,
         cull_mode: None,
         ..default()
     });
     let mut flames = Vec::new();
-    for x in [-0.55f32, 0.55] {
-        let e = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.3, 0.3, 1.6))),
-                MeshMaterial3d(flame_mat.clone()),
-                Transform::from_xyz(x, -0.05, 3.3),
-                crate::InGame,
-            ))
-            .id();
-        commands.entity(root).add_child(e);
-        flames.push(e);
+    let flame_count = if engine_count == 1 { 1 } else { 2 };
+    for i in 0..flame_count {
+        let x = if flame_count == 1 {
+            0.0
+        } else if i == 0 {
+            -engine_x
+        } else {
+            engine_x
+        };
+        flames.push(ship_part(
+            commands,
+            root,
+            meshes.add(Cuboid::new(0.34, 0.34, 1.65)),
+            flame_mat.clone(),
+            Transform::from_xyz(x, -0.1, 3.05),
+        ));
     }
     (root, flames)
 }

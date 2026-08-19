@@ -8,6 +8,14 @@
 > 请从下方表格或 `assets/licenses/models-directory-audit.md` 中的对应来源页面下载，按目录名解压到
 > `assets/models/external/`，并保留每个包中的 `license.txt`、`scene.gltf`、`scene.bin` 和 `textures/`。
 
+## 代码依赖与渲染插件
+
+| 组件 | 来源 | 版本 | 许可证 | 版权/署名 |
+|---|---|---|---|---|
+| 体积云渲染插件 `bevy-volumetric-clouds` | [evroon/bevy-volumetric-clouds](https://github.com/evroon/bevy-volumetric-clouds) | 0.2.0（本地 vendored，含 Starforge 兼容性修改） | MIT | Copyright (c) 2025 evroon |
+
+上游许可证原文随源码保留在 `vendor/bevy-volumetric-clouds/LICENSE`。该目录中的源代码、着色器和文档继续按照 MIT 许可证的署名与许可证通知要求分发。
+
 ## 音效（assets/audio/*.ogg，共 32 条）
 
 | 素材 | 来源 | 许可证 | 署名要求 |

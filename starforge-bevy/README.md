@@ -193,4 +193,8 @@ assets/
 ## 许可
 
 本项目代码 [MIT](LICENSE)（沿用原项目许可）；外部素材许可见 `CREDITS.md` 与 `assets/licenses/`；
+体积云渲染使用 vendored 的 `bevy-volumetric-clouds` 0.2.0，来源为
+<https://github.com/evroon/bevy-volumetric-clouds>，按 MIT 许可证使用；上游版权归
+evroon（2025），许可证原文保留在 `vendor/bevy-volumetric-clouds/LICENSE`，登记见
+`CREDITS.md`；
 Noto Sans SC 字体按 [SIL Open Font License 1.1](https://scripts.sil.org/OFL) 分发。

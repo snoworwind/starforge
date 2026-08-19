@@ -589,10 +589,40 @@ pub struct Settings {
     pub clouds: bool,
     #[serde(default = "default_enabled")]
     pub weather: bool,
+    #[serde(default = "default_cloud_coverage")]
+    pub cloud_coverage: f32,
+    #[serde(default = "default_cloud_density")]
+    pub cloud_density: f32,
+    #[serde(default = "default_cloud_raymarch_steps")]
+    pub cloud_raymarch_steps: u32,
+    #[serde(default = "default_cloud_render_width")]
+    pub cloud_render_width: u32,
+    #[serde(default = "default_cloud_render_height")]
+    pub cloud_render_height: u32,
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_cloud_coverage() -> f32 {
+    0.61
+}
+
+fn default_cloud_density() -> f32 {
+    0.09
+}
+
+fn default_cloud_raymarch_steps() -> u32 {
+    24
+}
+
+fn default_cloud_render_width() -> u32 {
+    1536
+}
+
+fn default_cloud_render_height() -> u32 {
+    864
 }
 
 impl Default for Settings {
@@ -605,7 +635,33 @@ impl Default for Settings {
             pixelated: false,
             clouds: true,
             weather: true,
+            cloud_coverage: default_cloud_coverage(),
+            cloud_density: default_cloud_density(),
+            cloud_raymarch_steps: default_cloud_raymarch_steps(),
+            cloud_render_width: default_cloud_render_width(),
+            cloud_render_height: default_cloud_render_height(),
         }
+    }
+}
+
+fn sanitize_cloud_settings(settings: &mut Settings) {
+    settings.cloud_coverage = if settings.cloud_coverage.is_finite() {
+        settings.cloud_coverage.clamp(0.0, 1.0)
+    } else {
+        default_cloud_coverage()
+    };
+    settings.cloud_density = if settings.cloud_density.is_finite() {
+        settings.cloud_density.clamp(0.0, 1.0)
+    } else {
+        default_cloud_density()
+    };
+    settings.cloud_raymarch_steps = settings.cloud_raymarch_steps.clamp(4, 64);
+    if !matches!(
+        (settings.cloud_render_width, settings.cloud_render_height),
+        (1280, 720) | (1536, 864) | (1920, 1080) | (2560, 1600)
+    ) {
+        settings.cloud_render_width = default_cloud_render_width();
+        settings.cloud_render_height = default_cloud_render_height();
     }
 }
 
@@ -622,6 +678,7 @@ pub fn load_settings() -> Settings {
     } else {
         0.8
     };
+    sanitize_cloud_settings(&mut settings);
     settings
 }
 
@@ -638,5 +695,6 @@ pub fn save_settings(s: &Settings) -> bool {
     } else {
         0.8
     };
+    sanitize_cloud_settings(&mut safe);
     write_json(&saves_dir().join("settings.json"), &safe)
 }

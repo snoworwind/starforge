@@ -24,6 +24,7 @@ mod station;
 mod textures;
 mod ui;
 mod weather;
+use bevy_volumetric_clouds::CloudsPlugin;
 mod world;
 
 use bevy::camera::primitives::Aabb;
@@ -234,6 +235,8 @@ fn main() {
     let smoke = std::env::args().any(|a| a == "--smoke");
     let play = std::env::args().any(|a| a == "--play");
     let asset_dir = executable_asset_dir();
+    let settings = save::load_settings();
+    let cloud_tuning = weather::CloudTuning::from_settings(&settings);
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.1)))
         .add_plugins(
@@ -253,8 +256,11 @@ fn main() {
                 }),
         )
         .add_plugins(EguiPlugin::default())
+        .add_plugins(CloudsPlugin)
         .add_plugins(MaterialPlugin::<TerrainMat>::default())
-        .insert_resource(save::load_settings())
+        .add_plugins(MaterialPlugin::<weather::CloudMaterial>::default())
+        .insert_resource(settings)
+        .insert_resource(cloud_tuning)
         .insert_resource(UiState::default())
         .insert_resource(Research::default())
         .insert_resource(ui::EguiIcons::default())
@@ -289,6 +295,7 @@ fn main() {
         .insert_resource(space::VisitorTraffic::default())
         .init_resource::<space::ExternalAnimationLibrary>()
         .insert_resource(weather::ClimateRuntime::default())
+        .insert_resource(weather::CloudTuning::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())
         .init_resource::<char::NpcAnimationLibrary>()
@@ -337,6 +344,7 @@ fn main() {
                                 materials::lamp_pool_system,
                                 daynight::daynight_system,
                                 weather::climate_system,
+                                weather::upstream_cloud_config_system,
                             )
                                 .chain(),
                             (
@@ -591,6 +599,10 @@ fn startup(
         let _ = std::fs::write(
             shader_dir.join("terrain_fragment.wgsl"),
             include_str!("../assets/shaders/terrain_fragment.wgsl"),
+        );
+        let _ = std::fs::write(
+            shader_dir.join("volumetric_cloud.wgsl"),
+            include_str!("../assets/shaders/volumetric_cloud.wgsl"),
         );
         // 本地开发构建时把模型目录复制到 exe 旁（源码在
         // <crate>/target/<profile>/ 下时向上两级即 crate 根）。发布包则应

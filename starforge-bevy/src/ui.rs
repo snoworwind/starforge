@@ -2649,6 +2649,7 @@ pub fn pause_panel_system(
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UiState>,
     mut settings: ResMut<Settings>,
+    mut cloud_tuning: ResMut<crate::weather::CloudTuning>,
     world: Option<ResMut<World>>,
     player: Query<&Player>,
     research: Res<Research>,
@@ -2725,6 +2726,74 @@ pub fn pause_panel_system(
             climate_changed |= ui.checkbox(&mut settings.clouds, "体积云层").changed();
             climate_changed |= ui.checkbox(&mut settings.weather, "生态天气粒子").changed();
             if climate_changed {
+                let _ = crate::save::save_settings(&settings);
+            }
+            ui.separator();
+            let mut cloud_changed = false;
+            ui.collapsing("☁ 体积云实时参数", |ui| {
+                ui.horizontal(|ui| {
+                    let value = cloud_tuning.coverage;
+                    ui.label("覆盖率");
+                    cloud_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut cloud_tuning.coverage, 0.0..=1.0)
+                                .text(format!("{value:.2}")),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    let value = cloud_tuning.density;
+                    ui.label("体积密度");
+                    cloud_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut cloud_tuning.density, 0.0..=1.0)
+                                .text(format!("{value:.2}")),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    let value = cloud_tuning.raymarch_steps;
+                    ui.label("主 Raymarch");
+                    cloud_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut cloud_tuning.raymarch_steps, 4..=64)
+                                .text(format!("{value} 步")),
+                        )
+                        .changed();
+                });
+
+                let current = crate::weather::CLOUD_RESOLUTION_PRESETS
+                    .iter()
+                    .position(|&(w, h)| cloud_tuning.render_resolution == UVec2::new(w, h))
+                    .unwrap_or(0);
+                let mut selected = current;
+                egui::ComboBox::from_id_salt("cloud_render_resolution")
+                    .selected_text(format!(
+                        "{}×{}",
+                        cloud_tuning.render_resolution.x, cloud_tuning.render_resolution.y
+                    ))
+                    .show_ui(ui, |ui| {
+                        for (index, &(width, height)) in
+                            crate::weather::CLOUD_RESOLUTION_PRESETS.iter().enumerate()
+                        {
+                            ui.selectable_value(
+                                &mut selected,
+                                index,
+                                format!("{}×{}", width, height),
+                            );
+                        }
+                    });
+                if selected != current {
+                    let (width, height) = crate::weather::CLOUD_RESOLUTION_PRESETS[selected];
+                    cloud_tuning.render_resolution = UVec2::new(width, height);
+                    cloud_changed = true;
+                    ui.label("分辨率将在下一帧重建云纹理");
+                }
+                ui.small("步数和分辨率越高，GPU 开销越大");
+            });
+            if cloud_changed {
+                cloud_tuning.sanitize();
+                cloud_tuning.save_to_settings(&mut settings);
                 let _ = crate::save::save_settings(&settings);
             }
             ui.add_space(8.0);

@@ -24,6 +24,9 @@ struct Config {
     clouds_ambient_color_bottom: vec4f,
     clouds_min_transmittance: f32,
     planet_radius: f32,
+    curve_center: vec2f,
+    curve_amt: f32,
+    curve_grow: f32,
     forward_scattering_g: f32,
     backward_scattering_g: f32,
     scattering_lerp: f32,
@@ -153,11 +156,15 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32) -> f32 {
 
 fn get_normalized_height(pos: vec3f) -> f32 {
     let clouds_height = config.clouds_top_height - config.clouds_bottom_height;
-    // STARFORGE uses a locally flattened voxel planet during atmospheric
-    // flight. Keep the upstream cloud/noise/scattering model, but measure the
-    // layer against world Y so the cloud base follows the world instead of a
-    // distant spherical origin.
-    return (pos.y - config.clouds_bottom_height) / clouds_height;
+    // Terrain and clouds use the same local paraboloid. Cloud samples are
+    // evaluated in the wind-shifted coordinate system, so shift the curvature
+    // center by the same wind displacement before undoing the displacement.
+    let center = config.curve_center - config.wind_displacement.xz;
+    let delta = pos.xz - center;
+    let curve_offset = config.curve_amt * dot(delta, delta) * 0.002;
+    let grow = max(abs(config.curve_grow), 0.0001);
+    let uncurved_y = 28.0 + (pos.y + curve_offset - 28.0) / grow;
+    return (uncurved_y - config.clouds_bottom_height) / clouds_height;
 }
 
 fn volumetric_shadow(origin: vec3f, ray_dot_sun: f32) -> f32 {
@@ -181,11 +188,47 @@ fn volumetric_shadow(origin: vec3f, ray_dot_sun: f32) -> f32 {
     return transmittance;
 }
 
-fn intersect_cloud_plane(ray_origin: vec3f, ray_dir: vec3f, height: f32) -> f32 {
-    if abs(ray_dir.y) < 0.0001 {
+fn curve_height(position_xz: vec2f, height: f32) -> f32 {
+    let center = config.curve_center - config.wind_displacement.xz;
+    let delta = position_xz - center;
+    return 28.0 + (height - 28.0) * config.curve_grow -
+        config.curve_amt * dot(delta, delta) * 0.002;
+}
+
+fn intersect_cloud_surface(ray_origin: vec3f, ray_dir: vec3f, height: f32) -> f32 {
+    // Solve ray_origin.y + t*ray_dir.y == curve_height(ray_origin.xz +
+    // t*ray_dir.xz, height). The shared quadratic lets the cloud layer keep
+    // its curved silhouette without increasing the ray-march step count.
+    let center = config.curve_center - config.wind_displacement.xz;
+    let delta = ray_origin.xz - center;
+    let curvature = config.curve_amt * 0.002;
+    let a = curvature * dot(ray_dir.xz, ray_dir.xz);
+    let b = ray_dir.y + 2.0 * curvature * dot(delta, ray_dir.xz);
+    let c = ray_origin.y - curve_height(ray_origin.xz, height);
+
+    if abs(a) < 0.000001 {
+        if abs(b) < 0.000001 {
+            return MAX_DISTANCE;
+        }
+        let root = -c / b;
+        return select(MAX_DISTANCE, root, root > 0.0);
+    }
+
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
         return MAX_DISTANCE;
     }
-    return (height - ray_origin.y) / ray_dir.y;
+    let root_delta = sqrt(discriminant);
+    let root_a = (-b - root_delta) / (2.0 * a);
+    let root_b = (-b + root_delta) / (2.0 * a);
+    var nearest = MAX_DISTANCE;
+    if root_a > 0.0 {
+        nearest = root_a;
+    }
+    if root_b > 0.0 {
+        nearest = min(nearest, root_b);
+    }
+    return nearest;
 }
 
 fn henyey_greenstein(ray_dot_sun: f32, g: f32) -> f32 {
@@ -194,10 +237,26 @@ fn henyey_greenstein(ray_dot_sun: f32, g: f32) -> f32 {
 }
 
 fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32) -> Ray {
-    let bottom = intersect_cloud_plane(ray_origin, ray_dir, config.clouds_bottom_height);
-    let top = intersect_cloud_plane(ray_origin, ray_dir, config.clouds_top_height);
-    var start = max(min(bottom, top), 0.0);
-    var end = min(max(bottom, top), max_dist);
+    let normalized_height = get_normalized_height(ray_origin);
+    let bottom = intersect_cloud_surface(ray_origin, ray_dir, config.clouds_bottom_height);
+    let top = intersect_cloud_surface(ray_origin, ray_dir, config.clouds_top_height);
+    var start = 0.0;
+    var end = MAX_DISTANCE;
+
+    // Select the first interval in the curved layer. If the camera is below
+    // it, the bottom surface is entered first; if above it, the top surface
+    // is entered first. From inside, the first positive root is the exit.
+    if normalized_height < 0.0 {
+        start = bottom;
+        end = top;
+    } else if normalized_height > 1.0 {
+        start = top;
+        end = bottom;
+    } else {
+        end = min(bottom, top);
+    }
+    start = max(start, 0.0);
+    end = min(end, max_dist);
     if end <= start {
         return Ray(0.0, 0.0, max_dist + 1.0);
     }

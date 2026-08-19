@@ -295,6 +295,7 @@ fn main() {
         .insert_resource(space::VisitorTraffic::default())
         .init_resource::<space::ExternalAnimationLibrary>()
         .insert_resource(weather::ClimateRuntime::default())
+        .insert_resource(materials::TerrainCurveState::default())
         .insert_resource(weather::CloudTuning::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())

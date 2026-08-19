@@ -76,6 +76,9 @@ fn prepare_uniforms_bind_group(
     buffer.clouds_min_transmittance = clouds_config.clouds_min_transmittance;
     buffer.clouds_base_scale = clouds_config.clouds_base_scale;
     buffer.clouds_detail_scale = clouds_config.clouds_detail_scale;
+    buffer.curve_center = clouds_config.curve_center;
+    buffer.curve_amt = clouds_config.curve_amt;
+    buffer.curve_grow = clouds_config.curve_grow;
     buffer.sun_dir = clouds_config.sun_dir;
     buffer.sun_color = clouds_config.sun_color;
     buffer.camera_translation = camera.translation;

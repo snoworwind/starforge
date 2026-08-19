@@ -29,9 +29,19 @@ mod world;
 
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
-use bevy::camera::{ImageRenderTarget, RenderTarget};
+use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
+use bevy::core_pipeline::prepass::DepthPrepass;
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::light::{
+    AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, atmosphere::ScatteringMedium,
+};
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{
+    AtmosphereMode, AtmosphereSettings, ContactShadows, DistanceFog, FogFalloff,
+    ScreenSpaceAmbientOcclusion,
+};
+use bevy::post_process::auto_exposure::{AutoExposure, AutoExposurePlugin};
+use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PresentMode};
 use bevy_egui::{EguiContexts, EguiPlugin, egui};
@@ -86,9 +96,6 @@ enum GameState {
 
 #[derive(Component)]
 struct Beam;
-
-#[derive(Component)]
-pub struct SunDisc;
 
 /// The atlas structure (block tiles) shared by meshing + icons.
 #[derive(Resource)]
@@ -237,8 +244,10 @@ fn main() {
     let asset_dir = executable_asset_dir();
     let settings = save::load_settings();
     let cloud_tuning = weather::CloudTuning::from_settings(&settings);
+    let lighting_tuning = daynight::LightingTuning::from_settings(&settings);
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.1)))
+        .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .add_plugins(
             DefaultPlugins
                 .set(bevy::asset::AssetPlugin {
@@ -255,12 +264,14 @@ fn main() {
                     ..default()
                 }),
         )
+        .add_plugins(AutoExposurePlugin)
         .add_plugins(EguiPlugin::default())
         .add_plugins(CloudsPlugin)
         .add_plugins(MaterialPlugin::<TerrainMat>::default())
         .add_plugins(MaterialPlugin::<weather::CloudMaterial>::default())
         .insert_resource(settings)
         .insert_resource(cloud_tuning)
+        .insert_resource(lighting_tuning)
         .insert_resource(UiState::default())
         .insert_resource(Research::default())
         .insert_resource(ui::EguiIcons::default())
@@ -399,25 +410,35 @@ fn main() {
                         )
                             .chain(),
                         (
-                            ui::ghost_system.run_if(in_planet_mode),
-                            beam_system.run_if(in_planet_mode),
-                            prompt_system.run_if(in_planet_mode),
-                            (ui::hud_system, ui::ship_label_system).chain(),
-                            ui::inventory_panel_system,
-                            ui::tech_panel_system,
-                            ui::machine_panel_system,
-                            ui::pause_panel_system,
-                            ui::trade_panel_system,
-                            ui::garage_panel_system,
-                            ui::station_services_panel_system,
-                            ui::buy_ship_panel_system,
-                            ui::galaxy_map_system,
-                            network::network_ui_system,
-                            ui::creative_panel_system,
-                            ui::planet_map_system,
-                            save_system,
-                            quit_to_menu_system,
-                            smoke_exit,
+                            (
+                                ui::ghost_system.run_if(in_planet_mode),
+                                beam_system.run_if(in_planet_mode),
+                                prompt_system.run_if(in_planet_mode),
+                                (ui::hud_system, ui::ship_label_system).chain(),
+                            )
+                                .chain(),
+                            (
+                                ui::lighting_panel_system,
+                                ui::inventory_panel_system,
+                                ui::tech_panel_system,
+                                ui::machine_panel_system,
+                                ui::pause_panel_system,
+                                ui::trade_panel_system,
+                                ui::garage_panel_system,
+                                ui::station_services_panel_system,
+                            )
+                                .chain(),
+                            (
+                                (ui::buy_ship_panel_system, ui::galaxy_map_system).chain(),
+                                (network::network_ui_system, ui::creative_panel_system).chain(),
+                                (
+                                    ui::planet_map_system,
+                                    (save_settings_system, save_system).chain(),
+                                )
+                                    .chain(),
+                                (quit_to_menu_system, smoke_exit).chain(),
+                            )
+                                .chain(),
                         )
                             .chain(),
                     )
@@ -653,11 +674,89 @@ fn startup(
     commands.insert_resource(icon_mats);
     commands.insert_resource(icon_imgs);
     commands.insert_resource(audio::Sfx::build(&mut audio_assets, settings.volume));
+
+    // Auto exposure should meter the terrain/interior rather than the bright
+    // raymarched sky. The mask is intentionally procedural so debug and
+    // release builds use the exact same asset configuration.
+    // AutoExposure uses top-left texture coordinates; the lower half is the
+    // useful ground region and the upper half contributes no histogram weight.
+    let metering_mask = images.add(Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: 1,
+            height: 4,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        vec![
+            0u8, 0, 0, 255, // upper quarter: ignore sky
+            0, 0, 0, 255, // upper half: ignore sky
+            255, 255, 255, 255, // lower half: meter terrain
+            255, 255, 255, 255,
+        ],
+        bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    ));
     // persistent camera: created now so bevy_egui's primary context exists in menus too.
     // The player camera system drives it during Playing.
     let cam = commands
         .spawn((
             Camera3d::default(),
+            Hdr,
+            AtmosphereSettings {
+                rendering_method: AtmosphereMode::Raymarched,
+                ..default()
+            },
+            // Feed the raymarched sky back into PBR as diffuse environment
+            // lighting; without this the small voxel ground can remain nearly
+            // black even while the atmospheric sky is bright.
+            AtmosphereEnvironmentMapLight {
+                // Keep the atmosphere as a very restrained fill. The direct
+                // sunlight is intentionally much stronger than this.
+                intensity: 0.04,
+                ..default()
+            },
+            // ContactShadows requires a depth prepass. Add it explicitly so
+            // the requirement remains clear even if camera composition
+            // changes later.
+            DepthPrepass,
+            ContactShadows {
+                // The default 0.3 world-unit ray is too short for the
+                // voxel creatures and machinery; extend it to cover their
+                // feet-to-ground contact without turning it into a second
+                // long-range shadow system.
+                linear_steps: 24,
+                thickness: 0.15,
+                length: 2.5,
+            },
+            // Ambient fill alone cannot know that a voxel ceiling is above
+            // the camera. SSAO restores local occlusion around terrain and
+            // the contact areas that should remain dark.
+            ScreenSpaceAmbientOcclusion::default(),
+            Bloom {
+                // Keep normal materials out of the glow and reserve Bloom
+                // for the over-bright sun and genuinely emissive pixels.
+                intensity: 0.12,
+                low_frequency_boost: 0.35,
+                prefilter: BloomPrefilter {
+                    threshold: 1.5,
+                    threshold_softness: 0.2,
+                },
+                ..Bloom::NATURAL
+            },
+            // Meter the HDR frame and adapt exposure between the bright
+            // atmosphere/sun and dark ground/interior views.
+            AutoExposure {
+                metering_mask,
+                range: -3.0..=3.0,
+                filter: 0.20..=0.80,
+                speed_brighten: 3.0,
+                speed_darken: 1.5,
+                ..default()
+            },
+            Tonemapping::AcesFitted,
+            // Use a physical daylight baseline; AutoExposure adds only a
+            // bounded correction on top of this value.
+            Exposure { ev100: 14.0 },
             Msaa::Off,
             Projection::Perspective(PerspectiveProjection {
                 fov: 75f32.to_radians(),
@@ -686,8 +785,12 @@ fn startup(
                 depth_or_array_layers: 1,
             },
             bevy::render::render_resource::TextureDimension::D2,
-            vec![0u8; 640 * 360 * 4],
-            bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+            // The camera is HDR because Atmosphere, SunDisk, Bloom and the
+            // sunlight exposure all operate before tonemapping. Keep the
+            // pixelated render target HDR as well, otherwise the post-process
+            // chain would be clipped at 1.0 before it reaches the screen.
+            vec![0u8; 640 * 360 * 8],
+            bevy::render::render_resource::TextureFormat::Rgba16Float,
             bevy::asset::RenderAssetUsages::RENDER_WORLD,
         );
         // 作为渲染目标必须带 RENDER_ATTACHMENT（Image::new 默认仅绑定/拷贝）
@@ -1250,6 +1353,7 @@ fn loading_system(
     mut terrain_materials: ResMut<Assets<TerrainMat>>,
     mut images: ResMut<Assets<Image>>,
     mut stdmats: ResMut<Assets<StandardMaterial>>,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     atlas: Res<AtlasRes>,
     asset_server: Res<AssetServer>,
     mut contexts: EguiContexts,
@@ -1323,6 +1427,7 @@ fn loading_system(
             &mut commands,
             &mut meshes,
             &mut stdmats,
+            &mut scattering_mediums,
             &asset_server,
             world,
             spawn,
@@ -1342,6 +1447,7 @@ fn spawn_scene(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     stdmats: &mut Assets<StandardMaterial>,
+    scattering_mediums: &mut Assets<ScatteringMedium>,
     asset_server: &AssetServer,
     world: World,
     spawn: Vec3,
@@ -1391,7 +1497,11 @@ fn spawn_scene(
     let day_t = 0.30;
     commands.insert_resource(daynight::DayTime(day_t));
     commands.insert_resource(daynight::SpaceFactor::default());
-    let pool = daynight::spawn_sky(commands, meshes, stdmats);
+    let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
+    commands.insert_resource(daynight::AtmosphereAssets {
+        earth: earth_medium.clone(),
+    });
+    let pool = daynight::spawn_sky(commands, meshes, stdmats, earth_medium);
     commands.insert_resource(materials::LampPool {
         entities: pool,
         timer: 0.0,
@@ -1928,6 +2038,11 @@ fn spawn_chunk_mesh(
             aabb,
             NoAutoAabb,
             Visibility::default(),
+            // Terrain vertices are displaced in the custom shader. Keeping
+            // these chunks in directional-light visibility avoids a valid
+            // caster/receiver being rejected when a curved cascade and the
+            // CPU-side AABB disagree.
+            NoFrustumCulling,
             ChunkMesh { cx, cz, world_seed },
             InGame,
         ))
@@ -2224,17 +2339,9 @@ fn planet_switch_system(
 /// 太空/空间站模式隐藏地面天空（日盘与星光）。
 fn space_sky_sync_system(
     mode: Res<FlightMode>,
-    mut sun_disc: Query<&mut Visibility, (With<SunDisc>, Without<daynight::Star>)>,
-    mut stars: Query<&mut Visibility, (With<daynight::Star>, Without<SunDisc>)>,
+    mut stars: Query<&mut Visibility, With<daynight::Star>>,
 ) {
     let show = mode.ground_scene();
-    for mut vis in &mut sun_disc {
-        *vis = if show {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
     for mut vis in &mut stars {
         *vis = if show && stars_ok() {
             Visibility::Visible
@@ -2295,6 +2402,14 @@ fn ground_scene_visibility_system(
 }
 
 // ---------- Save / quit ----------
+
+fn save_settings_system(mut ev: MessageReader<ui::SaveEvent>, settings: Res<save::Settings>) {
+    if ev.read().next().is_some() {
+        // F5 / pause saves also persist display, cloud and F3 lighting
+        // settings; these are independent of the character/world JSON.
+        let _ = save::save_settings(&settings);
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn save_system(

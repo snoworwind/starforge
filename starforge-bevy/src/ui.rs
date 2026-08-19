@@ -38,6 +38,8 @@ pub enum Panel {
     Tech,
     Machine(Entity),
     Pause,
+    /// 实时太阳与环境光调节（F3）
+    Lighting,
     Trade,
     Garage,
     GalaxyMap,
@@ -934,6 +936,108 @@ pub fn hud_system(
                     );
                 });
             });
+    }
+}
+
+/// F3 光照调节面板。参数写入共享资源，daynight_system 会在下一帧把它们
+/// 应用到地面/太空方向光、SunDisk、大气 IBL 和全局环境光。
+pub fn lighting_panel_system(
+    mut contexts: EguiContexts,
+    mut ui_state: ResMut<UiState>,
+    mut lighting: ResMut<crate::daynight::LightingTuning>,
+    mut settings: ResMut<Settings>,
+) {
+    if ui_state.panel != Panel::Lighting {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    if !egui_fonts_ready(ctx) {
+        return;
+    }
+
+    let mut close = false;
+    let mut changed = false;
+    egui::Window::new("☀ 光照调节")
+        .id(egui::Id::new("lighting_panel"))
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(egui::pos2(24.0, 96.0))
+        .show(ctx, |ui| {
+            ui.label("实时调整，下一帧生效");
+            ui.separator();
+
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.sunlight_boost, 0.0..=150.0)
+                        .text("太阳直射倍率"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.sun_disk_intensity, 0.0..=200.0)
+                        .text("太阳盘亮度"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.atmosphere_fill, 0.0..=2.0)
+                        .text("室外大气补光"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.ambient_multiplier, 0.0..=10.0)
+                        .text("全局环境光倍率"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.space_atmosphere_fill, 0.0..=2.0)
+                        .text("太空环境补光"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.bloom_intensity, 0.0..=8.0)
+                        .text("Bloom 溢出强度"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.bloom_threshold, 0.0..=50.0).text("Bloom 阈值"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.bloom_threshold_softness, 0.0..=1.0)
+                        .text("Bloom 阈值柔化"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.bloom_low_frequency_boost, 0.0..=5.0)
+                        .text("Bloom 低频扩散"),
+                )
+                .changed();
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("恢复默认").clicked() {
+                    *lighting = crate::daynight::LightingTuning::default();
+                    changed = true;
+                }
+                if ui.button("关闭 (F3 / Esc)").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if close {
+        ui_state.close_panel();
+    }
+    if changed {
+        lighting.sanitize();
+        lighting.save_to_settings(&mut settings);
+        let _ = crate::save::save_settings(&settings);
     }
 }
 
@@ -2907,6 +3011,15 @@ pub fn panel_hotkeys_system(
             if let Ok(mut p) = player.single_mut() {
                 drop_cursor(&mut ui_state, &mut p, &mut commands, &world, &icons, &sfx);
             }
+        }
+    }
+    // F3：打开/关闭实时光照调节面板。
+    if keys.just_pressed(KeyCode::F3) {
+        if ui_state.panel == Panel::Lighting {
+            ui_state.close_panel();
+        } else if !ui_state.locked() {
+            ui_state.panel = Panel::Lighting;
+            ui_state.selected_inv = None;
         }
     }
     // Tab：开关背包/合成面板（JS: UI.toggle('invPanel')）

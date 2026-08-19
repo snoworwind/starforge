@@ -242,8 +242,20 @@ fn d_galaxy_count() -> u32 {
 }
 
 pub fn saves_dir() -> PathBuf {
-    std::env::current_dir()
+    // Preserve an existing working-directory save tree so development runs
+    // do not strand the user's worlds. For packaged builds, or when launched
+    // from a shortcut with no save tree in the working directory, fall back
+    // beside the executable just like the asset root.
+    let cwd_saves = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
+        .join("saves");
+    if cwd_saves.is_dir() {
+        return cwd_saves;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join("saves")
 }
 
@@ -599,6 +611,10 @@ pub struct Settings {
     pub cloud_render_width: u32,
     #[serde(default = "default_cloud_render_height")]
     pub cloud_render_height: u32,
+    /// F3 lighting/Bloom controls. Nested so older settings files remain
+    /// compatible and deserialize this whole group from `Default`.
+    #[serde(default)]
+    pub lighting: crate::daynight::LightingTuning,
 }
 
 fn default_enabled() -> bool {
@@ -640,6 +656,7 @@ impl Default for Settings {
             cloud_raymarch_steps: default_cloud_raymarch_steps(),
             cloud_render_width: default_cloud_render_width(),
             cloud_render_height: default_cloud_render_height(),
+            lighting: crate::daynight::LightingTuning::default(),
         }
     }
 }
@@ -678,6 +695,7 @@ pub fn load_settings() -> Settings {
     } else {
         0.8
     };
+    settings.lighting.sanitize();
     sanitize_cloud_settings(&mut settings);
     settings
 }
@@ -695,6 +713,7 @@ pub fn save_settings(s: &Settings) -> bool {
     } else {
         0.8
     };
+    safe.lighting.sanitize();
     sanitize_cloud_settings(&mut safe);
     write_json(&saves_dir().join("settings.json"), &safe)
 }

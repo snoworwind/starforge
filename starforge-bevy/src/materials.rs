@@ -60,6 +60,10 @@ pub struct TerrainExtension {
 }
 
 impl MaterialExtension for TerrainExtension {
+    fn enable_shadows() -> bool {
+        true
+    }
+
     fn vertex_shader() -> ShaderRef {
         "shaders/terrain_vertex.wgsl".into()
     }
@@ -114,6 +118,9 @@ impl TerrainMaterials {
                 base_color_texture: Some(atlas_image.clone()),
                 double_sided: true,
                 cull_mode: None,
+                // Leaves and cross-shaped plants share this mesh/material and
+                // contain transparent atlas texels. Keep alpha cutout so the
+                // visible silhouette and its shadow use the same coverage.
                 alpha_mode: AlphaMode::Mask(0.4),
                 ..default()
             },

@@ -149,7 +149,10 @@ pub fn spawn_sky(
     ));
     // sun disc (emissive sphere, positioned each frame by the daynight system)
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(60.0))),
+        // Keep the visible sun disk close to a real angular size; the
+        // directional light provides illumination and should not be
+        // represented by a giant white sphere.
+        Mesh3d(meshes.add(Sphere::new(4.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(2.0, 1.7, 1.2),
             emissive: LinearRgba::new(1.0, 0.85, 0.6, 1.0) * 2.0,

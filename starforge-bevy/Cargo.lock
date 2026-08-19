@@ -380,6 +380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy-volumetric-clouds"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_a11y"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5095,6 +5102,7 @@ name = "starforge-bevy"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy-volumetric-clouds",
  "bevy_egui",
  "bevy_world_serialization",
  "serde",

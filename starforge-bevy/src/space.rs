@@ -3,6 +3,7 @@
 
 use bevy::gltf::GltfAssetLabel;
 use bevy::input::mouse::{AccumulatedMouseMotion, MouseWheel};
+use bevy::light::{Atmosphere, SunDisk, atmosphere::ScatteringMedium, light_consts::lux};
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 use bevy_world_serialization::prelude::WorldAssetRoot;
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 use crate::creatures::Creature;
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
+use crate::daynight::DIRECT_SUNLIGHT_BOOST;
 use crate::factory::MachineSave;
 use crate::inventory::Slot;
 use crate::player::Player;
@@ -32,6 +34,7 @@ pub const HANDOFF_Y: f32 = 150.0;
 /// 地面召回飞船的最大玩家—飞船距离。
 pub const SHIP_RECALL_MAX_DISTANCE: f32 = 128.0;
 const SHIP_RECALL_DURATION: f32 = 2.4;
+const ORIGIN_MODEL_SCALE: f32 = 1.12;
 /// 相机远平面：需覆盖远景地形（±1536 格）与太空天体（行星 1500~2600u、星光 9000u）
 pub const CAM_FAR: f32 = 12000.0;
 pub const WRAP_X: f32 = std::f32::consts::PI * 2.0 / 0.004; // ≈1570.8
@@ -522,8 +525,6 @@ pub struct SpaceScene {
     pub planets: Vec<PlanetVis>,
     pub station_pos: Vec3,
     pub station: Entity,
-    pub sun: Entity,
-    pub sun_glow: Entity,
     pub asteroids: Vec<Entity>,
     pub dir_light: Entity,
     pub galaxy_seed: u32,
@@ -1973,6 +1974,7 @@ pub fn spawn_space_scene(
     galaxy: &Galaxy,
     world: Option<&VoxelWorld>,
     current_planet: usize,
+    earth_medium: Handle<ScatteringMedium>,
 ) -> SpaceScene {
     // 星光背景：远球壳上的小发光方块
     let star_mat = emissive_mat(mats, Color::WHITE, 1.5);
@@ -2006,38 +2008,23 @@ pub fn spawn_space_scene(
             .id();
         commands.entity(stars_root).add_child(e);
     }
-    // 太阳
-    let sun = commands
-        .spawn((
-            Mesh3d(meshes.add(Sphere::new(SUN_R))),
-            MeshMaterial3d(emissive_mat(mats, Color::srgb(1.9, 1.5, 0.8), 3.0)),
-            Transform::from_translation(SUN_POS),
-            crate::InGame,
-        ))
-        .id();
-    let sun_glow = commands
-        .spawn((
-            Mesh3d(meshes.add(Sphere::new(SUN_R * 3.2))),
-            MeshMaterial3d(mats.add(StandardMaterial {
-                base_color: Color::srgba(1.0, 0.7, 0.3, 0.25),
-                emissive: LinearRgba::new(1.0, 0.6, 0.25, 1.0) * 2.0,
-                unlit: true,
-                alpha_mode: AlphaMode::Add,
-                cull_mode: None,
-                ..default()
-            })),
-            Transform::from_translation(SUN_POS),
-            crate::InGame,
-        ))
-        .id();
-    // 太阳方向光
+    // 太阳方向光。可见太阳盘与大气散射由 Bevy 的 Atmosphere + SunDisk
+    // 管线渲染，不再使用旧的球体和透明光晕网格。
     let sun_dir = SUN_POS.normalize();
     let dir_light = commands
         .spawn((
             DirectionalLight {
                 color: Color::srgb(1.0, 0.95, 0.82),
-                illuminance: 20000.0,
+                illuminance: lux::RAW_SUNLIGHT * DIRECT_SUNLIGHT_BOOST,
+                shadow_maps_enabled: true,
+                contact_shadows_enabled: true,
+                shadow_depth_bias: 0.005,
+                shadow_normal_bias: 0.25,
                 ..default()
+            },
+            SunDisk {
+                intensity: 18.0,
+                ..SunDisk::EARTH
             },
             Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, -sun_dir)),
             crate::InGame,
@@ -2046,7 +2033,6 @@ pub fn spawn_space_scene(
     // 星球群
     let mut planets = Vec::new();
     for pd in &galaxy.planets {
-        let b = data::biome_by_key(pd.biome);
         // 起源星（家园星系 id 0「始源星」）：太空侧使用地球模型 assets/models/earth，
         // 其余行星保持程序化贴图球。模型实测半径约 6.47，缩放到行星半径。
         let is_origin = galaxy.seed == data::HOME_GALAXY_SEED && pd.id == 0;
@@ -2058,7 +2044,7 @@ pub fn spawn_space_scene(
                             .load(GltfAssetLabel::Scene(0).from_asset("models/earth/scene.gltf")),
                     ),
                     Transform::from_translation(Vec3::from(pd.pos))
-                        .with_scale(Vec3::splat(pd.radius / 6.4726)),
+                        .with_scale(Vec3::splat(pd.radius / 6.4726 * ORIGIN_MODEL_SCALE)),
                     crate::InGame,
                 ))
                 .id()
@@ -2088,37 +2074,36 @@ pub fn spawn_space_scene(
                 ))
                 .id()
         };
-        // 起源星地球模型自带云层壳；atmo 若作为子实体挂在带 23 倍缩放的
-        // 模型实体下会被等比放大成巨型壳，因此起源星跳过（其他行星根实体
-        // 无缩放，正常生成 ×1.37 的淡光晕）。
-        let atmo = if is_origin {
-            None
+        // Use the same Raymarched atmosphere for orbital views. The Earth
+        // GLTF root is scaled from a 6.4726-unit model, so its atmosphere is
+        // authored in that local space and inherits the root scale correctly.
+        let atmosphere_inner_radius = if is_origin { 6.4726 } else { pd.radius };
+        // The origin model is enlarged independently. Counter-scale the
+        // atmosphere child so its world-space shell stays put while the
+        // visible surface grows toward the shell's inner radius.
+        let atmosphere_thickness = if is_origin { 1.02 } else { 1.37 };
+        let atmosphere_scale = if is_origin {
+            Vec3::splat(1.0 / ORIGIN_MODEL_SCALE)
         } else {
-            Some(
-                commands
-                    .spawn((
-                        Mesh3d(meshes.add(Sphere::new(pd.radius * 1.37))),
-                        MeshMaterial3d(mats.add(StandardMaterial {
-                            // 太空侧大气更透明：仅勉强可见
-                            base_color: Color::srgba(b.sky.0, b.sky.1, b.sky.2, 0.05),
-                            unlit: true,
-                            alpha_mode: AlphaMode::Add,
-                            cull_mode: None,
-                            ..default()
-                        })),
-                        Transform::default(),
-                        crate::InGame,
-                    ))
-                    .id(),
-            )
+            Vec3::ONE
         };
-        if let Some(a) = atmo {
-            commands.entity(root).add_child(a);
-        }
+        let atmo = commands
+            .spawn((
+                Atmosphere {
+                    inner_radius: atmosphere_inner_radius,
+                    outer_radius: atmosphere_inner_radius * atmosphere_thickness,
+                    ground_albedo: Vec3::splat(0.3),
+                    medium: earth_medium.clone(),
+                },
+                Transform::from_scale(atmosphere_scale),
+                crate::InGame,
+            ))
+            .id();
+        commands.entity(root).add_child(atmo);
         planets.push(PlanetVis {
             def: pd.clone(),
             entity: root,
-            atmo,
+            atmo: Some(atmo),
         });
     }
     // 空间站
@@ -2169,8 +2154,6 @@ pub fn spawn_space_scene(
         planets,
         station_pos: Vec3::from(galaxy.station),
         station,
-        sun,
-        sun_glow,
         asteroids,
         dir_light,
         galaxy_seed: galaxy.seed,
@@ -2236,8 +2219,6 @@ pub fn despawn_space_scene(
         commands.entity(p.entity).despawn();
     }
     commands.entity(scene.station).despawn();
-    commands.entity(scene.sun).despawn();
-    commands.entity(scene.sun_glow).despawn();
     commands.entity(scene.dir_light).despawn();
     for a in &scene.asteroids {
         commands.entity(*a).despawn();
@@ -3694,6 +3675,7 @@ pub fn flight_camera_system(
 pub fn space_scene_sync_system(
     mode: Res<FlightMode>,
     scene: Option<ResMut<SpaceScene>>,
+    atmosphere: Res<crate::daynight::AtmosphereAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -3715,6 +3697,7 @@ pub fn space_scene_sync_system(
                 &game.galaxy,
                 world.as_deref(),
                 game.current_planet,
+                atmosphere.earth.clone(),
             );
             commands.insert_resource(sc);
         }
@@ -3731,6 +3714,7 @@ pub fn space_scene_sync_system(
 pub fn warp_arrive_system(
     mut ev: MessageReader<WarpArriveEvent>,
     scene: Option<ResMut<SpaceScene>>,
+    atmosphere: Res<crate::daynight::AtmosphereAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -3754,6 +3738,7 @@ pub fn warp_arrive_system(
             &game.galaxy,
             world.as_deref(),
             game.current_planet,
+            atmosphere.earth.clone(),
         );
         commands.insert_resource(sc);
     }

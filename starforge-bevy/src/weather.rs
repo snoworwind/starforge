@@ -291,7 +291,10 @@ pub fn climate_system(
 
         if settings.clouds && !USE_UPSTREAM_CLOUDS {
             let coverage = images.add(make_coverage_image(world.seed, world.biome().key));
-            let detail = images.add(make_detail_image(world.seed ^ 0xD37A_11, world.biome().key));
+            let detail = images.add(make_detail_image(
+                world.seed ^ 0x00D3_7A11,
+                world.biome().key,
+            ));
             let center = cloud_center(player.pos);
             let params = cloud_uniform(center, runtime.elapsed, &sun, clear.0);
             let material = cloud_materials.add(CloudMaterial {
@@ -705,7 +708,7 @@ fn worley_fbm2(p: Vec2, seed: u32) -> f32 {
     for octave in 0..4 {
         sum += worley2(
             p * frequency + Vec2::new(octave as f32 * 5.1, octave as f32 * -3.7),
-            seed ^ octave * 977,
+            seed ^ (octave * 977),
         ) * amplitude;
         norm += amplitude;
         frequency *= 2.0;
@@ -722,7 +725,7 @@ fn worley_fbm3(p: Vec3, seed: u32) -> f32 {
     for octave in 0..3 {
         sum += worley3(
             p * frequency + Vec3::splat(octave as f32 * 4.13),
-            seed ^ octave * 1_301,
+            seed ^ (octave * 1_301),
         ) * amplitude;
         norm += amplitude;
         frequency *= 2.0;
@@ -741,7 +744,7 @@ fn value_fbm3(p: Vec3, seed: u32) -> f32 {
             p.x * frequency,
             p.y * frequency,
             p.z * frequency,
-            seed ^ octave * 2_003,
+            seed ^ (octave * 2_003),
             seed,
         ) * amplitude;
         norm += amplitude;

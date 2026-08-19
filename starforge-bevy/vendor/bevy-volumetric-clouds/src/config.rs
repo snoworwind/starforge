@@ -23,6 +23,12 @@ pub struct CloudsConfig {
     /// Radius of the planet the clouds encompass. Determines the curvature of the cloud layer near
     /// the horizon.
     pub planet_radius: f32,
+    /// X/Z center of STARFORGE's local terrain curvature paraboloid.
+    pub curve_center: Vec2,
+    /// Strength of the local terrain curvature, from 0.0 to 1.0.
+    pub curve_amt: f32,
+    /// Vertical scale around the terrain curvature anchor.
+    pub curve_grow: f32,
     /// Height of the `clouds_bottom_height` of the cloud layer.
     pub clouds_bottom_height: f32,
     /// Height of the `clouds_top_height` of the cloud layer.
@@ -83,6 +89,9 @@ impl Default for CloudsConfig {
             clouds_raymarch_steps_count: 12,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
+            curve_center: Vec2::ZERO,
+            curve_amt: 0.0,
+            curve_grow: 1.0,
             clouds_bottom_height: 1250.0,
             clouds_top_height: 2400.0,
             clouds_coverage: 0.5,

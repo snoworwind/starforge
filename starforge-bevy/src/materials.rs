@@ -32,6 +32,27 @@ pub struct CurveUniform {
     pub far_hole_cz: f32,
 }
 
+/// Curvature state shared by terrain materials and the volumetric cloud pass.
+///
+/// Keeping this state in one place prevents the two renderers from drifting
+/// apart when the player transitions into the curved atmospheric view.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct TerrainCurveState {
+    pub center: Vec2,
+    pub amt: f32,
+    pub grow: f32,
+}
+
+impl Default for TerrainCurveState {
+    fn default() -> Self {
+        Self {
+            center: Vec2::ZERO,
+            amt: 0.0,
+            grow: 1.0,
+        }
+    }
+}
+
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
 pub struct TerrainExtension {
     #[uniform(100)]
@@ -174,6 +195,7 @@ pub fn curve_system(
     world: Option<Res<crate::world::World>>,
     mut materials: ResMut<Assets<TerrainMat>>,
     mats: Res<TerrainMaterials>,
+    mut curve_state: ResMut<TerrainCurveState>,
     mut wave_t: Local<f32>,
 ) {
     let Ok(p) = player.single() else { return };
@@ -191,6 +213,10 @@ pub fn curve_system(
         (p.pos.x, p.pos.z, p.eye().y)
     };
     let amt = ((cam_y - 62.0) / (150.0 - 62.0)).clamp(0.0, 1.0);
+    let grow = 1.0;
+    curve_state.center = Vec2::new(center_x, center_z);
+    curve_state.amt = amt;
+    curve_state.grow = grow;
     // 出大气过渡：最后 60 格地形/远景淡出（球面 LOD 无缝接棒，避免飞出大气瞬间贴图突变）
     let fade =
         if *mode == crate::space::FlightMode::Atmo || *mode == crate::space::FlightMode::AtmoLand {
@@ -205,7 +231,7 @@ pub fn curve_system(
             let c = &mut m.extension.curve;
             c.center = Vec2::new(center_x, center_z);
             c.amt = amt;
-            c.grow = 1.0;
+            c.grow = grow;
             c.fade = fade;
             c.edge_r = 9999.0;
             c.wave_time = *wave_t;

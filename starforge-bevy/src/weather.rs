@@ -426,6 +426,7 @@ pub fn upstream_cloud_config_system(
     clear: Res<ClearColor>,
     sun: Query<(&Transform, &DirectionalLight), CloudSunFilter>,
     tuning: Res<CloudTuning>,
+    curve: Res<crate::materials::TerrainCurveState>,
     mut config: ResMut<CloudsConfig>,
     mut skybox: Query<&mut Visibility, With<SkyboxPlane>>,
 ) {
@@ -440,6 +441,12 @@ pub fn upstream_cloud_config_system(
     };
     config.clouds_shadow_raymarch_steps_count = if visible { 4 } else { 1 };
     config.planet_radius = 150.0;
+    // The terrain is curved in a local paraboloid around the player. The
+    // cloud pass receives the same parameters so its layer and intersections
+    // stay attached to the terrain during the atmospheric transition.
+    config.curve_center = curve.center;
+    config.curve_amt = curve.amt;
+    config.curve_grow = curve.grow;
     config.clouds_bottom_height = CLOUD_BOTTOM;
     config.clouds_top_height = CLOUD_TOP;
     config.clouds_coverage = if visible {

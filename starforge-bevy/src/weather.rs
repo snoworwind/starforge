@@ -1,17 +1,19 @@
-//! Planet climate visuals: a procedural volumetric cloud layer, biome weather
-//! particles, and procedural cloud shells visible from space.
+//! Planet climate visuals: a native Bevy `FogVolume` volumetric cloud layer,
+//! biome weather particles, and procedural cloud shells visible from space.
+//!
+//! Clouds are rendered by Bevy's built-in volumetric fog (`FogVolume` +
+//! [`bevy::light::VolumetricFog`] on the camera + [`bevy::light::VolumetricLight`]
+//! on the sun): a large density-textured fog box follows the player, and the
+//! 3D density texture (procedural, toroidal Worley noise per biome/seed) is
+//! scrolled over time to simulate wind. No custom shaders are involved.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::mesh::MeshVertexBufferLayoutRef;
-use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
+use bevy::light::{FogVolume, VolumetricFog};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
-    TextureDimension, TextureFormat,
+    Extent3d, TextureDimension, TextureFormat,
 };
-use bevy::shader::ShaderRef;
-use bevy_volumetric_clouds::{CloudsConfig, SkyboxPlane};
 
 use crate::player::Player;
 use crate::save::Settings;
@@ -24,12 +26,22 @@ use crate::world::World;
 const CLOUD_BOTTOM: f32 = 78.0;
 const CLOUD_TOP: f32 = 174.0;
 const CLOUD_WIDTH: f32 = 1_100.0;
-const COVERAGE_WIDTH: u32 = 256;
-const COVERAGE_HEIGHT: u32 = 128;
-const DETAIL_SIZE: u32 = 48;
-const USE_UPSTREAM_CLOUDS: bool = true;
 
-/// Runtime controls exposed by the in-game cloud tuning panel.
+/// Resolution of the 3D cloud density texture. The texture maps exactly once
+/// over the fog box, so each texel covers ~11×3×11 blocks; it must be
+/// horizontally toroidal so the box edges and the wind scroll stay seamless.
+const DENSITY_W: u32 = 96;
+const DENSITY_H: u32 = 32;
+const DENSITY_D: u32 = 96;
+
+/// Wind drift in UV units per second. The density texture wraps (Repeat), so
+/// a full box-wide drift takes about 4 minutes — slow enough to read as
+/// weather rather than a scrolling texture.
+const WIND_UV_PER_SEC: f32 = 0.0042;
+
+/// Runtime controls exposed by the in-game cloud tuning panel. The legacy
+/// half-resolution render target is gone (native volumetric fog renders at
+/// full resolution), but the settings fields are kept for save compatibility.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct CloudTuning {
     pub coverage: f32,
@@ -37,9 +49,6 @@ pub struct CloudTuning {
     pub raymarch_steps: u32,
     pub render_resolution: UVec2,
 }
-
-pub const CLOUD_RESOLUTION_PRESETS: &[(u32, u32)] =
-    &[(1280, 720), (1536, 864), (1920, 1080), (2560, 1600)];
 
 impl Default for CloudTuning {
     fn default() -> Self {
@@ -87,90 +96,12 @@ impl CloudTuning {
             0.09
         };
         self.raymarch_steps = self.raymarch_steps.clamp(4, 64);
-        if !CLOUD_RESOLUTION_PRESETS
-            .iter()
-            .any(|&(width, height)| self.render_resolution == UVec2::new(width, height))
-        {
-            self.render_resolution = UVec2::new(1536, 864);
-        }
     }
 }
 
-/// GPU parameters for the volume shader. Keeping the fields in vec4s makes
-/// the WGSL layout explicit and avoids backend-specific uniform padding.
-#[derive(ShaderType, Clone, Copy, Debug)]
-pub struct CloudUniform {
-    pub bounds_min: Vec4,
-    pub bounds_max: Vec4,
-    /// xy = wind in world units/sec, z = animation time.
-    pub wind_time: Vec4,
-    /// x/y = cloud layer bounds, z = coverage UV scale, w = detail UV scale.
-    pub shape: Vec4,
-    /// x = extinction density, y = forward phase g, z = multi-scatter energy,
-    /// w = detail erosion strength.
-    pub scattering: Vec4,
-    /// xyz = direction toward the sun, w = normalized sun energy.
-    pub sun: Vec4,
-    pub sun_color: Vec4,
-    /// xyz = sky/ambient color, w = ambient energy.
-    pub ambient: Vec4,
-}
-
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct CloudMaterial {
-    #[uniform(0)]
-    pub params: CloudUniform,
-    #[texture(1, dimension = "2d")]
-    #[sampler(2)]
-    pub coverage: Handle<Image>,
-    #[texture(3, dimension = "3d")]
-    #[sampler(4)]
-    pub detail: Handle<Image>,
-}
-
-impl Material for CloudMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/volumetric_cloud.wgsl".into()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        "shaders/volumetric_cloud.wgsl".into()
-    }
-
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
-    }
-
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
-
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        // A ray-marched volume must remain drawable after the camera enters
-        // the AABB. The default back-face culling would remove every face in
-        // that situation and make the clouds pop out until the camera exits.
-        descriptor.primitive.cull_mode = None;
-        Ok(())
-    }
-}
-
+/// Marker for the single player-following cloud fog volume.
 #[derive(Component)]
-pub struct VolumeCloud;
-
-type CloudSunFilter = (
-    With<crate::daynight::Sun>,
-    Without<VolumeCloud>,
-    Without<WeatherParticle>,
-);
+pub struct CloudVolume;
 
 #[derive(Component)]
 pub struct WeatherParticle {
@@ -190,7 +121,7 @@ pub struct SpaceCloud {
 pub struct ClimateRuntime {
     fingerprint: Option<(u32, &'static str, bool, bool)>,
     elapsed: f32,
-    material: Option<Handle<CloudMaterial>>,
+    density: Option<Handle<Image>>,
     volume: Option<Entity>,
 }
 
@@ -240,34 +171,29 @@ fn particle_position(world: &World, player: Vec3, index: u32, generation: u32) -
 }
 
 /// Rebuilds climate entities when the planet or either graphics toggle changes,
-/// then keeps the volume and weather effects wrapped around the player.
+/// then keeps the cloud fog volume and weather effects wrapped around the player.
 #[allow(clippy::too_many_arguments)]
 pub fn climate_system(
     time: Res<Time>,
     settings: Res<Settings>,
     mode: Res<FlightMode>,
+    tuning: Res<CloudTuning>,
     world: Res<World>,
     player: Query<&Player>,
+    clear: Res<ClearColor>,
     mut runtime: ResMut<ClimateRuntime>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut cloud_materials: ResMut<Assets<CloudMaterial>>,
-    clear: Res<ClearColor>,
-    sun: Query<(&Transform, &DirectionalLight), CloudSunFilter>,
-    climate_entities: Query<Entity, With<WeatherParticle>>,
-    volume_entities: Query<
-        (Entity, &mut Transform),
-        (
-            With<VolumeCloud>,
-            Without<crate::daynight::Sun>,
-            Without<WeatherParticle>,
-        ),
+    mut volume_fog: Query<
+        (Entity, &mut FogVolume, &mut Transform, &mut Visibility),
+        Without<WeatherParticle>,
     >,
+    mut camera_fog: Query<&mut VolumetricFog, With<Camera3d>>,
     mut particles: Query<
-        (&mut WeatherParticle, &mut Transform, &mut Visibility),
-        (Without<VolumeCloud>, Without<crate::daynight::Sun>),
+        (Entity, &mut WeatherParticle, &mut Transform, &mut Visibility),
+        Without<FogVolume>,
     >,
 ) {
     let Ok(player) = player.single() else { return };
@@ -278,49 +204,49 @@ pub fn climate_system(
         settings.weather,
     );
     if runtime.fingerprint != Some(fingerprint) {
-        for entity in &climate_entities {
+        for (entity, _, _, _) in &particles {
             commands.entity(entity).despawn();
         }
-        for (entity, _) in &volume_entities {
+        for (entity, _, _, _) in &volume_fog {
             commands.entity(entity).despawn();
         }
         runtime.fingerprint = Some(fingerprint);
         runtime.elapsed = 0.0;
-        runtime.material = None;
+        runtime.density = None;
         runtime.volume = None;
 
-        if settings.clouds && !USE_UPSTREAM_CLOUDS {
-            let coverage = images.add(make_coverage_image(world.seed, world.biome().key));
-            let detail = images.add(make_detail_image(
-                world.seed ^ 0x00D3_7A11,
-                world.biome().key,
-            ));
+        if settings.clouds {
+            let density = images.add(make_cloud_density_texture(world.seed, world.biome().key));
             let center = cloud_center(player.pos);
-            let params = cloud_uniform(center, runtime.elapsed, &sun, clear.0);
-            let material = cloud_materials.add(CloudMaterial {
-                params,
-                coverage,
-                detail,
-            });
-            let mesh = meshes.add(Cuboid::new(
-                CLOUD_WIDTH,
-                CLOUD_TOP - CLOUD_BOTTOM,
-                CLOUD_WIDTH,
-            ));
             let volume = commands
                 .spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material.clone()),
+                    FogVolume {
+                        // White fog lit by the real sun: the cloud layer picks
+                        // up the warm daylight color and the biome sky ambient.
+                        fog_color: Color::WHITE,
+                        density_factor: 0.10,
+                        density_texture: Some(density.clone()),
+                        absorption: 0.22,
+                        scattering: 0.30,
+                        scattering_asymmetry: 0.72,
+                        ..default()
+                    },
                     Transform::from_translation(Vec3::new(
                         center.x,
                         (CLOUD_BOTTOM + CLOUD_TOP) * 0.5,
                         center.z,
+                    ))
+                    .with_scale(Vec3::new(
+                        CLOUD_WIDTH,
+                        CLOUD_TOP - CLOUD_BOTTOM,
+                        CLOUD_WIDTH,
                     )),
-                    VolumeCloud,
+                    Visibility::Visible,
+                    CloudVolume,
                     crate::InGame,
                 ))
                 .id();
-            runtime.material = Some(material);
+            runtime.density = Some(density);
             runtime.volume = Some(volume);
         }
 
@@ -355,45 +281,92 @@ pub fn climate_system(
     let dt = time.delta_secs();
     runtime.elapsed += dt;
     let show_clouds = settings.clouds && mode.ground_scene();
+
+    // 体积雾渲染管线忽略 Visibility（隐藏的 FogVolume 仍会被提取渲染），
+    // 因此离开地面场景（太空/曲速/空间站）时必须真正销毁体积实体，
+    // 回到地面再按需重建（密度纹理保留，重建只需一个实体）。
+    if mode.ground_scene() {
+        if runtime.volume.is_none() && settings.clouds {
+            let density = match runtime.density.clone() {
+                Some(d) => d,
+                None => {
+                    let d = images.add(make_cloud_density_texture(world.seed, world.biome().key));
+                    runtime.density = Some(d.clone());
+                    d
+                }
+            };
+            let center = cloud_center(player.pos);
+            let volume = commands
+                .spawn((
+                    FogVolume {
+                        fog_color: Color::WHITE,
+                        density_factor: 0.10,
+                        density_texture: Some(density),
+                        absorption: 0.22,
+                        scattering: 0.30,
+                        scattering_asymmetry: 0.72,
+                        ..default()
+                    },
+                    Transform::from_translation(Vec3::new(
+                        center.x,
+                        (CLOUD_BOTTOM + CLOUD_TOP) * 0.5,
+                        center.z,
+                    ))
+                    .with_scale(Vec3::new(
+                        CLOUD_WIDTH,
+                        CLOUD_TOP - CLOUD_BOTTOM,
+                        CLOUD_WIDTH,
+                    )),
+                    Visibility::Visible,
+                    CloudVolume,
+                    crate::InGame,
+                ))
+                .id();
+            runtime.volume = Some(volume);
+        }
+    } else if let Some(entity) = runtime.volume.take() {
+        commands.entity(entity).despawn();
+    }
+
     let show_weather = settings.weather && matches!(*mode, FlightMode::Planet | FlightMode::Seated);
     let center = cloud_center(player.pos);
-    if let Some(mut material) = runtime
-        .material
-        .as_ref()
-        .and_then(|handle| cloud_materials.get_mut(handle))
-    {
-        material.params.bounds_min = Vec4::new(
-            center.x - CLOUD_WIDTH * 0.5,
-            CLOUD_BOTTOM,
-            center.z - CLOUD_WIDTH * 0.5,
-            0.0,
-        );
-        material.params.bounds_max = Vec4::new(
-            center.x + CLOUD_WIDTH * 0.5,
-            CLOUD_TOP,
-            center.z + CLOUD_WIDTH * 0.5,
-            0.0,
-        );
-        material.params.wind_time.z = runtime.elapsed;
-        let (sun_dir, sun_energy, sun_color) = sun_parameters(&sun);
-        material.params.sun = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, sun_energy);
-        material.params.sun_color = Vec4::new(sun_color.x, sun_color.y, sun_color.z, 1.0);
-        let sky = clear.0.to_linear();
-        material.params.ambient = Vec4::new(sky.red, sky.green, sky.blue, 0.30);
-    }
-    for (entity, mut transform) in volume_entities {
+
+    // Wind: scroll the repeating density texture in UV space. The texture is
+    // toroidal, so the drift wraps around seamlessly.
+    let wind = Vec3::new(
+        runtime.elapsed * WIND_UV_PER_SEC,
+        0.0,
+        runtime.elapsed * WIND_UV_PER_SEC * 0.15,
+    );
+    let sky = clear.0.to_linear();
+    for (entity, mut fog, mut transform, mut visibility) in &mut volume_fog {
         if runtime.volume != Some(entity) {
             continue;
         }
         transform.translation.x = center.x;
         transform.translation.z = center.z;
-        commands.entity(entity).insert(if show_clouds {
+        fog.density_texture_offset = wind;
+        // Tuning → physical fog coefficients. `coverage` mostly controls how
+        // much of the layer is opaque, `density` how strongly it absorbs and
+        // scatters light.
+        fog.density_factor = 0.05 + tuning.coverage.clamp(0.0, 1.0) * 0.12;
+        fog.absorption = 0.10 + tuning.density.clamp(0.0, 1.0) * 0.22;
+        fog.scattering = 0.14 + tuning.density.clamp(0.0, 1.0) * 0.26;
+        *visibility = if show_clouds {
             Visibility::Visible
         } else {
             Visibility::Hidden
-        });
+        };
     }
-    for (mut particle, mut transform, mut visibility) in &mut particles {
+    for mut vf in &mut camera_fog {
+        vf.step_count = tuning.raymarch_steps.clamp(4, 64);
+        // Shadowed cloud parts fall back to the sky color so they don't read
+        // as black holes against the atmosphere.
+        vf.ambient_color = Color::LinearRgba(sky);
+        vf.ambient_intensity = 0.30;
+    }
+
+    for (_, mut particle, mut transform, mut visibility) in &mut particles {
         *visibility = if show_weather {
             Visibility::Visible
         } else {
@@ -416,86 +389,6 @@ pub fn climate_system(
     }
 }
 
-/// Drives the vendored bevy-volumetric-clouds renderer from STARFORGE's
-/// atmosphere state. The upstream Horizon/Frostbite pass is kept intact, but
-/// its skybox is only visible in ground/atmosphere modes; the runtime tuning
-/// panel can switch the cloud target between several resolutions.
-pub fn upstream_cloud_config_system(
-    settings: Res<Settings>,
-    mode: Res<FlightMode>,
-    clear: Res<ClearColor>,
-    sun: Query<(&Transform, &DirectionalLight), CloudSunFilter>,
-    tuning: Res<CloudTuning>,
-    curve: Res<crate::materials::TerrainCurveState>,
-    mut config: ResMut<CloudsConfig>,
-    mut skybox: Query<&mut Visibility, With<SkyboxPlane>>,
-) {
-    let visible = settings.clouds && mode.ground_scene();
-    let (sun_dir, sun_energy, sun_color) = sun_parameters(&sun);
-    let sky = clear.0.to_linear();
-
-    config.clouds_raymarch_steps_count = if visible {
-        tuning.raymarch_steps.clamp(4, 64)
-    } else {
-        1
-    };
-    config.clouds_shadow_raymarch_steps_count = if visible { 4 } else { 1 };
-    config.planet_radius = 150.0;
-    // The terrain is curved in a local paraboloid around the player. The
-    // cloud pass receives the same parameters so its layer and intersections
-    // stay attached to the terrain during the atmospheric transition.
-    config.curve_center = curve.center;
-    config.curve_amt = curve.amt;
-    config.curve_grow = curve.grow;
-    config.clouds_bottom_height = CLOUD_BOTTOM;
-    config.clouds_top_height = CLOUD_TOP;
-    config.clouds_coverage = if visible {
-        tuning.coverage.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    config.clouds_detail_strength = 0.30;
-    config.clouds_base_edge_softness = 0.14;
-    config.clouds_bottom_softness = 0.18;
-    config.clouds_density = if visible {
-        tuning.density.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    config.clouds_shadow_raymarch_step_size = 22.0;
-    config.clouds_shadow_raymarch_step_multiply = 1.25;
-    config.forward_scattering_g = 0.78;
-    config.backward_scattering_g = -0.18;
-    config.scattering_lerp = 0.58;
-    config.clouds_ambient_color_top = Vec4::new(sky.red, sky.green, sky.blue, 0.0) * 0.34;
-    config.clouds_ambient_color_bottom =
-        Vec4::new(sky.red * 0.42, sky.green * 0.44, sky.blue * 0.48, 0.0);
-    config.clouds_min_transmittance = 0.06;
-    config.clouds_base_scale = 1.25;
-    config.clouds_detail_scale = 48.0;
-    config.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
-    config.sun_color = Vec4::new(
-        sun_color.x * sun_energy,
-        sun_color.y * sun_energy,
-        sun_color.z * sun_energy,
-        1.0,
-    );
-    config.reprojection_strength = if visible { 0.78 } else { 0.0 };
-    config.render_resolution = Vec2::new(
-        tuning.render_resolution.x as f32,
-        tuning.render_resolution.y as f32,
-    );
-    config.wind_velocity = Vec3::new(0.48, 0.0, 0.07);
-
-    for mut visibility in &mut skybox {
-        *visibility = if visible {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
-}
-
 fn cloud_center(player: Vec3) -> Vec3 {
     // Snapping avoids moving the entire volume every frame while still giving
     // the player a full kilometre of cloud coverage in every direction.
@@ -504,56 +397,6 @@ fn cloud_center(player: Vec3) -> Vec3 {
         (CLOUD_BOTTOM + CLOUD_TOP) * 0.5,
         (player.z / 128.0).floor() * 128.0,
     )
-}
-
-fn sun_parameters(
-    sun: &Query<(&Transform, &DirectionalLight), CloudSunFilter>,
-) -> (Vec3, f32, Vec3) {
-    let Ok((transform, light)) = sun.single() else {
-        return (Vec3::new(0.25, 0.85, 0.35).normalize(), 1.0, Vec3::ONE);
-    };
-    let direction = (transform.rotation * Vec3::NEG_Z).normalize();
-    let color = light.color.to_linear();
-    (
-        direction,
-        (light.illuminance / 5_000.0).clamp(0.35, 3.0),
-        Vec3::new(color.red, color.green, color.blue),
-    )
-}
-
-fn cloud_uniform(
-    center: Vec3,
-    elapsed: f32,
-    sun: &Query<(&Transform, &DirectionalLight), CloudSunFilter>,
-    sky: Color,
-) -> CloudUniform {
-    let (sun_dir, sun_energy, sun_color) = sun_parameters(sun);
-    let sky = sky.to_linear();
-    CloudUniform {
-        bounds_min: Vec4::new(
-            center.x - CLOUD_WIDTH * 0.5,
-            CLOUD_BOTTOM,
-            center.z - CLOUD_WIDTH * 0.5,
-            0.0,
-        ),
-        bounds_max: Vec4::new(
-            center.x + CLOUD_WIDTH * 0.5,
-            CLOUD_TOP,
-            center.z + CLOUD_WIDTH * 0.5,
-            0.0,
-        ),
-        // Deliberately slow drift: the cloud layer should read as weather,
-        // not as a texture scrolling over the camera.
-        wind_time: Vec4::new(0.48, 0.07, elapsed, 0.0),
-        // Lower detail frequency keeps the cloud lobes broad at horizon scale.
-        shape: Vec4::new(CLOUD_BOTTOM, CLOUD_TOP, 1.0 / CLOUD_WIDTH, 1.0 / 235.0),
-        // Lower extinction prevents a dense column from turning the whole sky
-        // into an opaque white sheet when viewed through a long grazing ray.
-        scattering: Vec4::new(0.032, 0.62, 0.32, 0.62),
-        sun: Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, sun_energy),
-        sun_color: Vec4::new(sun_color.x, sun_color.y, sun_color.z, 1.0),
-        ambient: Vec4::new(sky.red, sky.green, sky.blue, 0.30),
-    }
 }
 
 fn repeat_sampler() -> ImageSampler {
@@ -565,86 +408,58 @@ fn repeat_sampler() -> ImageSampler {
     ImageSampler::Descriptor(descriptor)
 }
 
-fn make_coverage_image(seed: u32, biome: &str) -> Image {
+/// Builds the 3D cloud density texture for a biome/seed.
+///
+/// The texture maps exactly once over the fog box (1100×96×1100 blocks), so
+/// every octave is *toroidal*: cell indices wrap around the texture and the
+/// Worley distance is measured on the circle, which keeps the box edges and
+/// the wind scroll free of seams. Coverage comes from 2D Worley FBM in the
+/// x/z plane (a few large weather systems), erosion from 3D Worley FBM, and a
+/// vertical profile makes the deck soft at the bottom and top.
+fn make_cloud_density_texture(seed: u32, biome: &str) -> Image {
     let biome_seed = seed
         ^ biome.bytes().fold(0u32, |value, byte| {
             value.wrapping_mul(33).wrapping_add(byte as u32)
         });
-    let mut bytes = vec![0u8; (COVERAGE_WIDTH * COVERAGE_HEIGHT * 4) as usize];
-    for y in 0..COVERAGE_HEIGHT {
-        for x in 0..COVERAGE_WIDTH {
-            let p = Vec2::new(
-                x as f32 / COVERAGE_WIDTH as f32 * 3.6,
-                y as f32 / COVERAGE_HEIGHT as f32 * 2.2,
-            );
-            // Three bands deliberately produce different cloud scales: a few
-            // large weather systems, medium cumulus groups, and small islands.
-            let large = worley_fbm2(p * 0.48 + Vec2::new(7.3, -2.4), biome_seed ^ 0x51A7);
-            let medium = worley_fbm2(p * 1.0 + Vec2::new(13.7, -4.2), biome_seed ^ 0xA31F);
-            let small = worley_fbm2(p * 2.1 + Vec2::new(-3.8, 11.6), biome_seed ^ 0xD00D);
-            let value = large * 0.58 + medium * 0.32 + small * 0.10;
-            // Keep separated cloud islands and let the shader soften their
-            // edges. The other channels retain scale masks for the shader.
-            let coverage = smoothstep(0.70, 0.86, value);
-            let large_mask = smoothstep(0.66, 0.84, large);
-            let medium_mask = smoothstep(0.62, 0.84, medium);
-            let at = ((y * COVERAGE_WIDTH + x) * 4) as usize;
-            bytes[at] = (coverage * 255.0) as u8;
-            bytes[at + 1] = (large_mask * 255.0) as u8;
-            bytes[at + 2] = (medium_mask * 255.0) as u8;
-            bytes[at + 3] = 255;
-        }
-    }
-    let mut image = Image::new(
-        Extent3d {
-            width: COVERAGE_WIDTH,
-            height: COVERAGE_HEIGHT,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        bytes,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = repeat_sampler();
-    image
-}
-
-fn make_detail_image(seed: u32, biome: &str) -> Image {
-    let biome_seed = seed
-        ^ biome
-            .bytes()
-            .fold(0u32, |value, byte| value.rotate_left(5) ^ byte as u32);
-    let mut bytes = vec![0u8; (DETAIL_SIZE * DETAIL_SIZE * DETAIL_SIZE * 4) as usize];
-    for z in 0..DETAIL_SIZE {
-        for y in 0..DETAIL_SIZE {
-            for x in 0..DETAIL_SIZE {
-                let p = Vec3::new(
-                    x as f32 / DETAIL_SIZE as f32 * 5.5,
-                    y as f32 / DETAIL_SIZE as f32 * 5.5,
-                    z as f32 / DETAIL_SIZE as f32 * 5.5,
+    let threshold = cloud_threshold(biome);
+    let mut bytes = vec![0u8; (DENSITY_W * DENSITY_H * DENSITY_D) as usize];
+    for z in 0..DENSITY_D {
+        let pz = z as f32 / DENSITY_D as f32;
+        for y in 0..DENSITY_H {
+            let py = y as f32 / (DENSITY_H - 1) as f32;
+            // vertical profile: soft bottom/top, densest mid band
+            let profile = smoothstep(0.0, 0.28, py) * (1.0 - smoothstep(0.58, 0.92, py));
+            for x in 0..DENSITY_W {
+                let px = x as f32 / DENSITY_W as f32;
+                // large-scale coverage in the x/z plane (4 base cells per box)
+                let cover = worley_fbm2_periodic(
+                    Vec2::new(px, pz) * 4.0,
+                    4.0,
+                    biome_seed ^ 0x51A7,
                 );
-                let curl = curl_noise(p * 1.7, biome_seed);
-                let warped = p + curl * 0.23;
-                let worley = worley_fbm3(warped * 1.35, biome_seed ^ 0xC011);
-                let high = value_fbm3(warped * 3.8, biome_seed ^ 0xF00D);
-                let value = (worley * 0.72 + high * 0.28).clamp(0.0, 1.0);
-                let at = (((z * DETAIL_SIZE + y) * DETAIL_SIZE + x) * 4) as usize;
-                let v = (value * 255.0) as u8;
-                bytes[at..at + 3].fill(v);
-                bytes[at + 3] = 255;
+                let cover = smoothstep(threshold, (threshold + 0.22).min(0.95), cover);
+                // 3D detail erosion
+                let detail = worley_fbm3_periodic(
+                    Vec3::new(px, py, pz) * 6.0,
+                    6.0,
+                    biome_seed ^ 0xC011,
+                );
+                let detail = smoothstep(0.42, 0.78, detail);
+                let density = (cover * (0.30 + 0.70 * detail) * profile).clamp(0.0, 1.0);
+                let at = ((z * DENSITY_H + y) * DENSITY_W + x) as usize;
+                bytes[at] = (density * 255.0) as u8;
             }
         }
     }
     let mut image = Image::new(
         Extent3d {
-            width: DETAIL_SIZE,
-            height: DETAIL_SIZE,
-            depth_or_array_layers: DETAIL_SIZE,
+            width: DENSITY_W,
+            height: DENSITY_H,
+            depth_or_array_layers: DENSITY_D,
         },
         TextureDimension::D3,
         bytes,
-        TextureFormat::Rgba8Unorm,
+        TextureFormat::R8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = repeat_sampler();
@@ -672,49 +487,63 @@ fn hash01(x: i32, y: i32, z: i32, seed: u32, channel: u32) -> f32 {
     h as f32 / u32::MAX as f32
 }
 
-fn worley2(p: Vec2, seed: u32) -> f32 {
-    let cell = p.floor().as_ivec2();
-    let fract = p - cell.as_vec2();
+/// Circular distance on a line of length `period` (toroidal wrap).
+#[inline]
+fn circular_dist(a: f32, b: f32, period: f32) -> f32 {
+    let d = (a - b).abs();
+    d.min(period - d)
+}
+
+fn worley2_periodic(p: Vec2, period: f32, seed: u32) -> f32 {
+    let period_i = period as i32;
+    let cell = p.floor();
     let mut distance = f32::MAX;
-    for y in -1..=1 {
-        for x in -1..=1 {
-            let feature = Vec2::new(
-                x as f32 + hash01(cell.x + x, cell.y + y, 0, seed, 0),
-                y as f32 + hash01(cell.x + x, cell.y + y, 0, seed, 1),
-            );
-            distance = distance.min((feature - fract).length());
+    for dy in -1..=1i32 {
+        for dx in -1..=1i32 {
+            let cx = (cell.x as i32 + dx).rem_euclid(period_i);
+            let cy = (cell.y as i32 + dy).rem_euclid(period_i);
+            let fx = cx as f32 + hash01(cx, cy, 0, seed, 0);
+            let fy = cy as f32 + hash01(cx, cy, 0, seed, 1);
+            let ddx = circular_dist(fx, p.x, period);
+            let ddy = circular_dist(fy, p.y, period);
+            distance = distance.min((ddx * ddx + ddy * ddy).sqrt());
         }
     }
     1.0 - (distance / std::f32::consts::SQRT_2).clamp(0.0, 1.0)
 }
 
-fn worley3(p: Vec3, seed: u32) -> f32 {
-    let cell = p.floor().as_ivec3();
-    let fract = p - cell.as_vec3();
+fn worley3_periodic(p: Vec3, period: f32, seed: u32) -> f32 {
+    let period_i = period as i32;
+    let cell = p.floor();
     let mut distance = f32::MAX;
-    for z in -1..=1 {
-        for y in -1..=1 {
-            for x in -1..=1 {
-                let feature = Vec3::new(
-                    x as f32 + hash01(cell.x + x, cell.y + y, cell.z + z, seed, 0),
-                    y as f32 + hash01(cell.x + x, cell.y + y, cell.z + z, seed, 1),
-                    z as f32 + hash01(cell.x + x, cell.y + y, cell.z + z, seed, 2),
-                );
-                distance = distance.min((feature - fract).length());
+    for dz in -1..=1i32 {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let cx = (cell.x as i32 + dx).rem_euclid(period_i);
+                let cy = (cell.y as i32 + dy).rem_euclid(period_i);
+                let cz = (cell.z as i32 + dz).rem_euclid(period_i);
+                let fx = cx as f32 + hash01(cx, cy, cz, seed, 0);
+                let fy = cy as f32 + hash01(cx, cy, cz, seed, 1);
+                let fz = cz as f32 + hash01(cx, cy, cz, seed, 2);
+                let ddx = circular_dist(fx, p.x, period);
+                let ddy = circular_dist(fy, p.y, period);
+                let ddz = circular_dist(fz, p.z, period);
+                distance = distance.min((ddx * ddx + ddy * ddy + ddz * ddz).sqrt());
             }
         }
     }
     1.0 - (distance / 1.732_050_8).clamp(0.0, 1.0)
 }
 
-fn worley_fbm2(p: Vec2, seed: u32) -> f32 {
+fn worley_fbm2_periodic(p: Vec2, base_period: f32, seed: u32) -> f32 {
     let mut frequency = 1.0;
     let mut amplitude = 0.58;
     let mut sum = 0.0;
     let mut norm = 0.0;
-    for octave in 0..4 {
-        sum += worley2(
-            p * frequency + Vec2::new(octave as f32 * 5.1, octave as f32 * -3.7),
+    for octave in 0..3 {
+        sum += worley2_periodic(
+            p * frequency,
+            base_period * frequency,
             seed ^ (octave * 977),
         ) * amplitude;
         norm += amplitude;
@@ -724,14 +553,15 @@ fn worley_fbm2(p: Vec2, seed: u32) -> f32 {
     sum / norm
 }
 
-fn worley_fbm3(p: Vec3, seed: u32) -> f32 {
+fn worley_fbm3_periodic(p: Vec3, base_period: f32, seed: u32) -> f32 {
     let mut frequency = 1.0;
     let mut amplitude = 0.58;
     let mut sum = 0.0;
     let mut norm = 0.0;
-    for octave in 0..3 {
-        sum += worley3(
-            p * frequency + Vec3::splat(octave as f32 * 4.13),
+    for octave in 0..2 {
+        sum += worley3_periodic(
+            p * frequency,
+            base_period * frequency,
             seed ^ (octave * 1_301),
         ) * amplitude;
         norm += amplitude;
@@ -739,45 +569,6 @@ fn worley_fbm3(p: Vec3, seed: u32) -> f32 {
         amplitude *= 0.5;
     }
     sum / norm
-}
-
-fn value_fbm3(p: Vec3, seed: u32) -> f32 {
-    let mut frequency = 1.0;
-    let mut amplitude = 0.58;
-    let mut sum = 0.0;
-    let mut norm = 0.0;
-    for octave in 0..4 {
-        sum += crate::rng::vnoise3(
-            p.x * frequency,
-            p.y * frequency,
-            p.z * frequency,
-            seed ^ (octave * 2_003),
-            seed,
-        ) * amplitude;
-        norm += amplitude;
-        frequency *= 2.0;
-        amplitude *= 0.5;
-    }
-    sum / norm
-}
-
-fn vector_noise(p: Vec3, seed: u32) -> Vec3 {
-    Vec3::new(
-        crate::rng::vnoise3(p.x, p.y, p.z, seed ^ 0x11, seed),
-        crate::rng::vnoise3(p.x, p.y, p.z, seed ^ 0x23, seed),
-        crate::rng::vnoise3(p.x, p.y, p.z, seed ^ 0x37, seed),
-    )
-}
-
-fn curl_noise(p: Vec3, seed: u32) -> Vec3 {
-    let epsilon = 0.08;
-    let dx = Vec3::X * epsilon;
-    let dy = Vec3::Y * epsilon;
-    let dz = Vec3::Z * epsilon;
-    let x = (vector_noise(p + dx, seed) - vector_noise(p - dx, seed)) / (2.0 * epsilon);
-    let y = (vector_noise(p + dy, seed) - vector_noise(p - dy, seed)) / (2.0 * epsilon);
-    let z = (vector_noise(p + dz, seed) - vector_noise(p - dz, seed)) / (2.0 * epsilon);
-    Vec3::new(z.y - y.z, x.z - z.x, y.x - x.y).clamp_length_max(1.0)
 }
 
 fn cloud_threshold(key: &str) -> f32 {
@@ -940,5 +731,21 @@ mod tests {
             assert!(weather.speed > 0.0);
             assert!((0.0..=1.0).contains(&cloud_threshold(biome.key)));
         }
+    }
+
+    #[test]
+    fn density_texture_is_toroidal() {
+        // The field must be periodic at the wrap point: sampling exactly at
+        // u=0 and u=1 (×period, the seam) must give identical neighborhoods
+        // and therefore identical values.
+        let seed = 0x5EED;
+        for period in [4.0f32, 8.0, 16.0] {
+            let a = worley_fbm2_periodic(Vec2::new(0.0, 0.5) * period, period, seed);
+            let b = worley_fbm2_periodic(Vec2::new(1.0, 0.5) * period, period, seed);
+            assert!((a - b).abs() < 1e-4, "2D seam at period {period}: {a} vs {b}");
+        }
+        let a = worley_fbm3_periodic(Vec3::new(0.0, 0.5, 0.3) * 6.0, 6.0, seed);
+        let b = worley_fbm3_periodic(Vec3::new(1.0, 0.5, 0.3) * 6.0, 6.0, seed);
+        assert!((a - b).abs() < 1e-4, "3D seam: {a} vs {b}");
     }
 }

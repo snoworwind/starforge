@@ -24,7 +24,6 @@ mod station;
 mod textures;
 mod ui;
 mod weather;
-use bevy_volumetric_clouds::CloudsPlugin;
 mod world;
 
 use bevy::camera::primitives::Aabb;
@@ -33,7 +32,8 @@ use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::{
-    AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, atmosphere::ScatteringMedium,
+    AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, VolumetricFog,
+    atmosphere::ScatteringMedium,
 };
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{
@@ -45,10 +45,10 @@ use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PresentMode};
 use bevy_egui::{EguiContexts, EguiPlugin, egui};
-use materials::{TerrainMat, TerrainMaterials};
+use materials::TerrainMaterials;
 use player::Player;
 use space::{FlightCamera, FlightMode, ShipAsset, ShipRecall, ShipState, SpaceGame, SpaceInput};
-use ui::{Research, ScanPulse, UiState};
+use ui::{Research, UiState};
 use world::{VoxelMesh, World};
 
 /// Everything spawned in-game gets this marker (cleared when returning to menu).
@@ -266,9 +266,6 @@ fn main() {
         )
         .add_plugins(AutoExposurePlugin)
         .add_plugins(EguiPlugin::default())
-        .add_plugins(CloudsPlugin)
-        .add_plugins(MaterialPlugin::<TerrainMat>::default())
-        .add_plugins(MaterialPlugin::<weather::CloudMaterial>::default())
         .insert_resource(settings)
         .insert_resource(cloud_tuning)
         .insert_resource(lighting_tuning)
@@ -306,8 +303,6 @@ fn main() {
         .insert_resource(space::VisitorTraffic::default())
         .init_resource::<space::ExternalAnimationLibrary>()
         .insert_resource(weather::ClimateRuntime::default())
-        .insert_resource(materials::TerrainCurveState::default())
-        .insert_resource(weather::CloudTuning::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())
         .init_resource::<char::NpcAnimationLibrary>()
@@ -352,11 +347,9 @@ fn main() {
                                 quests::village_side_quest_system,
                                 char::npc_idle_system,
                                 ui::research_system,
-                                materials::curve_system,
                                 materials::lamp_pool_system,
                                 daynight::daynight_system,
                                 weather::climate_system,
-                                weather::upstream_cloud_config_system,
                             )
                                 .chain(),
                             (
@@ -605,27 +598,9 @@ fn startup(
     mut audio_assets: ResMut<Assets<bevy::audio::AudioSource>>,
     settings: Res<save::Settings>,
 ) {
-    // Self-extract the WGSL shader assets next to the executable so the
+    // Self-extract the model assets next to the executable so the
     // AssetServer finds them regardless of the working directory.
     if let Some(dir) = executable_dir() {
-        let shader_dir = dir.join("assets").join("shaders");
-        let _ = std::fs::create_dir_all(&shader_dir);
-        let _ = std::fs::write(
-            shader_dir.join("terrain_vertex.wgsl"),
-            include_str!("../assets/shaders/terrain_vertex.wgsl"),
-        );
-        let _ = std::fs::write(
-            shader_dir.join("terrain_prepass_vertex.wgsl"),
-            include_str!("../assets/shaders/terrain_prepass_vertex.wgsl"),
-        );
-        let _ = std::fs::write(
-            shader_dir.join("terrain_fragment.wgsl"),
-            include_str!("../assets/shaders/terrain_fragment.wgsl"),
-        );
-        let _ = std::fs::write(
-            shader_dir.join("volumetric_cloud.wgsl"),
-            include_str!("../assets/shaders/volumetric_cloud.wgsl"),
-        );
         // 本地开发构建时把模型目录复制到 exe 旁（源码在
         // <crate>/target/<profile>/ 下时向上两级即 crate 根）。发布包则应
         // 直接携带 exe 旁的 assets/models，不依赖源代码目录。
@@ -764,7 +739,8 @@ fn startup(
                 ..default()
             }),
             Transform::from_xyz(96.0, 90.0, 96.0),
-            // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘与曲率变形
+            // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘；
+            // daynight_system 会在爬升时动态收拢雾距（替代原曲率/淡出着色器）
             DistanceFog {
                 color: Color::srgb(0.7, 0.85, 1.0),
                 directional_light_color: Color::WHITE,
@@ -775,6 +751,13 @@ fn startup(
                 },
             },
         ))
+        // 原生体积雾（超过 15 元组 Bundle 上限，单独插入）
+        .insert(VolumetricFog {
+            step_count: 24,
+            // Cloud shadows fall back to the sky color, not black.
+            ambient_intensity: 0.30,
+            ..default()
+        })
         .id();
     // 像素风低分辨率渲染：3D 相机渲染到 640×360 目标，UI 相机全屏最近邻放大
     if settings.pixelated {
@@ -1350,9 +1333,8 @@ fn loading_system(
     mut commands: Commands,
     loading: Option<ResMut<LoadingState>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut terrain_materials: ResMut<Assets<TerrainMat>>,
-    mut images: ResMut<Assets<Image>>,
     mut stdmats: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     atlas: Res<AtlasRes>,
     asset_server: Res<AssetServer>,
@@ -1365,7 +1347,7 @@ fn loading_system(
     // build terrain materials once
     if ls.mats.is_none() {
         let mats = TerrainMaterials::build(
-            &mut terrain_materials,
+            &mut stdmats,
             &mut images,
             atlas.atlas.to_image(),
             ls.world.biome().water_tint,
@@ -1737,7 +1719,6 @@ fn spawn_scene(
         }
         commands.insert_resource(spawner);
     }
-    commands.insert_resource(ScanPulse::default());
     commands.insert_resource(ui::ScanState::default());
     commands.insert_resource(Research {
         techs,
@@ -1918,12 +1899,10 @@ fn stream_world_step(
                 if let Some(e) = c.water_mesh {
                     commands.entity(e).despawn();
                 }
-                // AABB 需覆盖曲率顶点位移（着色器按 0.002·r² 下压，视距外缘可达上百格），
-                // 否则高空时远景区块被视锥剔除、边缘地形闪烁
-                let y_min = -160.0
-                    - 0.002
-                        * ((world.view_dist + 2) as f32 * crate::data::CHUNK as f32 + 16.0).powi(2)
-                    - 8.0;
+                // Conservative per-chunk AABB: static meshes with the full
+                // height range, so frustum culling never drops a chunk that
+                // is actually visible.
+                let y_min = -160.0 - 8.0;
                 let c = world.chunks.get_mut(&key).unwrap();
                 c.mesh = solid_m.map(|m| {
                     spawn_chunk_mesh(
@@ -1934,7 +1913,6 @@ fn stream_world_step(
                         world.seed,
                         m,
                         mats.solid.clone(),
-                        false,
                         y_min,
                     )
                 });
@@ -1947,7 +1925,6 @@ fn stream_world_step(
                         world.seed,
                         m,
                         mats.water.clone(),
-                        true,
                         y_min,
                     )
                 });
@@ -2010,8 +1987,7 @@ fn spawn_chunk_mesh(
     cz: i32,
     world_seed: u32,
     vm: VoxelMesh,
-    mat: Handle<TerrainMat>,
-    _water: bool,
+    mat: Handle<StandardMaterial>,
     y_min: f32,
 ) -> Entity {
     let mut mesh = Mesh::new(
@@ -2038,11 +2014,6 @@ fn spawn_chunk_mesh(
             aabb,
             NoAutoAabb,
             Visibility::default(),
-            // Terrain vertices are displaced in the custom shader. Keeping
-            // these chunks in directional-light visibility avoids a valid
-            // caster/receiver being rejected when a curved cascade and the
-            // CPU-side AABB disagree.
-            NoFrustumCulling,
             ChunkMesh { cx, cz, world_seed },
             InGame,
         ))
@@ -2110,7 +2081,7 @@ fn stream_system(
 // ---------- 远景模拟地形（JS farMesh 移植） ----------
 
 /// 远景地形状态：±1536 格低细节高度场，跟随玩家分帧重建；
-/// 缺失时高空/远望的地表在视距边缘戛然而止，曲率变形与区块流式边缘完全暴露（巨大闪动/残影）。
+/// 缺失时高空/远望的地表在视距边缘戛然而止，流式区块边缘完全暴露（巨大闪动/残影）。
 #[derive(Component)]
 struct FarMesh {
     /// 已完成的网格中心（世界坐标，按 FAR_SNAP 对齐）
@@ -2122,6 +2093,9 @@ struct FarMesh {
     target_cx: f32,
     target_cz: f32,
     mesh: Handle<Mesh>,
+    /// 上次写入挖空环的玩家位置（用于节流 CPU 顶点 alpha 更新）
+    hole_x: f32,
+    hole_z: f32,
 }
 
 /// 远景挖空环（JS farHoleU 同口径）：玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
@@ -2144,7 +2118,7 @@ fn far_mesh_system(
         Entity,
         &mut FarMesh,
         &mut Visibility,
-        &mut MeshMaterial3d<TerrainMat>,
+        &mut MeshMaterial3d<StandardMaterial>,
     )>,
 ) {
     let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
@@ -2203,14 +2177,28 @@ fn far_mesh_system(
                 }
             }
         }
-        // 挖空环已移入片元着色器（far_hole_* uniform，curve_system 每帧更新）——
-        // 不再每帧在 CPU 上改写 129×129 顶点 alpha（旧实现每帧上传 16k 顶点，跨越区块时加剧卡顿）
+        // 挖空环：CPU 顶点 alpha（JS 原版每帧改写 129×129 顶点同口径），
+        // 仅当玩家移动或网格重建后刷新，避免每帧上传 16k 顶点。
+        let (r0, r1) = far_hole_radii(world.view_dist);
+        let moved = (px - fm.hole_x).abs() > 2.0 || (pz - fm.hole_z).abs() > 2.0;
+        if show && (moved || fm.row < world::FAR_N) {
+            if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
+                world::update_far_hole_alpha(&mut mesh, px, pz, r0, r1);
+            }
+            fm.hole_x = px;
+            fm.hole_z = pz;
+        }
         if mmat.0 != mats.far {
             mmat.0 = mats.far.clone();
         }
         let _ = e;
     } else if show {
         let handle = meshes.add(world::build_far_mesh(&world, &atlas.atlas, tcx, tcz));
+        // 首帧即写入挖空环，避免生成后到玩家移动前远景直穿地表
+        if let Some(mut mesh) = meshes.get_mut(&handle) {
+            let (r0, r1) = far_hole_radii(world.view_dist);
+            world::update_far_hole_alpha(&mut mesh, px, pz, r0, r1);
+        }
         commands.spawn((
             Mesh3d(handle.clone()),
             MeshMaterial3d(mats.far.clone()),
@@ -2224,6 +2212,8 @@ fn far_mesh_system(
                 target_cx: tcx,
                 target_cz: tcz,
                 mesh: handle,
+                hole_x: px,
+                hole_z: pz,
             },
             NoFrustumCulling,
             InGame,
@@ -2247,7 +2237,7 @@ fn planet_switch_system(
     mut sent_spawner: ResMut<creatures::SentinelSpawner>,
     mut scan_state: ResMut<ui::ScanState>,
     scan_markers: Query<Entity, With<ui::ScanMarker>>,
-    mut terrain_materials: ResMut<Assets<TerrainMat>>,
+    mut terrain_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     atlas: Res<AtlasRes>,
 ) {
@@ -2518,7 +2508,6 @@ fn quit_to_menu_system(
         commands.remove_resource::<materials::LampPool>();
         commands.remove_resource::<player::BreakQueue>();
         commands.remove_resource::<creatures::CreatureSpawner>();
-        commands.remove_resource::<ScanPulse>();
         commands.remove_resource::<ui::GhostMat>();
         commands.remove_resource::<SaveNames>();
         commands.remove_resource::<Research>();

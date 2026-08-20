@@ -2865,35 +2865,8 @@ pub fn pause_panel_system(
                         )
                         .changed();
                 });
-
-                let current = crate::weather::CLOUD_RESOLUTION_PRESETS
-                    .iter()
-                    .position(|&(w, h)| cloud_tuning.render_resolution == UVec2::new(w, h))
-                    .unwrap_or(0);
-                let mut selected = current;
-                egui::ComboBox::from_id_salt("cloud_render_resolution")
-                    .selected_text(format!(
-                        "{}×{}",
-                        cloud_tuning.render_resolution.x, cloud_tuning.render_resolution.y
-                    ))
-                    .show_ui(ui, |ui| {
-                        for (index, &(width, height)) in
-                            crate::weather::CLOUD_RESOLUTION_PRESETS.iter().enumerate()
-                        {
-                            ui.selectable_value(
-                                &mut selected,
-                                index,
-                                format!("{}×{}", width, height),
-                            );
-                        }
-                    });
-                if selected != current {
-                    let (width, height) = crate::weather::CLOUD_RESOLUTION_PRESETS[selected];
-                    cloud_tuning.render_resolution = UVec2::new(width, height);
-                    cloud_changed = true;
-                    ui.label("分辨率将在下一帧重建云纹理");
-                }
-                ui.small("步数和分辨率越高，GPU 开销越大");
+                // 原生体积雾（FogVolume）全分辨率渲染，无低分辨率目标可选。
+                ui.small("步数越高，体积雾 GPU 开销越大");
             });
             if cloud_changed {
                 cloud_tuning.sanitize();
@@ -3119,19 +3092,14 @@ pub fn panel_hotkeys_system(
     }
 }
 
-/// C: scan pulse — expanding ring from the player.
-#[derive(Resource, Default)]
-pub struct ScanPulse {
-    pub t: f32,
-    pub active: bool,
-}
-
 /// 扫描冷却/标记（JS doScan：cd 6s、范围 24/48/80、标记 25s 过期）。
 #[derive(Resource, Default)]
 pub struct ScanState {
     pub cd: f32,
     pub marker_mat: Option<Handle<StandardMaterial>>,
     pub marker_mesh: Option<Handle<Mesh>>,
+    /// 扫描环网格（Annulus，外半径 1.0，动画时整体缩放）。
+    pub ring_mesh: Option<Handle<Mesh>>,
 }
 
 /// 扫描标记（发光小立方，靠近/被挖/过期即散）。
@@ -3142,13 +3110,17 @@ pub struct ScanMarker {
     pub expire: f32,
 }
 
+/// 原生扫描环：地面上的扁平圆环，随 `t` 扩张并淡出（替代旧着色器扫描脉冲）。
+#[derive(Component)]
+pub struct ScanRing {
+    pub t: f32,
+    pub mat: Handle<StandardMaterial>,
+}
+
 pub fn scan_system(
     keys: Res<ButtonInput<KeyCode>>,
-    mut pulse: ResMut<ScanPulse>,
     mut state: ResMut<ScanState>,
     time: Res<Time>,
-    mut materials: ResMut<Assets<crate::materials::TerrainMat>>,
-    mats: Res<crate::materials::TerrainMaterials>,
     player: Query<&Player>,
     ui: Res<UiState>,
     world: Res<World>,
@@ -3157,12 +3129,27 @@ pub fn scan_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut stdmats: ResMut<Assets<StandardMaterial>>,
     mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
-    mut markers: Query<(Entity, &mut ScanMarker, &Transform)>,
+    mut markers: Query<(Entity, &mut ScanMarker, &Transform), Without<ScanRing>>,
+    mut rings: Query<(Entity, &mut ScanRing, &mut Transform), Without<ScanMarker>>,
     sfx: Res<audio::Sfx>,
 ) {
     let dt = time.delta_secs();
     state.cd = (state.cd - dt).max(0.0);
     let Ok(p) = player.single() else { return };
+    // 扫描环动画：扩张 + 淡出（JS 同口径：r = t*480，1.4s 生命周期）
+    for (e, mut ring, mut tf) in &mut rings {
+        ring.t += dt;
+        let r = ring.t * 480.0;
+        let a = (ring.t * 0.9).clamp(0.0, 0.9)
+            * (1.0 - (ring.t - 0.9).max(0.0) / 0.5).clamp(0.0, 1.0);
+        tf.scale = Vec3::splat(r);
+        if let Some(mut m) = stdmats.get_mut(&ring.mat) {
+            m.base_color = Color::srgba(0.13, 0.86, 0.9, a);
+        }
+        if ring.t > 1.4 {
+            commands.entity(e).despawn();
+        }
+    }
     // 标记过期 / 靠近 3.5m / 方块被挖 → 消散（JS doScan 标记生命周期）
     for (e, mut m, tf) in &mut markers {
         m.expire -= dt;
@@ -3177,8 +3164,6 @@ pub fn scan_system(
             return;
         }
         state.cd = 6.0;
-        pulse.active = true;
-        pulse.t = 0.0;
         audio::play(&mut commands, sfx.pickup.clone(), 0.6, None);
         let range: i32 = if research.techs.iter().any(|t| t == "scan2") {
             80
@@ -3284,30 +3269,36 @@ pub fn scan_system(
                 crate::InGame,
             ));
         }
+        // 原生扫描环：地面扁平圆环，随 t 扩张淡出（替代旧着色器扫描脉冲）
+        if state.ring_mesh.is_none() {
+            state.ring_mesh = Some(meshes.add(Annulus::new(0.97, 1.0).mesh().build()));
+        }
+        let gy = world.top_at(p.pos.x.floor() as i32, p.pos.z.floor() as i32) as f32 + 0.5;
+        if let Some(ring_mesh) = state.ring_mesh.clone() {
+            let ring_mat = stdmats.add(StandardMaterial {
+                base_color: Color::srgba(0.13, 0.86, 0.9, 0.9),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                ..default()
+            });
+            commands.spawn((
+                Mesh3d(ring_mesh),
+                MeshMaterial3d(ring_mat.clone()),
+                Transform::from_translation(Vec3::new(p.pos.x, gy, p.pos.z))
+                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                ScanRing {
+                    t: 0.0,
+                    mat: ring_mat,
+                },
+                crate::InGame,
+            ));
+        }
         big_ev.write(crate::quests::BigMessageEvent {
             title: format!("扫描完成：发现 {} 处矿物信号", out.len()),
             sub: format!("范围 {}m", range),
             dur: 2.5,
         });
-    }
-    if pulse.active {
-        pulse.t += dt;
-        let r = pulse.t * 480.0;
-        let a = (pulse.t * 0.9).clamp(0.0, 0.9)
-            * (1.0 - (pulse.t - 0.9).max(0.0) / 0.5).clamp(0.0, 1.0);
-        if let Some(mut m) = materials.get_mut(&mats.solid) {
-            let c = &mut m.extension.curve;
-            c.scan_r = r;
-            c.scan_cx = p.pos.x;
-            c.scan_cz = p.pos.z;
-            c.scan_a = a;
-        }
-        if pulse.t > 1.4 {
-            pulse.active = false;
-            if let Some(mut m) = materials.get_mut(&mats.solid) {
-                m.extension.curve.scan_a = 0.0;
-            }
-        }
     }
 }
 

@@ -5,7 +5,7 @@ use crate::space::FlightMode;
 use crate::world::World;
 use bevy::light::{
     Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
-    SunDisk, atmosphere::ScatteringMedium, light_consts::lux,
+    SunDisk, VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
 };
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::post_process::bloom::Bloom;
@@ -275,9 +275,11 @@ pub fn daynight_system(
     sky = lerp_color(sky, space_black, sf);
     clear.0 = sky;
 
-    // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘与曲率变形；
-    // 太空/空间站模式关闭（太空场景自带黑背景与星光）
-    let alt_f = ((cam_y - 80.0) / 170.0).clamp(0.0, 1.0);
+    // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘。
+    // 原版曲率/淡出着色器已移除：爬升（atmo）时把雾距向相机收拢，让平面体素
+    // 地形在出大气前被雾色（≈天空色）吞没——读起来就是大气密度，出大气
+    // （EXIT_Y）瞬间由太空场景的球面星球无缝接棒。
+    let climb = ((cam_y - 100.0) / (crate::space::EXIT_Y - 100.0)).clamp(0.0, 1.0);
     let fog_color = lerp_color(sky, Color::WHITE, 0.15 * f * (1.0 - sf));
     for mut fog in &mut fog_q {
         if mode.space_scene() {
@@ -286,10 +288,10 @@ pub fn daynight_system(
                 end: 1e9,
             };
         } else {
-            fog.falloff = FogFalloff::Linear {
-                start: 90.0 + alt_f * 260.0,
-                end: 1050.0 + alt_f * 650.0,
-            };
+            // 地面 90..1050；爬到 EXIT_Y（220）时收拢到 ~58..120，下方地形完全雾化
+            let start = 90.0 * (1.0 - climb * 0.35);
+            let end = 1050.0 * (1.0 - climb * 0.885);
+            fog.falloff = FogFalloff::Linear { start, end };
             fog.color = fog_color;
         }
     }
@@ -376,6 +378,9 @@ pub fn spawn_sky(
         }
         .build(),
         Transform::IDENTITY,
+        // 原生体积云（FogVolume）需要太阳标记为 volumetric 才能产生
+        // 光柱/云影（阴影贴图已开启）。
+        VolumetricLight,
         Sun,
         crate::InGame,
     ));

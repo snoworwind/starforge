@@ -1,95 +1,33 @@
-//! Custom terrain material: StandardMaterial + vertex displacement extension
-//! (planet curvature, water waves) + glow/scan-pulse fragment pass.
+//! Terrain materials — native `StandardMaterial` instances (no custom WGSL).
+//!
+//! The old port used an `ExtendedMaterial` with hand-written WGSL to apply
+//! planet curvature, water waves, scan pulses and edge fades on the GPU. This
+//! native version uses only Bevy's built-in PBR pipeline: face shading and
+//! glow-block brightness are carried per-vertex through the mesh `COLOR`
+//! attribute (which Bevy's `StandardMaterial` multiplies into the base color
+//! automatically when the mesh layout contains it), and the remaining effects
+//! (far-mesh fade ring, altitude haze) are handled by CPU vertex alpha and
+//! Bevy's native `DistanceFog` respectively.
 
 use bevy::image::{ImageFilterMode, ImageSampler};
-use bevy::pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial};
+use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
-use bevy::shader::ShaderRef;
 
-/// Uniform block for the terrain extension (binding slot 100).
-#[derive(ShaderType, Clone, Copy, Debug, Default)]
-pub struct CurveUniform {
-    pub center: Vec2,   // curvature center x/z (player)
-    pub amt: f32,       // 0..1 curvature amount
-    pub grow: f32,      // vertical squash/stretch about SEA_Y
-    pub wave_time: f32, // water wave time
-    pub wave_on: f32,   // 1.0 enables water waves
-    pub water_on: f32,  // enables animated surface sheen/reflection pass
-    pub fade: f32,      // global alpha fade
-    pub edge_r: f32,    // radial edge fade radius (blocks)
-    pub pad: f32,
-    pub scan_r: f32,  // scan pulse radius
-    pub scan_cx: f32, // scan center x
-    pub scan_cz: f32, // scan center z
-    pub scan_a: f32,  // scan alpha
-    // 远景挖空环（far_hole_on=1 时在片元着色器里按到 far_hole_cx/cz 的距离淡出，
-    // 替代旧实现每帧在 CPU 上改写 129×129 顶点 alpha——JS farMesh 用 shader uniform 同口径）
-    pub far_hole_on: f32,
-    pub far_hole_r0: f32,
-    pub far_hole_r1: f32,
-    pub far_hole_cx: f32,
-    pub far_hole_cz: f32,
-}
-
-/// Curvature state shared by terrain materials and the volumetric cloud pass.
-///
-/// Keeping this state in one place prevents the two renderers from drifting
-/// apart when the player transitions into the curved atmospheric view.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct TerrainCurveState {
-    pub center: Vec2,
-    pub amt: f32,
-    pub grow: f32,
-}
-
-impl Default for TerrainCurveState {
-    fn default() -> Self {
-        Self {
-            center: Vec2::ZERO,
-            amt: 0.0,
-            grow: 1.0,
-        }
-    }
-}
-
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
-pub struct TerrainExtension {
-    #[uniform(100)]
-    pub curve: CurveUniform,
-}
-
-impl MaterialExtension for TerrainExtension {
-    fn enable_shadows() -> bool {
-        true
-    }
-
-    fn vertex_shader() -> ShaderRef {
-        "shaders/terrain_vertex.wgsl".into()
-    }
-    fn fragment_shader() -> ShaderRef {
-        "shaders/terrain_fragment.wgsl".into()
-    }
-    fn prepass_vertex_shader() -> ShaderRef {
-        "shaders/terrain_prepass_vertex.wgsl".into()
-    }
-}
-
-pub type TerrainMat = ExtendedMaterial<StandardMaterial, TerrainExtension>;
-
-/// Shared material handles (one instance per world so the uniform is a single upload).
+/// Shared terrain material handles (one instance per world so the atlas
+/// upload is shared by every chunk mesh).
 #[derive(Resource, Clone)]
 pub struct TerrainMaterials {
-    pub solid: Handle<TerrainMat>,
-    pub water: Handle<TerrainMat>,
-    /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）
-    pub far: Handle<TerrainMat>,
+    pub solid: Handle<StandardMaterial>,
+    pub water: Handle<StandardMaterial>,
+    /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）。
+    /// Vertex alpha is rewritten on the CPU every frame for the far-hole ring.
+    pub far: Handle<StandardMaterial>,
     pub atlas_image: Handle<Image>,
 }
 
 impl TerrainMaterials {
     pub fn build(
-        materials: &mut Assets<TerrainMat>,
+        materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
         atlas_bytes: Vec<u8>,
         water_tint: u32,
@@ -113,142 +51,46 @@ impl TerrainMaterials {
         image.sampler = sampler;
         let atlas_image = images.add(image);
 
-        let solid = materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color_texture: Some(atlas_image.clone()),
-                double_sided: true,
-                cull_mode: None,
-                // Leaves and cross-shaped plants share this mesh/material and
-                // contain transparent atlas texels. Keep alpha cutout so the
-                // visible silhouette and its shadow use the same coverage.
-                alpha_mode: AlphaMode::Mask(0.4),
-                ..default()
-            },
-            extension: TerrainExtension {
-                curve: CurveUniform {
-                    amt: 0.0,
-                    grow: 1.0,
-                    fade: 1.0,
-                    edge_r: 9999.0,
-                    wave_on: 0.0,
-                    ..default()
-                },
-            },
+        let solid = materials.add(StandardMaterial {
+            base_color_texture: Some(atlas_image.clone()),
+            double_sided: true,
+            cull_mode: None,
+            // Leaves and cross-shaped plants share this mesh/material and
+            // contain transparent atlas texels. Keep alpha cutout so the
+            // visible silhouette and its shadow use the same coverage.
+            alpha_mode: AlphaMode::Mask(0.4),
+            ..default()
         });
         let (tr, tg, tb) = (
             ((water_tint >> 16) & 0xFF) as f32 / 255.0,
             ((water_tint >> 8) & 0xFF) as f32 / 255.0,
             (water_tint & 0xFF) as f32 / 255.0,
         );
-        let water = materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgba(tr, tg, tb, 0.72),
-                base_color_texture: Some(atlas_image.clone()),
-                double_sided: true,
-                cull_mode: None,
-                alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 0.18,
-                metallic: 0.12,
-                ..default()
-            },
-            extension: TerrainExtension {
-                curve: CurveUniform {
-                    amt: 0.0,
-                    grow: 1.0,
-                    fade: 1.0,
-                    edge_r: 9999.0,
-                    wave_on: 1.0,
-                    water_on: 1.0,
-                    ..default()
-                },
-            },
+        let water = materials.add(StandardMaterial {
+            // The tint is applied per-vertex in the water mesh (COLOR attribute,
+            // alpha 0.72); the material color is just a fallback.
+            base_color: Color::srgba(tr, tg, tb, 0.72),
+            base_color_texture: Some(atlas_image.clone()),
+            double_sided: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.18,
+            metallic: 0.12,
+            ..default()
         });
-        let far = materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::WHITE,
-                double_sided: true,
-                cull_mode: None,
-                // 半透明：顶点 alpha 恒为 1，挖空环由 far_hole_* uniform 在片元着色器计算
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            },
-            extension: TerrainExtension {
-                curve: CurveUniform {
-                    amt: 0.0,
-                    grow: 1.0,
-                    fade: 1.0,
-                    edge_r: 9999.0,
-                    wave_on: 0.0,
-                    far_hole_on: 1.0,
-                    ..default()
-                },
-            },
+        let far = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            double_sided: true,
+            cull_mode: None,
+            // 半透明：RGB 来自顶点色（地表色），alpha 由 CPU 每帧写入挖空环
+            alpha_mode: AlphaMode::Blend,
+            ..default()
         });
         Self {
             solid,
             water,
             far,
             atlas_image,
-        }
-    }
-}
-
-/// Update the shared curvature uniform from the player position/altitude.
-pub fn curve_system(
-    time: Res<Time>,
-    player: Query<&crate::player::Player>,
-    ship: Res<crate::space::ShipState>,
-    mode: Res<crate::space::FlightMode>,
-    world: Option<Res<crate::world::World>>,
-    mut materials: ResMut<Assets<TerrainMat>>,
-    mats: Res<TerrainMaterials>,
-    mut curve_state: ResMut<TerrainCurveState>,
-    mut wave_t: Local<f32>,
-) {
-    let Ok(p) = player.single() else { return };
-    *wave_t += time.delta_secs();
-    // 飞船模式下 Player 只在飞行系统末尾做镜像更新，若仍使用 p.pos，
-    // 高速跨区块时曲率中心会落后一帧甚至停在旧位置，造成地形/远景撕裂。
-    let (center_x, center_z, cam_y) = if matches!(
-        *mode,
-        crate::space::FlightMode::Atmo
-            | crate::space::FlightMode::AtmoLand
-            | crate::space::FlightMode::Seated
-    ) {
-        (ship.pos.x, ship.pos.z, ship.pos.y + crate::player::EYE)
-    } else {
-        (p.pos.x, p.pos.z, p.eye().y)
-    };
-    let amt = ((cam_y - 62.0) / (150.0 - 62.0)).clamp(0.0, 1.0);
-    let grow = 1.0;
-    curve_state.center = Vec2::new(center_x, center_z);
-    curve_state.amt = amt;
-    curve_state.grow = grow;
-    // 出大气过渡：最后 60 格地形/远景淡出（球面 LOD 无缝接棒，避免飞出大气瞬间贴图突变）
-    let fade =
-        if *mode == crate::space::FlightMode::Atmo || *mode == crate::space::FlightMode::AtmoLand {
-            ((crate::space::EXIT_Y - ship.pos.y) / 60.0).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-    // 远景挖空环半径随区块视距联动（JS farHoleU 同口径），片元着色器按玩家距离计算
-    let (r0, r1) = crate::far_hole_radii(world.map(|w| w.view_dist).unwrap_or(10));
-    for handle in [&mats.solid, &mats.water, &mats.far] {
-        if let Some(mut m) = materials.get_mut(handle) {
-            let c = &mut m.extension.curve;
-            c.center = Vec2::new(center_x, center_z);
-            c.amt = amt;
-            c.grow = grow;
-            c.fade = fade;
-            c.edge_r = 9999.0;
-            c.wave_time = *wave_t;
-            c.water_on = if handle == &mats.water { 1.0 } else { 0.0 };
-            // 远景挖空环（片元着色器计算，替代每帧 CPU 改写 129×129 顶点 alpha）
-            c.far_hole_on = if handle == &mats.far { 1.0 } else { 0.0 };
-            c.far_hole_r0 = r0;
-            c.far_hole_r1 = r1;
-            c.far_hole_cx = center_x;
-            c.far_hole_cz = center_z;
         }
     }
 }

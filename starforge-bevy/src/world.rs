@@ -1527,7 +1527,9 @@ pub fn build_chunk_meshes(
                     if def.liquid {
                         let mut cols = [[0f32; 4]; 4];
                         for col in &mut cols {
-                            *col = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 1.0];
+                            // alpha 0.72：原生 StandardMaterial 把顶点色（含 alpha）
+                            // 作为 base_color 参与 Blend，水面保持半透明
+                            *col = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 0.72];
                         }
                         emit_quad_col(&mut water, corners, uv, cols, dir.map(|v| v as f32));
                     } else {
@@ -1670,7 +1672,7 @@ fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
 
 /// 填充远景地形网格的行 `[from, to)`（原地修改，其余行保留原值；行序为中心向外）。
 /// 高度/地表色与 JS `mapHeightAt` / `mapColorRGB` 同口径（纯噪声高度、海平面抬升、地表瓦片平均色）。
-/// 顶点 alpha 恒为 1，挖空环由 far_mesh_system 的 uniform 在片元着色器计算。
+/// 顶点 alpha 恒为 1，挖空环由 `update_far_hole_alpha` 在 CPU 上每帧写入（JS 原版同口径）。
 pub fn fill_far_rows(
     world: &World,
     atlas: &crate::textures::Atlas,
@@ -1834,6 +1836,34 @@ pub fn build_far_mesh(world: &World, atlas: &crate::textures::Atlas, cx: f32, cz
     mesh.insert_indices(Indices::U32(indices));
     fill_far_rows(world, atlas, cx, cz, 0, FAR_N, &mut mesh);
     mesh
+}
+
+/// 远景挖空环（JS farHoleU 同口径）：原地改写顶点 COLOR 的 alpha——
+/// `smoothstep(r0², r1², d²)`，玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
+/// 原生 `StandardMaterial` 会把顶点色（含 alpha）作为 base_color 参与 Blend，
+/// 因此该 CPU 更新等价于旧着色器的 far_hole 片元计算。
+pub fn update_far_hole_alpha(mesh: &mut Mesh, px: f32, pz: f32, r0: f32, r1: f32) {
+    use bevy::mesh::VertexAttributeValues;
+    // Clone the positions (16k×3 floats) so the COLOR attribute can be
+    // borrowed mutably below.
+    let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(VertexAttributeValues::Float32x3(v)) => v.clone(),
+        _ => return,
+    };
+    let Some(VertexAttributeValues::Float32x4(colors)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
+    else {
+        return;
+    };
+    let r0_2 = r0 * r0;
+    let r1_2 = r1 * r1;
+    let span = (r1_2 - r0_2).max(1.0);
+    for (pos, col) in positions.iter().zip(colors.iter_mut()) {
+        let dx = pos[0] - px;
+        let dz = pos[2] - pz;
+        let d2 = dx * dx + dz * dz;
+        let t = ((d2 - r0_2) / span).clamp(0.0, 1.0);
+        col[3] = t * t * (3.0 - 2.0 * t);
+    }
 }
 
 #[cfg(test)]

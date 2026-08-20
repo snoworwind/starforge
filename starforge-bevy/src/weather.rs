@@ -223,11 +223,20 @@ pub fn climate_system(
                     FogVolume {
                         // White fog lit by the real sun: the cloud layer picks
                         // up the warm daylight color and the biome sky ambient.
+                        //
+                        // Bevy 的 light_attenuation = exp(-density × bounding_radius
+                        // × (absorption+scattering))，bounding_radius 是云盒包围球
+                        // 半径（1100 宽云盒 ≈ 779）。吸收/散射必须压到 ~0.02 量级，
+                        // 否则 exp(-0.12×779×0.28)=exp(-27)≈0，方向光被 Beer 衰减
+                        // 全吃掉，云白天也全黑（官方示例云盒只有 30~55 半径）。
                         fog_color: Color::WHITE,
                         density_factor: 0.10,
                         density_texture: Some(density.clone()),
-                        absorption: 0.22,
-                        scattering: 0.30,
+                        absorption: 0.01,
+                        scattering: 0.012,
+                        // 补偿压低后的散射系数：云亮度 = light_attenuation ×
+                        // scattering × light_intensity，光强因子放大到可见水平。
+                        light_intensity: 5.0,
                         scattering_asymmetry: 0.72,
                         ..default()
                     },
@@ -302,8 +311,11 @@ pub fn climate_system(
                         fog_color: Color::WHITE,
                         density_factor: 0.10,
                         density_texture: Some(density),
-                        absorption: 0.22,
-                        scattering: 0.30,
+                        // 同首建：吸收/散射压低到与 779 包围球半径匹配的量级，
+                        // light_intensity 补偿散射亮度（见上）。
+                        absorption: 0.01,
+                        scattering: 0.012,
+                        light_intensity: 5.0,
                         scattering_asymmetry: 0.72,
                         ..default()
                     },
@@ -349,9 +361,15 @@ pub fn climate_system(
         // Tuning → physical fog coefficients. `coverage` mostly controls how
         // much of the layer is opaque, `density` how strongly it absorbs and
         // scatters light.
+        //
+        // 系数量级注意：Bevy 的 light_attenuation 用云盒包围球半径
+        // （1100 宽 → ≈779）做 Beer 衰减路径，吸收/散射必须 ~0.01 量级，
+        // 否则 exp(-density×779×(abs+scat)) ≈ 0，云白天全黑。散射亮度
+        // 用 FogVolume::light_intensity 放大补偿。
         fog.density_factor = 0.05 + tuning.coverage.clamp(0.0, 1.0) * 0.12;
-        fog.absorption = 0.10 + tuning.density.clamp(0.0, 1.0) * 0.22;
-        fog.scattering = 0.14 + tuning.density.clamp(0.0, 1.0) * 0.26;
+        fog.absorption = 0.006 + tuning.density.clamp(0.0, 1.0) * 0.010;
+        fog.scattering = 0.008 + tuning.density.clamp(0.0, 1.0) * 0.012;
+        fog.light_intensity = 5.0;
         *visibility = if show_clouds {
             Visibility::Visible
         } else {
@@ -361,9 +379,11 @@ pub fn climate_system(
     for mut vf in &mut camera_fog {
         vf.step_count = tuning.raymarch_steps.clamp(4, 64);
         // Shadowed cloud parts fall back to the sky color so they don't read
-        // as black holes against the atmosphere.
+        // as black holes against the atmosphere. 白天环境光提高：
+        // ambient 项也受 exp(-ray_length×(abs+scat)) Beer 衰减，
+        // 0.3 太低会让云的背光面接近全黑，2.0 与压低后的系数匹配。
         vf.ambient_color = Color::LinearRgba(sky);
-        vf.ambient_intensity = 0.30;
+        vf.ambient_intensity = 2.0;
     }
 
     for (_, mut particle, mut transform, mut visibility) in &mut particles {

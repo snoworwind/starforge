@@ -40,7 +40,6 @@ use bevy::pbr::{
     AtmosphereMode, AtmosphereSettings, ContactShadows, DistanceFog, FogFalloff,
     ScreenSpaceAmbientOcclusion,
 };
-use bevy::post_process::auto_exposure::{AutoExposure, AutoExposurePlugin};
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PresentMode};
@@ -264,7 +263,6 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins(AutoExposurePlugin)
         .add_plugins(EguiPlugin::default())
         .insert_resource(settings)
         .insert_resource(cloud_tuning)
@@ -650,27 +648,6 @@ fn startup(
     commands.insert_resource(icon_imgs);
     commands.insert_resource(audio::Sfx::build(&mut audio_assets, settings.volume));
 
-    // Auto exposure should meter the terrain/interior rather than the bright
-    // raymarched sky. The mask is intentionally procedural so debug and
-    // release builds use the exact same asset configuration.
-    // AutoExposure uses top-left texture coordinates; the lower half is the
-    // useful ground region and the upper half contributes no histogram weight.
-    let metering_mask = images.add(Image::new(
-        bevy::render::render_resource::Extent3d {
-            width: 1,
-            height: 4,
-            depth_or_array_layers: 1,
-        },
-        bevy::render::render_resource::TextureDimension::D2,
-        vec![
-            0u8, 0, 0, 255, // upper quarter: ignore sky
-            0, 0, 0, 255, // upper half: ignore sky
-            255, 255, 255, 255, // lower half: meter terrain
-            255, 255, 255, 255,
-        ],
-        bevy::render::render_resource::TextureFormat::Rgba8Unorm,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD,
-    ));
     // persistent camera: created now so bevy_egui's primary context exists in menus too.
     // The player camera system drives it during Playing.
     let cam = commands
@@ -683,11 +660,11 @@ fn startup(
             },
             // Feed the raymarched sky back into PBR as diffuse environment
             // lighting; without this the small voxel ground can remain nearly
-            // black even while the atmospheric sky is bright.
+            // black even while the atmospheric sky is bright. Intensity is
+            // overwritten each frame by daynight_system from the F3 tuning
+            // (default 1.0 = Bevy's atmosphere example value).
             AtmosphereEnvironmentMapLight {
-                // Keep the atmosphere as a very restrained fill. The direct
-                // sunlight is intentionally much stronger than this.
-                intensity: 0.04,
+                intensity: 1.0,
                 ..default()
             },
             // ContactShadows requires a depth prepass. Add it explicitly so
@@ -718,20 +695,14 @@ fn startup(
                 },
                 ..Bloom::NATURAL
             },
-            // Meter the HDR frame and adapt exposure between the bright
-            // atmosphere/sun and dark ground/interior views.
-            AutoExposure {
-                metering_mask,
-                range: -3.0..=3.0,
-                filter: 0.20..=0.80,
-                speed_brighten: 3.0,
-                speed_darken: 1.5,
-                ..default()
-            },
             Tonemapping::AcesFitted,
-            // Use a physical daylight baseline; AutoExposure adds only a
-            // bounded correction on top of this value.
-            Exposure { ev100: 14.0 },
+            // Fixed physical daylight exposure (matches Bevy's atmosphere
+            // example: RAW_SUNLIGHT at EV100 13). Auto exposure was removed:
+            // it normalized the metered region back to middle gray every
+            // frame, so the F3 lighting sliders (ambient/sun) had no visible
+            // effect — exactly the "ambient max still dark" report. The JS
+            // original has no auto exposure either; lighting is manual.
+            Exposure { ev100: 13.0 },
             Msaa::Off,
             Projection::Perspective(PerspectiveProjection {
                 fov: 75f32.to_radians(),
@@ -754,8 +725,10 @@ fn startup(
         // 原生体积雾（超过 15 元组 Bundle 上限，单独插入）
         .insert(VolumetricFog {
             step_count: 24,
-            // Cloud shadows fall back to the sky color, not black.
-            ambient_intensity: 0.30,
+            // Cloud shadows fall back to the sky color, not black. 2.0 与
+            // weather.rs 中压低后的吸收/散射系数匹配（见 light_attenuation
+            // Beer 衰减说明）；0.3 会让云的背光面接近全黑。
+            ambient_intensity: 2.0,
             ..default()
         })
         .id();
@@ -1520,7 +1493,7 @@ fn spawn_scene(
             0.0
         };
         p.pitch = if cd.pitch.is_finite() {
-            cd.pitch.clamp(-1.55, 1.55)
+            cd.pitch.clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2)
         } else {
             0.0
         };
@@ -2099,9 +2072,11 @@ struct FarMesh {
 }
 
 /// 远景挖空环（JS farHoleU 同口径）：玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
+/// 过渡带从 JS 的 90 格加宽到 ~120 格（r0 下限也从 56 降到 30），
+/// 让远景淡入更平缓、更不易察觉。
 fn far_hole_radii(view_dist: i32) -> (f32, f32) {
     let r1 = view_dist as f32 * 16.0 - 8.0;
-    let r0 = (r1 - 90.0).max(56.0);
+    let r0 = (r1 - 120.0).max(30.0).min(r1 - 20.0);
     (r0, r1)
 }
 
@@ -2111,6 +2086,7 @@ fn far_mesh_system(
     player: Query<&Player>,
     ship: Res<ShipState>,
     mode: Res<FlightMode>,
+    clear: Res<ClearColor>,
     mut meshes: ResMut<Assets<Mesh>>,
     mats: Res<TerrainMaterials>,
     atlas: Res<AtlasRes>,
@@ -2177,13 +2153,14 @@ fn far_mesh_system(
                 }
             }
         }
-        // 挖空环：CPU 顶点 alpha（JS 原版每帧改写 129×129 顶点同口径），
-        // 仅当玩家移动或网格重建后刷新，避免每帧上传 16k 顶点。
+        // 过渡带：CPU 顶点 alpha + 颜色向雾色渐隐 + 高度下沉渐变（JS 原版
+        // 每帧改写顶点同口径），仅当玩家移动或网格重建后刷新，避免每帧上传。
         let (r0, r1) = far_hole_radii(world.view_dist);
+        let fog_rgb = clear.0.to_linear().to_f32_array();
         let moved = (px - fm.hole_x).abs() > 2.0 || (pz - fm.hole_z).abs() > 2.0;
         if show && (moved || fm.row < world::FAR_N) {
             if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
-                world::update_far_hole_alpha(&mut mesh, px, pz, r0, r1);
+                world::update_far_hole_alpha(&mut mesh, px, pz, r0, r1, [fog_rgb[0], fog_rgb[1], fog_rgb[2]]);
             }
             fm.hole_x = px;
             fm.hole_z = pz;
@@ -2194,10 +2171,18 @@ fn far_mesh_system(
         let _ = e;
     } else if show {
         let handle = meshes.add(world::build_far_mesh(&world, &atlas.atlas, tcx, tcz));
-        // 首帧即写入挖空环，避免生成后到玩家移动前远景直穿地表
+        // 首帧即写入过渡带，避免生成后到玩家移动前远景直穿地表
         if let Some(mut mesh) = meshes.get_mut(&handle) {
             let (r0, r1) = far_hole_radii(world.view_dist);
-            world::update_far_hole_alpha(&mut mesh, px, pz, r0, r1);
+            let fog_rgb = clear.0.to_linear().to_f32_array();
+            world::update_far_hole_alpha(
+                &mut mesh,
+                px,
+                pz,
+                r0,
+                r1,
+                [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
+            );
         }
         commands.spawn((
             Mesh3d(handle.clone()),

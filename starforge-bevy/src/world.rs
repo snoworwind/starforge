@@ -1635,11 +1635,19 @@ fn emit_quad_col(
 // 流式区块视距之外的地表被一张低细节高度场网格覆盖（纯噪声高度 + 地表瓦片平均色），
 // 否则高空视角下地形在视距边缘戛然而止，曲率变形与区块流式边缘完全暴露（巨大闪动/残影）。
 
-pub const FAR_N: usize = 129; // 129×129 顶点
-pub const FAR_STEP: f32 = 24.0; // 格/单元 → ±1536 格视距
+pub const FAR_N: usize = 193; // 193×193 顶点（FAR_STEP 16 时覆盖 ±1536 格视距，网格比旧 129×129 细一倍）
+pub const FAR_STEP: f32 = 16.0; // 格/单元 → ±1536 格视距
 pub const FAR_SNAP: f32 = 64.0; // 中心对齐（格，跨格才重建）
-pub const FAR_ROWS_PER_FRAME: usize = 24; // 每帧填充行数（中心向外填充，跨格重建约 6 帧收尾）
+pub const FAR_ROWS_PER_FRAME: usize = 32; // 每帧填充行数（中心向外填充，跨格重建约 7 帧收尾）
 pub const FAR_SINK: f32 = 2.2; // 下沉偏置：近处由真实区块覆盖
+
+/// 远景网格的基准数据（自定义顶点属性）：原始地表色与原始高度。
+/// `update_far_hole_alpha` 每帧从基准值重新计算过渡混合（alpha、向雾色
+/// 渐隐、高度下沉），避免在已混合的 COLOR/POSITION 上反复叠加造成漂移。
+pub const FAR_BASE_COLOR: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new("Far_Base_Color", 8, bevy::render::render_resource::VertexFormat::Float32x4);
+pub const FAR_BASE_HEIGHT: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new("Far_Base_Height", 9, bevy::render::render_resource::VertexFormat::Float32);
 
 /// 中心向外行序（64, 63, 65, 62, 66, …）：重建时新旧高度场接缝始终停留在
 /// 网格边缘（最远、最不易察觉），不再从一侧到另一侧横扫整个远景。
@@ -1655,9 +1663,13 @@ pub fn far_row_order(i: usize) -> usize {
 }
 
 /// 地表瓦片平均色（与 JS `tileAvgColor` 同口径；瓦片缺失时给中性绿）。
+/// 返回**线性空间** RGB：图集像素是 sRGB，而 Bevy 的网格顶点色是线性值
+/// （近处地形走 sRGB 纹理、由采样器自动转线性）。JS 原版 three.js 会为
+/// 顶点色做同样的 sRGB→线性转换，Bevy 不会，所以这里必须手动转，
+/// 否则远景地表会比近处地形亮约 2.4 倍。
 fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
     let Some(&idx) = atlas.index.get(tile) else {
-        return [0.5, 0.6, 0.4];
+        return [0.5, 0.6, 0.4].map(srgb_to_linear);
     };
     let t = &atlas.tiles[idx];
     let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
@@ -1667,7 +1679,21 @@ fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
         b += p[2] as u32;
     }
     let n = t.len() as f32 * 255.0;
-    [r as f32 / n, g as f32 / n, b as f32 / n]
+    [
+        srgb_to_linear(r as f32 / n),
+        srgb_to_linear(g as f32 / n),
+        srgb_to_linear(b as f32 / n),
+    ]
+}
+
+/// sRGB [0,1] → 线性 [0,1]（Bevy 顶点色要求线性空间）。
+#[inline]
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// 填充远景地形网格的行 `[from, to)`（原地修改，其余行保留原值；行序为中心向外）。
@@ -1692,14 +1718,26 @@ pub fn fill_far_rows(
         Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
         _ => vec![[1.0; 4]; n],
     };
+    // 基准数据：原始地表色（sRGB→线性后）与原始高度。update_far_hole_alpha
+    // 每帧从这些基准值重新计算过渡混合，避免在已混合颜色上反复叠加。
+    let mut base_colors: Vec<[f32; 4]> = match mesh.attribute(FAR_BASE_COLOR) {
+        Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
+        _ => vec![[1.0; 4]; n],
+    };
+    let mut base_heights: Vec<f32> = match mesh.attribute(FAR_BASE_HEIGHT) {
+        Some(VertexAttributeValues::Float32(v)) => v.clone(),
+        _ => vec![0.0; n],
+    };
     let g = &world.g;
     let b = g.biome;
     let seab = g.sea() as f32;
     let wt = b.water_tint;
+    // 与 far_tile_avg 同理：水色也是 sRGB 值，转线性后写入顶点色，
+    // 否则远景水面会比近处水（sRGB 纹理自动转线性）亮约 2.4 倍。
     let water_rgb = [
-        ((wt >> 16) & 0xFF) as f32 / 255.0,
-        ((wt >> 8) & 0xFF) as f32 / 255.0,
-        (wt & 0xFF) as f32 / 255.0,
+        srgb_to_linear(((wt >> 16) & 0xFF) as f32 / 255.0),
+        srgb_to_linear(((wt >> 8) & 0xFF) as f32 / 255.0),
+        srgb_to_linear((wt & 0xFF) as f32 / 255.0),
     ];
     let no_beach = matches!(
         b.grass,
@@ -1770,16 +1808,21 @@ pub fn fill_far_rows(
                 )
             };
             let i = iz * FAR_N + ix;
-            positions[i] = [wx, y - FAR_SINK, wz];
+            // 高度写入原始噪声高度（不下沉）；下沉量由 update_far_hole_alpha
+            // 按过渡带 fade 统一写入：近处贴地、远处沉入 FAR_SINK。
+            positions[i] = [wx, y, wz];
             colors[i] = col;
+            base_colors[i] = col;
+            base_heights[i] = y;
         }
     }
-    // 法线：从高度场重算（边界行取自身差分，避免越界）
+    // 法线：从基准高度场重算（边界行取自身差分，避免越界）。用 base_heights
+    // 而非 positions，因为 positions 的 Y 已被过渡带下沉改写。
     let mut normals: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
         Some(VertexAttributeValues::Float32x3(v)) => v.clone(),
         _ => vec![[0.0, 1.0, 0.0]; n],
     };
-    let y_at = |ix: usize, iz: usize| positions[iz * FAR_N + ix][1];
+    let y_at = |ix: usize, iz: usize| base_heights[iz * FAR_N + ix];
     for iz in 0..FAR_N {
         for ix in 0..FAR_N {
             let h_l = if ix > 0 {
@@ -1809,6 +1852,8 @@ pub fn fill_far_rows(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(FAR_BASE_COLOR, base_colors);
+    mesh.insert_attribute(FAR_BASE_HEIGHT, base_heights);
 }
 
 /// 创建远景地形网格（129×129 高度场，±1536 格视距，顶点色为地表色）。
@@ -1838,16 +1883,38 @@ pub fn build_far_mesh(world: &World, atlas: &crate::textures::Atlas, cx: f32, cz
     mesh
 }
 
-/// 远景挖空环（JS farHoleU 同口径）：原地改写顶点 COLOR 的 alpha——
-/// `smoothstep(r0², r1², d²)`，玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
-/// 原生 `StandardMaterial` 会把顶点色（含 alpha）作为 base_color 参与 Blend，
-/// 因此该 CPU 更新等价于旧着色器的 far_hole 片元计算。
-pub fn update_far_hole_alpha(mesh: &mut Mesh, px: f32, pz: f32, r0: f32, r1: f32) {
+/// 远景过渡带更新（每帧 / 移动后调用）：从基准属性重算并改写顶点。
+///
+/// - alpha：`smoothstep(r0², r1², d²)`，玩家周围由真实区块覆盖，远景在
+///   r0..r1 间淡出（JS farHoleU 同口径，但 r0/r1 由调用方放宽以加宽过渡带）。
+/// - RGB：在过渡带内向雾色（≈天空色）渐隐，让远景"融入天穹"而不是与
+///   真实地形的纹理/明暗硬碰（JS 原版有强环境光掩盖，Bevy 物理光照下
+///   纯色远景与纹理区块的色差太明显）。
+/// - 高度：FAR_SINK 下沉量在过渡带内从 0 渐变到 2.2，消除过渡带边缘
+///   真实地面与远景之间的高度台阶（近处贴地，远处沉入避免穿帮）。
+///
+/// 所有计算基于 FAR_BASE_COLOR / FAR_BASE_HEIGHT 基准值，每帧结果一致，
+/// 不会因反复调用而累积漂移。
+pub fn update_far_hole_alpha(
+    mesh: &mut Mesh,
+    px: f32,
+    pz: f32,
+    r0: f32,
+    r1: f32,
+    fog_rgb: [f32; 3],
+) {
     use bevy::mesh::VertexAttributeValues;
-    // Clone the positions (16k×3 floats) so the COLOR attribute can be
-    // borrowed mutably below.
+    // Clone positions so COLOR/POSITION can both be borrowed mutably below.
     let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(VertexAttributeValues::Float32x3(v)) => v.clone(),
+        _ => return,
+    };
+    let base_colors = match mesh.attribute(FAR_BASE_COLOR) {
+        Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
+        _ => return,
+    };
+    let base_heights = match mesh.attribute(FAR_BASE_HEIGHT) {
+        Some(VertexAttributeValues::Float32(v)) => v.clone(),
         _ => return,
     };
     let Some(VertexAttributeValues::Float32x4(colors)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
@@ -1857,12 +1924,35 @@ pub fn update_far_hole_alpha(mesh: &mut Mesh, px: f32, pz: f32, r0: f32, r1: f32
     let r0_2 = r0 * r0;
     let r1_2 = r1 * r1;
     let span = (r1_2 - r0_2).max(1.0);
-    for (pos, col) in positions.iter().zip(colors.iter_mut()) {
+    for i in 0..positions.len() {
+        let pos = &positions[i];
         let dx = pos[0] - px;
         let dz = pos[2] - pz;
         let d2 = dx * dx + dz * dz;
         let t = ((d2 - r0_2) / span).clamp(0.0, 1.0);
-        col[3] = t * t * (3.0 - 2.0 * t);
+        let fade = t * t * (3.0 - 2.0 * t);
+        let base = &base_colors[i];
+        colors[i] = [
+            base[0] + (fog_rgb[0] - base[0]) * fade,
+            base[1] + (fog_rgb[1] - base[1]) * fade,
+            base[2] + (fog_rgb[2] - base[2]) * fade,
+            fade,
+        ];
+    }
+    // 高度台阶消除：近处（fade≈0）贴地，远处（fade≈1）下沉 FAR_SINK。
+    // 单独遍历 POSITION（避免与 COLOR 同时可变借用）。
+    if let Some(VertexAttributeValues::Float32x3(positions_mut)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    {
+        for i in 0..positions.len() {
+            let pos = &positions[i];
+            let dx = pos[0] - px;
+            let dz = pos[2] - pz;
+            let d2 = dx * dx + dz * dz;
+            let t = ((d2 - r0_2) / span).clamp(0.0, 1.0);
+            let fade = t * t * (3.0 - 2.0 * t);
+            positions_mut[i] = [pos[0], base_heights[i] - FAR_SINK * fade, pos[2]];
+        }
     }
 }
 

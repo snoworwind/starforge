@@ -19,7 +19,14 @@ pub const GROUND_ATMOSPHERE_INNER_RADIUS: f32 = 2_000.0;
 pub const GROUND_ATMOSPHERE_OUTER_RADIUS: f32 = 2_320.0;
 /// The voxel scene is much smaller than Bevy's physical-scale examples, so
 /// the physical RAW_SUNLIGHT value needs a strong direct-light boost.
-pub const DIRECT_SUNLIGHT_BOOST: f32 = 15.0;
+///
+/// NOTE: this is now `1.0` — physical sunlight. The old `15.0` boost was
+/// tuned against the removed AutoExposure pass, which permanently clamped the
+/// exposure to −3 EV (the `-3..3` histogram saturated at its top bin in
+/// daylight), so the boost only compensated for that darkening. With the
+/// fixed `Exposure { ev100: 13.0 }` baseline (Bevy's atmosphere example
+/// configuration), RAW_SUNLIGHT × 1.0 is the correct physical value.
+pub const DIRECT_SUNLIGHT_BOOST: f32 = 1.0;
 
 /// Runtime lighting controls exposed by the in-game F3 panel. These are
 /// deliberately kept separate from the physical scene setup so artists can
@@ -51,10 +58,10 @@ impl Default for LightingTuning {
     fn default() -> Self {
         Self {
             sunlight_boost: DIRECT_SUNLIGHT_BOOST,
-            sun_disk_intensity: 18.0,
-            atmosphere_fill: 0.04,
+            sun_disk_intensity: 1.0,
+            atmosphere_fill: 1.0,
             ambient_multiplier: 1.0,
-            space_atmosphere_fill: 0.12,
+            space_atmosphere_fill: 1.0,
             bloom_intensity: 0.12,
             bloom_threshold: 1.5,
             bloom_threshold_softness: 0.2,
@@ -81,10 +88,10 @@ impl LightingTuning {
 
     pub fn sanitize(&mut self) {
         self.sunlight_boost = finite_clamp(self.sunlight_boost, 0.0, 150.0, DIRECT_SUNLIGHT_BOOST);
-        self.sun_disk_intensity = finite_clamp(self.sun_disk_intensity, 0.0, 200.0, 18.0);
-        self.atmosphere_fill = finite_clamp(self.atmosphere_fill, 0.0, 2.0, 0.04);
+        self.sun_disk_intensity = finite_clamp(self.sun_disk_intensity, 0.0, 200.0, 1.0);
+        self.atmosphere_fill = finite_clamp(self.atmosphere_fill, 0.0, 2.0, 1.0);
         self.ambient_multiplier = finite_clamp(self.ambient_multiplier, 0.0, 10.0, 1.0);
-        self.space_atmosphere_fill = finite_clamp(self.space_atmosphere_fill, 0.0, 2.0, 0.12);
+        self.space_atmosphere_fill = finite_clamp(self.space_atmosphere_fill, 0.0, 2.0, 1.0);
         self.bloom_intensity = finite_clamp(self.bloom_intensity, 0.0, 8.0, 0.12);
         self.bloom_threshold = finite_clamp(self.bloom_threshold, 0.0, 50.0, 1.5);
         self.bloom_threshold_softness = finite_clamp(self.bloom_threshold_softness, 0.0, 1.0, 0.2);
@@ -223,12 +230,19 @@ pub fn daynight_system(
         // atmosphere blue. Keep only a tiny residual for moonless ambience.
         let sun_illuminance = lux::RAW_SUNLIGHT * (0.0001 + f * 0.9999) * daylight_boost.max(0.0);
         light.illuminance = sun_illuminance;
-        let warm = Color::srgb(1.0, 0.82, 0.62);
-        let cold = Color::srgb(0.75, 0.85, 1.0);
-        light.color = if f < 0.5 {
-            lerp_color(warm, cold, f * 2.0)
+        // 日出/日落（f≈0.5，太阳贴近地平线）阳光是暖橙红色，正午（f=1）
+        // 是暖白，夜间（f<0.5）是冷蓝。旧曲线方向反了：f=0.5 处给冷色、
+        // 正午给暖黄，导致日出日落没有彩霞。方向光颜色同时驱动太阳盘、
+        // 大气散射和体积云散射，改这里三处一起变暖。
+        let sunrise = Color::srgb(1.0, 0.55, 0.28);
+        let noon = Color::srgb(1.0, 0.97, 0.9);
+        let night = Color::srgb(0.6, 0.72, 1.0);
+        light.color = if f >= 0.5 {
+            // 日出 → 正午 / 正午 → 日落：低角度暖橙，高角度暖白
+            lerp_color(sunrise, noon, (f - 0.5) * 2.0)
         } else {
-            lerp_color(cold, warm, (f - 0.5) * 2.0)
+            // 午夜 → 日出：冷蓝 → 暖橙（夜间光照本就接近零，颜色影响很小）
+            lerp_color(night, sunrise, f * 2.0)
         };
         *visibility = if mode.space_scene() {
             Visibility::Hidden
@@ -272,6 +286,12 @@ pub fn daynight_system(
     };
     let night_sky = Color::srgb(0.012, 0.016, 0.05);
     let mut sky = lerp_color(day_sky, night_sky, 1.0 - f);
+    // 日出/日落彩霞：太阳贴近地平线（f≈0.5）时天空混入暖橙辉光，
+    // 远离地平线（f→0 或 f→1）时辉光消失。ClearColor 同时驱动雾色和
+    // 云的 ambient_color，所以彩霞会自然蔓延到远景和云层。
+    let horizon_glow = (1.0 - (f - 0.5).abs() * 4.0).clamp(0.0, 1.0);
+    let glow_color = Color::srgb(1.0, 0.55, 0.3);
+    sky = lerp_color(sky, glow_color, horizon_glow * 0.45);
     sky = lerp_color(sky, space_black, sf);
     clear.0 = sky;
 
@@ -318,7 +338,12 @@ pub fn daynight_system(
     let day_amb = Color::srgb(0.75, 0.8, 0.9);
     let night_amb = Color::srgb(0.16, 0.17, 0.26);
     ambient.color = lerp_color(day_amb, night_amb, 1.0 - f);
-    ambient.brightness = (3.0 + f * 5.0) * tuning.ambient_multiplier.max(0.0);
+    // JS 原版补光 = AmbientLight 0.35 + HemisphereLight 0.5 ≈ 太阳强度的 85%，
+    // 方块地面/树几乎不落黑。Bevy 物理光照下按 Bevy 默认 GlobalAmbientLight
+    // （80 cd/m²，正午）取环境光，夜间降到 12 保留暗部层次；F3 面板
+    // ambient_multiplier 仍可整体缩放。旧曲线 (3+f*5) 只有 Bevy 默认的 4~10%，
+    // 叠加侧/底面顶点色 0.65~0.8/0.5 的烘焙压暗后，背光面近乎全黑。
+    ambient.brightness = (12.0 + f * 68.0) * tuning.ambient_multiplier.max(0.0);
 
     for mut vis in &mut stars {
         *vis = if sf > 0.6 {

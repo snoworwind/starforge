@@ -251,9 +251,10 @@ pub fn look_system(
         let s = 0.0024;
         p.yaw -= delta.x * s;
         p.pitch -= delta.y * s;
-        // soft clamp 1.35, hard asymptote toward 1.55
-        let soft = 1.35f32;
-        let hard = 1.55f32;
+        // 允许看到正下方：旧限制 1.35 软 / 1.55 硬 ≈ 88.8°，永远到不了
+        // 垂直（π/2 ≈ 1.5708）。保持软区手感，硬限放到 90°。
+        let soft = 1.40f32;
+        let hard = std::f32::consts::FRAC_PI_2;
         p.pitch = if p.pitch > soft {
             soft + (hard - soft) * (1.0 - (-(p.pitch - soft) * 3.0).exp())
         } else if p.pitch < -soft {
@@ -261,7 +262,7 @@ pub fn look_system(
         } else {
             p.pitch
         };
-        p.pitch = p.pitch.clamp(-hard - 0.01, hard + 0.01);
+        p.pitch = p.pitch.clamp(-hard, hard);
     }
 }
 

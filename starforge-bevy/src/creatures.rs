@@ -1278,19 +1278,26 @@ pub fn creature_system(
 pub fn creature_sound_system(
     time: Res<Time>,
     mut commands: Commands,
-    creatures: Query<&Creature>,
+    creatures: Query<(&Creature, &Transform)>,
     sfx: Res<crate::audio::Sfx>,
     mut next_call: Local<f32>,
 ) {
     let dt = time.delta_secs();
     *next_call -= dt;
-    if *next_call > 0.0 || !creatures.iter().any(|c| c.hp > 0.0 && c.walking) {
+    let Some(position) = creatures
+        .iter()
+        .find_map(|(c, tf)| (c.hp > 0.0 && c.walking).then_some(tf.translation))
+    else {
+        return;
+    };
+    if *next_call > 0.0 {
         return;
     }
     *next_call = 5.0 + (time.elapsed_secs().sin().abs() * 4.0);
-    crate::audio::play(
+    crate::audio::play_spatial(
         &mut commands,
         sfx.creature_hit.clone(),
+        position,
         0.08,
         Some(0.78 + time.elapsed_secs().cos().abs() * 0.34),
     );
@@ -1347,7 +1354,13 @@ pub fn creature_despawn_system(
                     0.4,
                 );
             }
-            crate::audio::play(&mut commands, sfx.break_block.clone(), 0.7, None);
+            crate::audio::play_spatial(
+                &mut commands,
+                sfx.break_block.clone(),
+                tf.translation,
+                0.7,
+                None,
+            );
         } else {
             let n = 1 + (rng.next() * 2.0) as i32;
             spawn_drop(
@@ -1360,7 +1373,13 @@ pub fn creature_despawn_system(
                 n,
                 0.4,
             );
-            crate::audio::play(&mut commands, sfx.break_block.clone(), 0.5, None);
+            crate::audio::play_spatial(
+                &mut commands,
+                sfx.creature_die.clone(),
+                tf.translation,
+                0.5,
+                None,
+            );
             // 击杀：细胞掩码记录永久消失（读档不重生）+ 从兽群表移除（补员/重载绝不复活）
             if let Some(nid) = c.nid {
                 println!("CREATURE kill herd {nid} (permanent, mask set)");

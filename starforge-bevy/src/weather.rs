@@ -125,6 +125,30 @@ pub struct ClimateRuntime {
     volume: Option<Entity>,
 }
 
+/// Background rain loop owned by the current in-game climate.
+#[derive(Resource, Default)]
+pub struct RainAudio {
+    pub entity: Option<Entity>,
+}
+
+/// Play the exterior city-rain bed while weather is visible on the ground.
+/// It is deliberately non-spatial so it follows the player as ambience.
+pub fn rain_audio_system(
+    settings: Res<Settings>,
+    mode: Res<FlightMode>,
+    world: Option<Res<World>>,
+    mut rain: ResMut<RainAudio>,
+    mut commands: Commands,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    let raining = world.is_some() && settings.weather && mode.ground_scene();
+    if raining && rain.entity.is_none() {
+        rain.entity = Some(crate::audio::play_loop(&mut commands, sfx.rain.clone(), 0.18));
+    } else if !raining && let Some(entity) = rain.entity.take() {
+        commands.entity(entity).despawn();
+    }
+}
+
 #[derive(Clone, Copy)]
 struct WeatherDef {
     color: Color,

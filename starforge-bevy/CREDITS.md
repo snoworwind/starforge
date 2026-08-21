@@ -16,14 +16,14 @@
 
 上游许可证原文随源码保留在 `vendor/bevy-volumetric-clouds/LICENSE`。该目录中的源代码、着色器和文档继续按照 MIT 许可证的署名与许可证通知要求分发。
 
-## 音效（assets/audio/*.ogg，共 32 条）
+## 音效（32 条 Sonniss WAV + 迁移前脚步 OGG）
 
 | 素材 | 来源 | 许可证 | 署名要求 |
 |---|---|---|---|
-| Kenney UI Audio（click/rollover/switch 系列，用于 click/hover/craft/ui_open/ui_close/coin/insert/error 等） | https://kenney.nl/assets/ui-audio | CC0 1.0 | 无 |
-| Kenney Sci-Fi Sounds（impactMetal/explosionCrunch/thrusterFire/laser/spaceEngine/computerNoise/slime/door/forceField 系列，用于 shoot/explosion/engine_loop/jet/laser_hit/jump/land/hurt/creature_hit/creature_die/break_block/place/dig/pickup/open_chest/step/warp/alarm/dock/takeoff/land_ship/pulse/scan/research 等） | https://kenney.nl/assets/sci-fi-sounds | CC0 1.0 | 无 |
+| Sonniss GDC 2026 Game Audio Bundle（从 5 个压缩包中按游戏用途选取 32 条 WAV） | https://sonniss.com/gameaudiogdc/ | Sonniss GDC Game Audio License | 无；不得将原始素材作为独立音效库再分发 |
+| `step.ogg`（迁移 Sonniss 前沿用的脚步音效） | Kenney Sci-Fi Sounds | CC0 | 无 |
 
-> 32 条文件清单：alarm、break_block、click、coin、craft、creature_die、creature_hit、dig、dock、engine_loop、error、explosion、hover、hurt、insert、jet、jump、land、land_ship、laser_hit、open_chest、pickup、place、pulse、research、scan、shoot、step、takeoff、ui_close、ui_open、warp（均为 .ogg）。
+> Sonniss WAV 清单：alarm、break-block、click、coin、craft、creature-die、creature-hit、dig、dock、engine-loop、error、explosion、hover、hurt、insert、jet、jump、land、land-ship、laser-hit、open-chest、pickup、place、pulse、rain、research、scan、shoot、takeoff、ui-close、ui-open、warp。脚步声使用迁移前的 `assets/audio/step.ogg`；对应许可证见 `assets/licenses/kenney_sci-fi-sounds_LICENSE.txt`。Sonniss 许可证原文见 `assets/licenses/sonniss_gdc2026_LICENSE.pdf`。
 
 ## 3D 模型（assets/models/，含 GLB / glTF）
 

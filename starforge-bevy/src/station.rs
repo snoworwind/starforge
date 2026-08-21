@@ -472,6 +472,7 @@ pub fn station_defense_system(
     mut big_ev: MessageWriter<BigMessageEvent>,
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
+    station: Res<StationState>,
 ) {
     let was_active = defense.active();
     if defense.remaining > 0.0 {
@@ -508,7 +509,13 @@ pub fn station_defense_system(
             sub: "准入已恢复".into(),
             dur: 2.2,
         });
-        crate::audio::play(&mut commands, sfx.scan.clone(), 0.45, None);
+        crate::audio::play_spatial(
+            &mut commands,
+            sfx.scan.clone(),
+            station.station_pos + Vec3::new(0.0, 20.0, -20.0),
+            0.45,
+            None,
+        );
     }
 }
 

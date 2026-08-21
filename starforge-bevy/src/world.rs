@@ -7,6 +7,7 @@ use bevy::math::Vec3;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub const CHUNK_CELLS: usize = (CHUNK * CHUNK * WORLD_H) as usize; // 24576
 pub const GEN_R: i32 = 17;
@@ -15,6 +16,16 @@ pub const UNLOAD_R: i32 = 19;
 pub const GEN_BUDGET: usize = 4;
 pub const MESH_BUDGET: usize = 2;
 
+/// 结构（村庄/遗迹）生成格尺寸：无限地表下按格确定性子生成（Minecraft 式）。
+/// 格远大于结构最大半径（~20 格），查询时 ±1 格边界即可覆盖跨格结构。
+pub const STRUCT_CELL_X: i32 = 640;
+pub const STRUCT_CELL_Z: i32 = 320;
+/// 每格含结构的概率（≈ 原版 ±1300×±440 内 3 个的密度，略密）。
+const STRUCT_P: f32 = 0.35;
+
+/// 浮点坐标 → 区块坐标。无限地表下坐标会持续增长：f32 在 |v| ≲ 1677 万
+/// （ULP=2，boost 全速约 42 小时飞行）内安全；更远需 f64 或原点重定。
+/// 区块键本身是 i64、区块数据按整数坐标生成，任意距离下都不会失真。
 pub fn cf(v: f32) -> i32 {
     (v / CHUNK as f32).floor() as i32
 }
@@ -61,7 +72,9 @@ pub struct WorldGen {
     pub biome: &'static Biome,
     pub noise: Noise2,
     pub axes: CharAxes,
-    pub structures: Vec<Structure>,
+    /// 格哈希结构的惰性缓存（Mutex 保持 Sync，Bevy Resource 要求）。
+    /// 村庄格的 on_land/hut 生成较重，缓存避免每个邻块重复计算。
+    struct_cache: Mutex<HashMap<(i32, i32), Option<Arc<Structure>>>>,
 }
 
 impl WorldGen {
@@ -73,15 +86,13 @@ impl WorldGen {
             wet: rnd.next(),
         };
         let noise = Noise2::new(seed);
-        let mut g = Self {
+        Self {
             seed,
             biome,
             noise,
             axes,
-            structures: Vec::new(),
-        };
-        g.structures = g.gen_structures();
-        g
+            struct_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn sea(&self) -> i32 {
@@ -608,9 +619,9 @@ impl WorldGen {
             }
         }
 
-        // structures
-        for st in &self.structures {
-            stamp_structure(self, st, cx, cz, &mut data);
+        // structures（Minecraft 式：按格哈希查询，结构可跨格戳记）
+        for st in self.structures_in_rect(x0 - 24, z0 - 24, x0 + CHUNK + 24, z0 + CHUNK + 24) {
+            stamp_structure(self, &st, cx, cz, &mut data);
         }
         data
     }
@@ -662,32 +673,63 @@ impl WorldGen {
         true
     }
 
-    /// Deterministic structure placement (villages for habitable biomes, ruins for hazardous).
-    fn gen_structures(&self) -> Vec<Structure> {
-        let mut rnd = Rng::new(self.seed ^ 0x57A7C7);
-        let mut out: Vec<Structure> = Vec::new();
-        let sea = SEA + self.biome.sea_lift;
-        let on_land = |x: f32, z: f32| self.height_at(x, z) > sea + 1;
-        let separated = |out: &Vec<Structure>, x: i32, z: i32, d: i32| {
-            out.iter().all(|s| {
-                let (sx, sz) = match s {
-                    Structure::Village { x, z, .. } | Structure::Ruin { x, z, .. } => (*x, *z),
-                };
-                let dx = sx - x;
-                let dz = sz - z;
-                dx * dx + dz * dz >= d * d
-            })
-        };
-        if self.biome.haz.is_none() {
-            let want = 3;
-            let mut tries = 0;
-            while out.len() < want && tries < 70 {
-                tries += 1;
-                let x = (rnd.next() * 1300.0) as i32 - 650;
-                let z = (rnd.next() * 440.0) as i32 - 220;
-                if !on_land(x as f32, z as f32) || !separated(&out, x, z, 240) {
-                    continue;
+    /// 矩形内所有结构（含 ±1 格边界，覆盖跨格戳记半径 ~20 格）。
+    /// 无限地表下没有全局结构表——按格哈希查询（Minecraft 式）。
+    pub fn structures_in_rect(&self, x0: i32, z0: i32, x1: i32, z1: i32) -> Vec<Structure> {
+        let c0 = x0.div_euclid(STRUCT_CELL_X) - 1;
+        let c1 = x1.div_euclid(STRUCT_CELL_X) + 1;
+        let r0 = z0.div_euclid(STRUCT_CELL_Z) - 1;
+        let r1 = z1.div_euclid(STRUCT_CELL_Z) + 1;
+        let mut out = Vec::new();
+        for ccx in c0..=c1 {
+            for ccz in r0..=r1 {
+                if let Some(s) = self.structure_in_cell(ccx, ccz) {
+                    out.push((*s).clone());
                 }
+            }
+        }
+        out
+    }
+
+    /// 格坐标 → 格内结构（村庄/遗迹），种子确定性；惰性缓存。
+    ///
+    /// 原版 `gen_structures` 用整图种子 RNG 在固定 ±1300×±440 撒 3 个点；
+    /// 无限地表下改为按格哈希掷骰。原版村庄还有 240 格最小间距约束——
+    /// 格 640×320 远大于该值，仅相邻格各自恰好贴近公共边界时可能出现
+    /// 近距结构，概率可忽略，故不再跨格约束。
+    pub fn structure_in_cell(&self, ccx: i32, ccz: i32) -> Option<Arc<Structure>> {
+        if let Some(v) = self.struct_cache.lock().unwrap().get(&(ccx, ccz)) {
+            return v.clone();
+        }
+        let st = self.structure_in_cell_uncached(ccx, ccz);
+        let arc = st.map(Arc::new);
+        self.struct_cache
+            .lock()
+            .unwrap()
+            .insert((ccx, ccz), arc.clone());
+        arc
+    }
+
+    fn structure_in_cell_uncached(&self, ccx: i32, ccz: i32) -> Option<Structure> {
+        let sea = self.sea();
+        let on_land = |x: f32, z: f32| self.height_at(x, z) > sea + 1;
+        // 原点格必出村庄（可居生态）：保证出生地附近有地标
+        // （原版出生区必有村庄，村庄支线任务依赖）。
+        let guaranteed = ccx == 0 && ccz == 0 && self.biome.haz.is_none();
+        let mut rnd = hash2(ccx, ccz, 0x57A7C7, self.seed);
+        if !guaranteed && rnd.next() >= STRUCT_P {
+            return None;
+        }
+        let x0 = ccx * STRUCT_CELL_X;
+        let z0 = ccz * STRUCT_CELL_Z;
+        for _ in 0..70 {
+            let x = x0 + (rnd.next() * STRUCT_CELL_X as f32) as i32;
+            let z = z0 + (rnd.next() * STRUCT_CELL_Z as f32) as i32;
+            if !on_land(x as f32, z as f32) {
+                continue;
+            }
+            if self.biome.haz.is_none() {
+                // 村庄（沿用原版 hut 撒点逻辑）
                 let n = 4 + (rnd.next() * 3.0) as usize;
                 let mut huts = Vec::new();
                 for i in 0..n {
@@ -700,26 +742,16 @@ impl WorldGen {
                     }
                 }
                 if huts.len() >= 3 {
-                    out.push(Structure::Village {
+                    return Some(Structure::Village {
                         x,
                         z,
                         h: self.height_at(x as f32, z as f32),
                         huts,
                     });
                 }
-            }
-        } else {
-            let want = 3;
-            let mut tries = 0;
-            while out.len() < want && tries < 70 {
-                tries += 1;
-                let x = (rnd.next() * 1300.0) as i32 - 650;
-                let z = (rnd.next() * 440.0) as i32 - 220;
-                if !on_land(x as f32, z as f32) || !separated(&out, x, z, 220) {
-                    continue;
-                }
+            } else {
                 let kind = (rnd.next() * 3.0) as u32;
-                out.push(Structure::Ruin {
+                return Some(Structure::Ruin {
                     x,
                     z,
                     kind,
@@ -728,7 +760,7 @@ impl WorldGen {
                 });
             }
         }
-        out
+        None
     }
 }
 
@@ -2050,6 +2082,40 @@ mod tests {
         let d = g.gen_chunk_data(2, 2);
         // volcanic: dry+lava → water id present (as lava)
         assert!(d.contains(&ids::WATER));
+    }
+
+    #[test]
+    fn structures_deterministic_and_infinite() {
+        // 无限地表：结构按格哈希确定性生成，任意远处都有结构可查。
+        let biome = data::biome_by_key("lush");
+        let g1 = WorldGen::new(12345, biome);
+        let g2 = WorldGen::new(12345, biome);
+        // 同种子两次生成一致
+        let a = g1.structure_in_cell(0, 0).map(|s| format!("{s:?}"));
+        let b = g2.structure_in_cell(0, 0).map(|s| format!("{s:?}"));
+        assert_eq!(a, b);
+        // 原点格必出村庄（可居生态，出生区地标）
+        assert!(matches!(
+            g1.structure_in_cell(0, 0).as_deref(),
+            Some(Structure::Village { .. })
+        ));
+        // 远离原点（格 (100, 50) 附近）也能确定性查询到结构
+        let x0 = 100 * STRUCT_CELL_X;
+        let z0 = 50 * STRUCT_CELL_Z;
+        let far = g1.structures_in_rect(x0, z0, x0 + 320, z0 + 160);
+        let far2 = g2.structures_in_rect(x0, z0, x0 + 320, z0 + 160);
+        assert_eq!(format!("{far:?}"), format!("{far2:?}"));
+    }
+
+    #[test]
+    fn hazard_biome_origin_cell_is_ruin_or_empty() {
+        // 危险生态：原点格绝不出村庄（遗迹或无）
+        let g = WorldGen::new(7777, data::biome_by_key("volcanic"));
+        let s = g.structure_in_cell(0, 0);
+        assert!(
+            s.is_none() || matches!(s.as_deref(), Some(Structure::Ruin { .. })),
+            "hazard origin cell must not contain a village"
+        );
     }
 
     #[test]

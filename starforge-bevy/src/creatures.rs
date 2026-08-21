@@ -1424,13 +1424,14 @@ pub fn sentinel_system(
     if spawner.timer <= 0.0 {
         spawner.timer = 2.0;
         let mut nearest: Option<([i32; 3], f32)> = None;
-        for s in &world.g.structures {
+        let (px, pz) = (ppos.x as i32, ppos.z as i32);
+        for s in world.g.structures_in_rect(px - 48, pz - 48, px + 48, pz + 48) {
             if let crate::world::Structure::Ruin { x, z, .. } = s {
-                let dx = ppos.x - *x as f32;
-                let dz = ppos.z - *z as f32;
+                let dx = ppos.x - x as f32;
+                let dz = ppos.z - z as f32;
                 let d = (dx * dx + dz * dz).sqrt();
                 if d < 40.0 && nearest.map(|(_, bd)| d < bd).unwrap_or(true) {
-                    nearest = Some(([*x, 0, *z], d));
+                    nearest = Some(([x, 0, z], d));
                 }
             }
         }

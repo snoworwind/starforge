@@ -3942,13 +3942,16 @@ pub fn planet_map_system(
                 }
                 let _ = r;
             };
-            // 村庄 / 遗迹
-            for s in &world.g.structures {
+            // 村庄 / 遗迹（无限地表：只画地图窗口内的结构）
+            for s in world
+                .g
+                .structures_in_rect(MAP_X0 - 24, MAP_Z0 - 24, MAP_X1 + 24, MAP_Z1 + 24)
+            {
                 match s {
                     crate::world::Structure::Village { x, z, .. } => {
                         pin(
                             &painter,
-                            rect.min + to_canvas(*x as f32, *z as f32).to_vec2(),
+                            rect.min + to_canvas(x as f32, z as f32).to_vec2(),
                             egui::Color32::from_rgb(0x4d, 0xc8, 0x6a),
                             None,
                         );
@@ -3956,7 +3959,7 @@ pub fn planet_map_system(
                     crate::world::Structure::Ruin { x, z, .. } => {
                         pin(
                             &painter,
-                            rect.min + to_canvas(*x as f32, *z as f32).to_vec2(),
+                            rect.min + to_canvas(x as f32, z as f32).to_vec2(),
                             egui::Color32::from_rgb(0xd8, 0xb0, 0x38),
                             None,
                         );

@@ -249,6 +249,14 @@ fn main() {
         .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .add_plugins(
             DefaultPlugins
+                // The game world spans hundreds of units, while Bevy's
+                // spatial mixer attenuates by inverse squared distance.
+                // Compress world coordinates before they reach the mixer so
+                // nearby combat and wildlife sounds remain audible.
+                .set(bevy::audio::AudioPlugin {
+                    default_spatial_scale: bevy::audio::SpatialScale::new(0.05),
+                    ..default()
+                })
                 .set(bevy::asset::AssetPlugin {
                     file_path: asset_dir,
                     ..default()
@@ -301,6 +309,7 @@ fn main() {
         .insert_resource(space::VisitorTraffic::default())
         .init_resource::<space::ExternalAnimationLibrary>()
         .insert_resource(weather::ClimateRuntime::default())
+        .insert_resource(weather::RainAudio::default())
         .insert_resource(network::NetworkState::default())
         .insert_resource(creatures::SentinelSpawner::default())
         .init_resource::<char::NpcAnimationLibrary>()
@@ -313,6 +322,11 @@ fn main() {
                 .before(bevy_egui::EguiPreUpdateSet::BeginPass),
         )
         .add_systems(PostUpdate, ui::setup_egui)
+        .add_systems(Update, audio::limit_one_shots)
+        .add_systems(
+            Update,
+            audio::advance_jet_sounds.before(player::movement_system),
+        )
         .add_systems(OnEnter(GameState::Loading), on_enter_loading)
         .add_systems(OnExit(GameState::Loading), on_exit_loading)
         .add_systems(OnEnter(GameState::Playing), on_enter_playing)
@@ -348,6 +362,7 @@ fn main() {
                                 materials::lamp_pool_system,
                                 daynight::daynight_system,
                                 weather::climate_system,
+                                weather::rain_audio_system,
                             )
                                 .chain(),
                             (
@@ -710,6 +725,9 @@ fn startup(
                 ..default()
             }),
             Transform::from_xyz(96.0, 90.0, 96.0),
+            // Bevy's spatial audio uses the camera as the listener.  The ear
+            // gap is expressed in game units and is scaled by AudioPlugin.
+            bevy::audio::SpatialListener::new(2.0),
             // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘；
             // daynight_system 会在爬升时动态收拢雾距（替代原曲率/淡出着色器）
             DistanceFog {
@@ -2479,9 +2497,11 @@ fn quit_to_menu_system(
     mut commands: Commands,
     in_game: Query<Entity, With<InGame>>,
     mut network: ResMut<network::NetworkState>,
+    mut rain_audio: ResMut<weather::RainAudio>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     for _ in ev.read() {
+        rain_audio.entity = None;
         for e in &in_game {
             commands.entity(e).despawn();
         }

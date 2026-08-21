@@ -31,27 +31,23 @@ starforge-bevy/assets/
 └── shaders/terrain_*.wgsl      # 3 个自写着色器（不是素材）
 ```
 
-### 1.2 音频 —— `src/audio.rs`（222 行，全部程序合成）
+### 1.2 音频 —— `src/audio.rs`（Sonniss GDC 2026 WAV 素材）
 
-- 启动时用 `synth()`（正弦/锯齿波 + 指数衰减包络）合成 16-bit PCM 单声道 WAV（22.05kHz），经 `Sfx::build(&mut Assets<AudioSource>)` 注册为 `AudioSource` 资产。
-- 现有 **12 个音效**：
+- 现有 **32 个音效**从 `C:\Users\zouha\Downloads\Sonniss.com-GDC2026-GameAudioBundle*.zip` 中按用途选取，重命名为 `assets/audio/Sonniss.com-*.wav`，通过 `include_bytes!` 编译期内嵌为 `AudioSource` 资产。
+- `Cargo.toml` 已启用 Bevy `wav` feature；不需要运行时扫描或复制外部音频目录。
+- 原有 12 个核心音效及 JS 兼容补全音效均保留 `Sfx` 字段和调用接口：
 
-| 字段 | 效果 | 合成方式 | 时长 | 音量 |
-|---|---|---|---|---|
-| `dig` | 挖掘 | 90→0Hz 下降锯齿 | 0.09s | 0.5 |
-| `place` | 放置方块 | 70Hz 正弦 + 衰减 | 0.12s | 0.7 |
-| `break_block` | 方块碎裂 | 160→0Hz 下降锯齿 | 0.16s | 0.6 |
-| `jump` | 跳跃 | 240→1140Hz 上升正弦 | 0.18s | 0.5 |
-| `hurt` | 受伤 | 320→0Hz 下降锯齿 | 0.25s | 0.6 |
-| `pickup` | 拾取 | 660→1320Hz 上升正弦 | 0.09s | 0.45 |
-| `click` | UI 点击 | 1400Hz 正弦 | 0.03s | 0.4 |
-| `craft` | 合成 | 440→660Hz 双音 | 0.14s | 0.4 |
-| `jet` | 喷气背包 | 70-100Hz 噪声相位循环（可循环） | 0.5s | 0.6 |
-| `laser_hit` | 激光命中 | 900→0Hz 下降锯齿 | 0.1s | 0.4 |
-| `error` | 错误提示 | 140Hz 正弦 | 0.15s | 0.5 |
-| `alarm` | 警报 | 400Hz±180Hz 颤音 | 0.9s | 0.5 |
+| 字段 | 效果 |
+|---|---|
+| `dig` / `break_block` | 挖掘 / 方块碎裂 |
+| `place` / `pickup` / `craft` | 放置 / 拾取 / 合成 |
+| `jump` / `hurt` / `step` | 移动与受击 |
+| `jet` / `engine_loop` / `takeoff` / `land_ship` / `dock` | 飞船与喷气 |
+| `laser_hit` / `shoot` / `explosion` / `pulse` / `warp` | 战斗与科幻反馈 |
+| `click` / `hover` / `ui_open` / `ui_close` / `error` / `alarm` / `scan` / `research` / `coin` / `insert` | UI 与系统反馈 |
+| `creature_hit` / `creature_die` / `open_chest` / `land` | 生物、容器与落地 |
 
-- **缺口**：无背景音乐、无环境音（风/水/洞穴/昼夜氛围）、无生物叫声、无飞船引擎/爆炸/曲速音、无 UI 之外的反馈音。
+- 许可证原文归档于 `assets/licenses/sonniss_gdc2026_LICENSE.pdf`；Sonniss 素材可用于游戏，但不得把原始素材重新作为独立音效库分发。
 - 关键 API（替换时保持兼容）：
   - `pub struct Sfx { pub dig: Handle<AudioSource>, ... }`（Resource）
   - `pub fn play(commands: &mut Commands, handle: Handle<AudioSource>, volume: f32, pitch: Option<f32>)` —— 基于 `AudioPlayer` + `PlaybackSettings { mode: PlaybackMode::Despawn, volume, speed }`
@@ -227,15 +223,14 @@ fn spawn_gltf(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 ---
 
-## 6. 落地实施路线图（建议按 Phase 顺序执行）
+## 6. 落地实施路线图（Phase 1 已完成）
 
-### Phase 1 —— 音效替换（收益最大，改动最小，1~2 天）
+### Phase 1 —— 音效替换（已完成）
 
-1. 下载 A1 Kenney 音效包，挑选与现有 12 个 SFX 对应的文件（dig/place/break/jump/hurt/pickup/click/craft/jet/laser/error/alarm），转 OGG（体积小）放入 `assets/audio/`。
-2. 改 `src/audio.rs`：`Sfx::build` 改为接收 `&AssetServer`，用 `asset_server.load::<AudioSource>("audio/dig.ogg")` 加载；**保留程序合成为回退**（或删掉合成代码，二选一，建议保留以零依赖兜底）。
-3. 新增音效：飞船引擎（循环）、爆炸、曲速跃迁、生物叫声、环境垫（可选），在对应调用点用现有 `audio::play()` 触发。
-4. 可选：主菜单/游戏内 BGM（`PlaybackMode::Loop`）。
-5. **验收**：`cargo run --release -- --smoke` 通过；进游戏逐个触发音效无缺失、无爆音。
+1. 从 Sonniss GDC 2026 五个压缩包中按用途挑选 32 条 WAV，重命名后放入 `assets/audio/Sonniss.com-*.wav`。
+2. `src/audio.rs` 保持 `Sfx` 字段和 `audio::play()` 调用兼容，改为通过 `include_bytes!` 编译期内嵌 Sonniss WAV。
+3. 已补齐飞船引擎（循环）、爆炸、曲速跃迁、生物叫声和 UI/系统反馈音效，并归档 `assets/licenses/sonniss_gdc2026_LICENSE.pdf`。
+4. **验收**：`cargo check --locked` 通过；32 个资源均通过 RIFF/WAVE 文件头检查。
 
 ### Phase 2 —— 飞船模型替换（1~2 天）
 
@@ -274,7 +269,7 @@ fn spawn_gltf(mut commands: Commands, asset_server: Res<AssetServer>) {
 ## 音效
 | 素材 | 来源 | 许可证 | 署名要求 | 入库路径 |
 |---|---|---|---|---|
-| Kenney UI Audio | https://kenney.nl/assets/ui-audio | CC0 1.0 | 无 | assets/audio/ui_*.ogg |
+| Sonniss GDC 2026 Game Audio Bundle | https://sonniss.com/gameaudiogdc/ | Sonniss GDC Game Audio License | 无；不得独立再分发 | assets/audio/Sonniss.com-*.wav |
 
 ## 模型
 | 素材 | 来源 | 许可证 | 署名要求 | 入库路径 |

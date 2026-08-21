@@ -352,7 +352,7 @@ pub fn movement_system(
         // 喷气背包循环音（JS Sound.loops.jet 启停）
         let jetting = keys.pressed(KeyCode::Space) && !p.on_ground && p.stats.jet > 0.0;
         if jetting && p.jet_entity.is_none() {
-            let e = audio::play_loop(&mut commands, sfx.jet.clone(), 0.35);
+            let e = audio::play_jet(&mut commands, sfx.jet.clone(), 0.35);
             p.jet_entity = Some(e);
         } else if !jetting && let Some(e) = p.jet_entity.take() {
             commands.entity(e).despawn();

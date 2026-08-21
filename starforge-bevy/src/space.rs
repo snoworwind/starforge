@@ -868,10 +868,22 @@ pub fn bolt_system(
                     sub: format!("战利品入舱 · 信用点 +{}", cr),
                     dur: 3.5,
                 });
-                crate::audio::play(&mut commands, aux.sfx.break_block.clone(), 0.7, None);
+                crate::audio::play_spatial(
+                    &mut commands,
+                    aux.sfx.explosion.clone(),
+                    pos,
+                    0.7,
+                    None,
+                );
                 commands.entity(ve).despawn();
             } else {
-                crate::audio::play(&mut commands, aux.sfx.laser_hit.clone(), 0.3, None);
+                crate::audio::play_spatial(
+                    &mut commands,
+                    aux.sfx.laser_hit.clone(),
+                    pos,
+                    0.3,
+                    None,
+                );
             }
             crate::feedback::spawn_block_burst(
                 &mut commands,
@@ -910,10 +922,14 @@ pub fn bolt_system(
                 // visible body without requiring pixel-perfect aim.
                 creature.hp -= b.dmg;
                 creature.hit_t = 0.25;
-                if creature.hp <= 0.0 {
-                    crate::audio::play(&mut commands, aux.sfx.creature_die.clone(), 0.8, None);
-                } else {
-                    crate::audio::play(&mut commands, aux.sfx.creature_hit.clone(), 0.45, None);
+                if creature.hp > 0.0 {
+                    crate::audio::play_spatial(
+                        &mut commands,
+                        aux.sfx.creature_hit.clone(),
+                        cpos,
+                        0.45,
+                        None,
+                    );
                 }
             }
             crate::feedback::spawn_block_burst(
@@ -955,7 +971,7 @@ pub fn bolt_system(
                     gold,
                 );
             }
-            crate::audio::play(&mut commands, aux.sfx.break_block.clone(), 0.6, None);
+            crate::audio::play_spatial(&mut commands, aux.sfx.break_block.clone(), apos, 0.6, None);
             crate::feedback::spawn_block_burst(
                 &mut commands,
                 &mut feedback,
@@ -982,9 +998,21 @@ pub fn bolt_system(
                         sub: "停止攻击 10 秒后恢复准入".into(),
                         dur: 3.0,
                     });
-                    crate::audio::play(&mut commands, aux.sfx.alarm.clone(), 0.7, None);
+                    crate::audio::play_spatial(
+                        &mut commands,
+                        aux.sfx.alarm.clone(),
+                        center,
+                        0.7,
+                        None,
+                    );
                 } else {
-                    crate::audio::play(&mut commands, aux.sfx.laser_hit.clone(), 0.35, None);
+                    crate::audio::play_spatial(
+                        &mut commands,
+                        aux.sfx.laser_hit.clone(),
+                        pos,
+                        0.35,
+                        None,
+                    );
                 }
                 commands.entity(e).despawn();
                 continue;
@@ -3873,6 +3901,8 @@ pub fn engine_loop_system(
         FlightMode::Atmo | FlightMode::AtmoLand | FlightMode::Space | FlightMode::Warping
     );
     if flying && ship.engine_snd.is_none() {
+        // This is the player's own engine, so keep it centered and reliable
+        // instead of attenuating it as a distant world emitter.
         let e = crate::audio::play_loop(&mut commands, sfx.engine_loop.clone(), 0.32);
         ship.engine_snd = Some(e);
     } else if !flying && let Some(e) = ship.engine_snd.take() {

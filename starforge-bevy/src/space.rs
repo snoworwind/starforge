@@ -37,8 +37,6 @@ const SHIP_RECALL_DURATION: f32 = 2.4;
 const ORIGIN_MODEL_SCALE: f32 = 1.12;
 /// 相机远平面：需覆盖远景地形（±1536 格）与太空天体（行星 1500~2600u、星光 9000u）
 pub const CAM_FAR: f32 = 12000.0;
-pub const WRAP_X: f32 = std::f32::consts::PI * 2.0 / 0.004; // ≈1570.8
-pub const WRAP_Z: f32 = 2.3 / 0.004; // =575
 // Conservative envelope for the largest ship's wings and for yaw/pitch
 // rotations.  The old envelope only covered the central fuselage, allowing
 // the wings to enter one-block walls during high-speed flight.
@@ -2934,17 +2932,9 @@ pub fn atmo_system(
             break;
         }
     }
-    // 星球是圆的：经纬环绕
-    if ship.pos.x > WRAP_X / 2.0 {
-        ship.pos.x -= WRAP_X;
-    } else if ship.pos.x < -WRAP_X / 2.0 {
-        ship.pos.x += WRAP_X;
-    }
-    if ship.pos.z > WRAP_Z / 2.0 {
-        ship.pos.z -= WRAP_Z;
-    } else if ship.pos.z < -WRAP_Z / 2.0 {
-        ship.pos.z += WRAP_Z;
-    }
+    // 星球表面无限延伸（Minecraft 式）：飞船不再经纬环绕。
+    // 注意：太空↔地表映射（exit_to_space / enter_planet）按 lon = x*0.004
+    // 取模 2π，远离原点窗口（±785.4）处出大气再入会落在取模后的位置。
     ship_voxel_collision(&mut ship, &world, dt);
     // 相机：携带 A/D 滚转微调（模型与镜头整体横滚，缓慢自动回正——JS camQ * trim 同口径）
     let cam_q = ship_quat(ship.yaw, ship.pitch, 0.0) * Quat::from_rotation_z(ship.cam_roll);
@@ -2978,6 +2968,8 @@ fn exit_to_space(
 ) {
     let planet = game.planet();
     let s = voxel_scale(planet);
+    // 无限地表：lon 按 2π 取模、lat 钳到 ±1.15（±287.5 格纬度带）。
+    // 超出范围出大气会落在取模/钳制后的位置（"回城"），属有意取舍。
     let lon = ship.pos.x * 0.004;
     let lat = (ship.pos.z * 0.004).clamp(-1.15, 1.15);
     let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
@@ -3556,6 +3548,8 @@ fn enter_planet(
     // 太空→体素换系
     let center = Vec3::from(pd.pos);
     let dir = (ship.pos - center).normalize();
+    // 无限地表：ex 落在 ±785.4 内（lon 取模 2π）、ez 落回纬度带——远处
+    // 出太空再入会"回城"到原点窗口，属有意取舍。
     let lon = dir.z.atan2(dir.x);
     let lat = dir.y.clamp(-1.0, 1.0).asin();
     let ex = lon / 0.004;

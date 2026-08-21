@@ -345,15 +345,16 @@ pub fn village_side_quest_system(
     }
     let Some(world) = world else { return };
     let Ok(p) = player.single() else { return };
-    // 找最近村庄
+    // 找最近村庄（无限地表：按格哈希查玩家附近区域）
     let mut best: Option<(i32, i32, i32, f32)> = None;
-    for s in &world.g.structures {
+    let (px, pz) = (p.pos.x as i32, p.pos.z as i32);
+    for s in world.g.structures_in_rect(px - 32, pz - 32, px + 32, pz + 32) {
         if let crate::world::Structure::Village { x, z, h, .. } = s {
-            let dx = p.pos.x - (*x as f32 + 0.5);
-            let dz = p.pos.z - (*z as f32 + 0.5);
+            let dx = p.pos.x - (x as f32 + 0.5);
+            let dz = p.pos.z - (z as f32 + 0.5);
             let d = (dx * dx + dz * dz).sqrt();
             if d < 28.0 && best.map(|b| d < b.3).unwrap_or(true) {
-                best = Some((*x, *z, *h, d));
+                best = Some((x, z, h, d));
             }
         }
     }

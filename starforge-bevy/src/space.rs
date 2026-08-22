@@ -29,14 +29,14 @@ pub const PULSE_SPEED: f32 = 900.0;
 pub const WARP_ENGAGE_SPEED: f32 = 700.0;
 pub const SUN_POS: Vec3 = Vec3::new(6000.0, 2400.0, 1800.0);
 pub const SUN_R: f32 = 450.0;
-pub const EXIT_Y: f32 = 220.0;
-pub const HANDOFF_Y: f32 = 150.0;
+pub const EXIT_Y: f32 = crate::planet_scale::PLANET_SCALE.exit_altitude;
+pub const HANDOFF_Y: f32 = crate::planet_scale::PLANET_SCALE.reentry_altitude;
 /// 地面召回飞船的最大玩家—飞船距离。
 pub const SHIP_RECALL_MAX_DISTANCE: f32 = 128.0;
 const SHIP_RECALL_DURATION: f32 = 2.4;
 const ORIGIN_MODEL_SCALE: f32 = 1.12;
 /// 相机远平面：需覆盖远景地形（±1536 格）与太空天体（行星 1500~2600u、星光 9000u）
-pub const CAM_FAR: f32 = 12000.0;
+pub const CAM_FAR: f32 = 32_000.0;
 // Conservative envelope for the largest ship's wings and for yaw/pitch
 // rotations.  The old envelope only covered the central fuselage, allowing
 // the wings to enter one-block walls during high-speed flight.
@@ -69,7 +69,7 @@ pub fn parked_y_at(world: &VoxelWorld, x: f32, z: f32) -> f32 {
 
 /// 体素→太空缩放
 pub fn voxel_scale(planet: &PlanetDef) -> f32 {
-    planet.radius * 0.004
+    planet.radius / crate::planet_scale::PLANET_SCALE.local_planet_radius
 }
 /// 太空→大气 握手高度（球面距离）
 pub fn handoff_dist(planet: &PlanetDef) -> f32 {
@@ -2767,6 +2767,32 @@ fn attitude_from_forward(forward: Vec3) -> (f32, f32) {
     )
 }
 
+/// Returns true when a movement segment starts inside or crosses a sphere.
+/// Space flight can move farther than the scaled atmosphere shell in one
+/// frame, especially while pulsing, so an end-point distance check can tunnel
+/// through the entire hand-off band.
+fn segment_intersects_sphere(from: Vec3, to: Vec3, center: Vec3, radius: f32) -> bool {
+    let start = from - center;
+    if start.length_squared() <= radius * radius {
+        return true;
+    }
+    let delta = to - from;
+    let a = delta.length_squared();
+    if a <= f32::EPSILON {
+        return false;
+    }
+    let b = 2.0 * start.dot(delta);
+    let c = start.length_squared() - radius * radius;
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return false;
+    }
+    let root = discriminant.sqrt();
+    let near = (-b - root) / (2.0 * a);
+    let far = (-b + root) / (2.0 * a);
+    (0.0..=1.0).contains(&near) || (0.0..=1.0).contains(&far)
+}
+
 fn bolt_rotation(dir: Vec3) -> Quat {
     Quat::from_rotation_arc(Vec3::NEG_Z, dir.normalize_or_zero())
 }
@@ -2909,7 +2935,7 @@ pub fn atmo_system(
     input.mouse_dx = 0.0;
     input.mouse_dy = 0.0;
     // 速度：油门→满速；刹车→0（可完全停下）；松键→缓速滑行至停止
-    let max_s = if input.boost { 55.0 } else { 30.0 };
+    let max_s = crate::planet_scale::atmospheric_max_speed(ship.pos.y, input.boost);
     let (target, k) = if input.thrust {
         (max_s, 2.2)
     } else if input.brake {
@@ -2932,9 +2958,9 @@ pub fn atmo_system(
             break;
         }
     }
-    // 星球表面无限延伸（Minecraft 式）：飞船不再经纬环绕。
-    // 注意：太空↔地表映射（exit_to_space / enter_planet）按 lon = x*0.004
-    // 取模 2π，远离原点窗口（±785.4）处出大气再入会落在取模后的位置。
+    // Local flight remains a Minecraft-like tangent patch.  Orbital mapping
+    // now uses the shared visual planet radius rather than the old implicit
+    // 250-unit sphere, expanding the unique landing window to planet scale.
     ship_voxel_collision(&mut ship, &world, dt);
     // 相机：携带 A/D 滚转微调（模型与镜头整体横滚，缓慢自动回正——JS camQ * trim 同口径）
     let cam_q = ship_quat(ship.yaw, ship.pitch, 0.0) * Quat::from_rotation_z(ship.cam_roll);
@@ -2968,11 +2994,12 @@ fn exit_to_space(
 ) {
     let planet = game.planet();
     let s = voxel_scale(planet);
-    // 无限地表：lon 按 2π 取模、lat 钳到 ±1.15（±287.5 格纬度带）。
-    // 超出范围出大气会落在取模/钳制后的位置（"回城"），属有意取舍。
-    let lon = ship.pos.x * 0.004;
-    let lat = (ship.pos.z * 0.004).clamp(-1.15, 1.15);
-    let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+    let lon = ship.pos.x / crate::planet_scale::PLANET_SCALE.local_planet_radius;
+    let lat = (ship.pos.z / crate::planet_scale::PLANET_SCALE.local_planet_radius).clamp(
+        -std::f32::consts::FRAC_PI_2 + 1.0e-4,
+        std::f32::consts::FRAC_PI_2 - 1.0e-4,
+    );
+    let dir = crate::planet_scale::local_to_planet_direction(ship.pos.x, ship.pos.z);
     // 先保存越过 EXIT_Y 前一刻的姿态，再按当前经纬度的局部切平面
     // 转换到星球外部坐标。这样出大气后的方向会继承实际仰角/偏航，
     // 而不是把大气层的全局 x/y/z 轴直接误当成太空坐标轴。
@@ -3027,6 +3054,7 @@ pub fn space_system(mut p: SpaceSysParams) {
         return;
     }
     let dt = p.time.delta_secs();
+    let previous_pos = p.ship.pos;
     // 离站冷却：避免刚离站又撞进泊入区被拉回来
     p.game.dock_cd = (p.game.dock_cd - dt).max(0.0);
     let sens = p.settings.mouse_sens * 0.0022;
@@ -3173,8 +3201,8 @@ pub fn space_system(mut p: SpaceSysParams) {
     if let Some(sc) = p.scene.as_ref() {
         for pv in &sc.planets {
             let center = Vec3::from(pv.def.pos);
-            let d = p.ship.pos.distance(center) - pv.def.radius;
-            if d < handoff_dist(&pv.def) {
+            let handoff_radius = pv.def.radius + handoff_dist(&pv.def);
+            if segment_intersects_sphere(previous_pos, p.ship.pos, center, handoff_radius) {
                 let to_center = (center - p.ship.pos).normalize();
                 if fwd.dot(to_center) > -0.5 {
                     entering = Some(pv.def.id);
@@ -3548,12 +3576,9 @@ fn enter_planet(
     // 太空→体素换系
     let center = Vec3::from(pd.pos);
     let dir = (ship.pos - center).normalize();
-    // 无限地表：ex 落在 ±785.4 内（lon 取模 2π）、ez 落回纬度带——远处
-    // 出太空再入会"回城"到原点窗口，属有意取舍。
-    let lon = dir.z.atan2(dir.x);
-    let lat = dir.y.clamp(-1.0, 1.0).asin();
-    let ex = lon / 0.004;
-    let ez = lat / 0.004;
+    let local = crate::planet_scale::planet_direction_to_local(dir);
+    let ex = local.x;
+    let ez = local.y;
     let alt = data::SEA_Y + (ship.pos.distance(center) - pd.radius) / s;
     // 保守兜底高度（同星球再入时 alt 已足够；新星球地形加载后由区块流式接管）
     let gy = data::SEA_Y;
@@ -4030,19 +4055,33 @@ mod tests {
         let vx = 123.4f32;
         let vz = -45.6f32;
         let vy = 160.0f32;
-        let lon = vx * 0.004;
-        let lat = (vz * 0.004).clamp(-1.15, 1.15);
-        let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+        let dir = crate::planet_scale::local_to_planet_direction(vx, vz);
         let center = Vec3::from(pd.pos);
         let sp = center + dir * (pd.radius + (vy - data::SEA_Y) * s);
         // 逆映射
         let d = (sp - center).normalize();
-        let lon2 = d.z.atan2(d.x);
-        let lat2 = d.y.clamp(-1.0, 1.0).asin();
-        let x2 = lon2 / 0.004;
-        let z2 = lat2 / 0.004;
+        let local = crate::planet_scale::planet_direction_to_local(d);
+        let x2 = local.x;
+        let z2 = local.y;
         assert!((x2 - vx).abs() < 0.01, "x {x2} vs {vx}");
         assert!((z2 - vz).abs() < 0.01, "z {z2} vs {vz}");
+    }
+
+    #[test]
+    fn swept_reentry_cannot_tunnel_through_shell() {
+        let center = Vec3::new(10.0, -3.0, 4.0);
+        assert!(segment_intersects_sphere(
+            center + Vec3::X * 20.0,
+            center - Vec3::X * 20.0,
+            center,
+            5.0,
+        ));
+        assert!(!segment_intersects_sphere(
+            center + Vec3::new(20.0, 10.0, 0.0),
+            center + Vec3::new(-20.0, 10.0, 0.0),
+            center,
+            5.0,
+        ));
     }
 
     #[test]

@@ -11,28 +11,30 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::light::{FogVolume, VolumetricFog};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat,
-};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::player::Player;
 use crate::save::Settings;
 use crate::space::{FlightMode, SpaceScene};
 use crate::world::World;
 
-// Keep the layer close to the playable atmosphere instead of putting the
-// entire cloud deck high above the camera. A moderately thick layer also makes the
-// lower edge read as a soft, nearby underside rather than a distant sheet.
-const CLOUD_BOTTOM: f32 = 78.0;
-const CLOUD_TOP: f32 = 174.0;
-const CLOUD_WIDTH: f32 = 1_100.0;
+const CLOUD_BOTTOM: f32 = crate::planet_scale::PLANET_SCALE.cloud_bottom;
+const CLOUD_TOP: f32 = crate::planet_scale::PLANET_SCALE.cloud_top;
+const CLOUD_WIDTH: f32 = 16_384.0;
+// Preserve the view-ray optical depth of the previous 96-unit layer after
+// increasing its thickness to 360. The large volume's bounding radius still
+// attenuates directional light more aggressively, so light intensity is
+// compensated separately instead of shrinking the coefficients to invisibility.
+const CLOUD_OPTICAL_SCALE: f32 = 96.0 / (CLOUD_TOP - CLOUD_BOTTOM);
+const CLOUD_LIGHT_INTENSITY: f32 = 240.0;
 
 /// Resolution of the 3D cloud density texture. The texture maps exactly once
-/// over the fog box, so each texel covers ~11×3×11 blocks; it must be
+/// over the planet-scale fog box, so each texel covers roughly 85×11×85 blocks;
+/// the low-frequency coverage field inside each texel restores cloud-sized detail and must be
 /// horizontally toroidal so the box edges and the wind scroll stay seamless.
-const DENSITY_W: u32 = 96;
+const DENSITY_W: u32 = 192;
 const DENSITY_H: u32 = 32;
-const DENSITY_D: u32 = 96;
+const DENSITY_D: u32 = 192;
 
 /// Wind drift in UV units per second. The density texture wraps (Repeat), so
 /// a full box-wide drift takes about 4 minutes — slow enough to read as
@@ -99,7 +101,7 @@ impl CloudTuning {
     }
 }
 
-/// Marker for the single player-following cloud fog volume.
+/// Player-following cloud field.
 #[derive(Component)]
 pub struct CloudVolume;
 
@@ -143,7 +145,11 @@ pub fn rain_audio_system(
 ) {
     let raining = world.is_some() && settings.weather && mode.ground_scene();
     if raining && rain.entity.is_none() {
-        rain.entity = Some(crate::audio::play_loop(&mut commands, sfx.rain.clone(), 0.18));
+        rain.entity = Some(crate::audio::play_loop(
+            &mut commands,
+            sfx.rain.clone(),
+            0.18,
+        ));
     } else if !raining && let Some(entity) = rain.entity.take() {
         commands.entity(entity).despawn();
     }
@@ -211,12 +217,23 @@ pub fn climate_system(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut volume_fog: Query<
-        (Entity, &mut FogVolume, &mut Transform, &mut Visibility),
+        (
+            Entity,
+            &mut FogVolume,
+            &mut Transform,
+            &mut Visibility,
+            &CloudVolume,
+        ),
         Without<WeatherParticle>,
     >,
     mut camera_fog: Query<&mut VolumetricFog, With<Camera3d>>,
     mut particles: Query<
-        (Entity, &mut WeatherParticle, &mut Transform, &mut Visibility),
+        (
+            Entity,
+            &mut WeatherParticle,
+            &mut Transform,
+            &mut Visibility,
+        ),
         Without<FogVolume>,
     >,
 ) {
@@ -231,7 +248,7 @@ pub fn climate_system(
         for (entity, _, _, _) in &particles {
             commands.entity(entity).despawn();
         }
-        for (entity, _, _, _) in &volume_fog {
+        for (entity, _, _, _, _) in &volume_fog {
             commands.entity(entity).despawn();
         }
         runtime.fingerprint = Some(fingerprint);
@@ -242,43 +259,7 @@ pub fn climate_system(
         if settings.clouds {
             let density = images.add(make_cloud_density_texture(world.seed, world.biome().key));
             let center = cloud_center(player.pos);
-            let volume = commands
-                .spawn((
-                    FogVolume {
-                        // White fog lit by the real sun: the cloud layer picks
-                        // up the warm daylight color and the biome sky ambient.
-                        //
-                        // Bevy 的 light_attenuation = exp(-density × bounding_radius
-                        // × (absorption+scattering))，bounding_radius 是云盒包围球
-                        // 半径（1100 宽云盒 ≈ 779）。吸收/散射必须压到 ~0.02 量级，
-                        // 否则 exp(-0.12×779×0.28)=exp(-27)≈0，方向光被 Beer 衰减
-                        // 全吃掉，云白天也全黑（官方示例云盒只有 30~55 半径）。
-                        fog_color: Color::WHITE,
-                        density_factor: 0.10,
-                        density_texture: Some(density.clone()),
-                        absorption: 0.01,
-                        scattering: 0.012,
-                        // 补偿压低后的散射系数：云亮度 = light_attenuation ×
-                        // scattering × light_intensity，光强因子放大到可见水平。
-                        light_intensity: 5.0,
-                        scattering_asymmetry: 0.72,
-                        ..default()
-                    },
-                    Transform::from_translation(Vec3::new(
-                        center.x,
-                        (CLOUD_BOTTOM + CLOUD_TOP) * 0.5,
-                        center.z,
-                    ))
-                    .with_scale(Vec3::new(
-                        CLOUD_WIDTH,
-                        CLOUD_TOP - CLOUD_BOTTOM,
-                        CLOUD_WIDTH,
-                    )),
-                    Visibility::Visible,
-                    CloudVolume,
-                    crate::InGame,
-                ))
-                .id();
+            let volume = spawn_cloud_volume(&mut commands, &density, center);
             runtime.density = Some(density);
             runtime.volume = Some(volume);
         }
@@ -329,36 +310,7 @@ pub fn climate_system(
                 }
             };
             let center = cloud_center(player.pos);
-            let volume = commands
-                .spawn((
-                    FogVolume {
-                        fog_color: Color::WHITE,
-                        density_factor: 0.10,
-                        density_texture: Some(density),
-                        // 同首建：吸收/散射压低到与 779 包围球半径匹配的量级，
-                        // light_intensity 补偿散射亮度（见上）。
-                        absorption: 0.01,
-                        scattering: 0.012,
-                        light_intensity: 5.0,
-                        scattering_asymmetry: 0.72,
-                        ..default()
-                    },
-                    Transform::from_translation(Vec3::new(
-                        center.x,
-                        (CLOUD_BOTTOM + CLOUD_TOP) * 0.5,
-                        center.z,
-                    ))
-                    .with_scale(Vec3::new(
-                        CLOUD_WIDTH,
-                        CLOUD_TOP - CLOUD_BOTTOM,
-                        CLOUD_WIDTH,
-                    )),
-                    Visibility::Visible,
-                    CloudVolume,
-                    crate::InGame,
-                ))
-                .id();
-            runtime.volume = Some(volume);
+            runtime.volume = Some(spawn_cloud_volume(&mut commands, &density, center));
         }
     } else if let Some(entity) = runtime.volume.take() {
         commands.entity(entity).despawn();
@@ -375,7 +327,7 @@ pub fn climate_system(
         runtime.elapsed * WIND_UV_PER_SEC * 0.15,
     );
     let sky = clear.0.to_linear();
-    for (entity, mut fog, mut transform, mut visibility) in &mut volume_fog {
+    for (entity, mut fog, mut transform, mut visibility, _) in &mut volume_fog {
         if runtime.volume != Some(entity) {
             continue;
         }
@@ -387,13 +339,18 @@ pub fn climate_system(
         // scatters light.
         //
         // 系数量级注意：Bevy 的 light_attenuation 用云盒包围球半径
-        // （1100 宽 → ≈779）做 Beer 衰减路径，吸收/散射必须 ~0.01 量级，
-        // 否则 exp(-density×779×(abs+scat)) ≈ 0，云白天全黑。散射亮度
-        // 用 FogVolume::light_intensity 放大补偿。
-        fog.density_factor = 0.05 + tuning.coverage.clamp(0.0, 1.0) * 0.12;
-        fog.absorption = 0.006 + tuning.density.clamp(0.0, 1.0) * 0.010;
-        fog.scattering = 0.008 + tuning.density.clamp(0.0, 1.0) * 0.012;
-        fog.light_intensity = 5.0;
+        // 按原 96 格厚云层的视线光学深度标定吸收/散射，再让
+        // FogVolume::light_intensity 补偿行星尺度包围盒造成的太阳光衰减。
+        let high_altitude_fade = 1.0
+            - crate::planet_scale::smoothstep(
+                crate::planet_scale::PLANET_SCALE.sky_space_fade_start,
+                crate::planet_scale::PLANET_SCALE.sky_space_fade_end,
+                player.eye().y,
+            );
+        fog.density_factor = (0.05 + tuning.coverage.clamp(0.0, 1.0) * 0.12) * high_altitude_fade;
+        fog.absorption = (0.006 + tuning.density.clamp(0.0, 1.0) * 0.010) * CLOUD_OPTICAL_SCALE;
+        fog.scattering = (0.008 + tuning.density.clamp(0.0, 1.0) * 0.012) * CLOUD_OPTICAL_SCALE;
+        fog.light_intensity = CLOUD_LIGHT_INTENSITY;
         *visibility = if show_clouds {
             Visibility::Visible
         } else {
@@ -434,13 +391,38 @@ pub fn climate_system(
 }
 
 fn cloud_center(player: Vec3) -> Vec3 {
-    // Snapping avoids moving the entire volume every frame while still giving
-    // the player a full kilometre of cloud coverage in every direction.
+    // Recenter infrequently. The field is much wider than the atmospheric
+    // horizon, so the jump happens outside the visible cloud footprint.
     Vec3::new(
-        (player.x / 128.0).floor() * 128.0,
+        (player.x / 1_024.0).round() * 1_024.0,
         (CLOUD_BOTTOM + CLOUD_TOP) * 0.5,
-        (player.z / 128.0).floor() * 128.0,
+        (player.z / 1_024.0).round() * 1_024.0,
     )
+}
+
+fn spawn_cloud_volume(commands: &mut Commands, density: &Handle<Image>, center: Vec3) -> Entity {
+    commands
+        .spawn((
+            FogVolume {
+                fog_color: Color::WHITE,
+                density_factor: 0.10,
+                density_texture: Some(density.clone()),
+                absorption: 0.01 * CLOUD_OPTICAL_SCALE,
+                scattering: 0.012 * CLOUD_OPTICAL_SCALE,
+                light_intensity: CLOUD_LIGHT_INTENSITY,
+                scattering_asymmetry: 0.72,
+                ..default()
+            },
+            Transform::from_translation(center).with_scale(Vec3::new(
+                CLOUD_WIDTH,
+                CLOUD_TOP - CLOUD_BOTTOM,
+                CLOUD_WIDTH,
+            )),
+            Visibility::Visible,
+            CloudVolume,
+            crate::InGame,
+        ))
+        .id()
 }
 
 fn repeat_sampler() -> ImageSampler {
@@ -454,8 +436,8 @@ fn repeat_sampler() -> ImageSampler {
 
 /// Builds the 3D cloud density texture for a biome/seed.
 ///
-/// The texture maps exactly once over the fog box (1100×96×1100 blocks), so
-/// every octave is *toroidal*: cell indices wrap around the texture and the
+/// The texture maps exactly once over the fog box, so every octave is
+/// *toroidal*: cell indices wrap around the texture and the
 /// Worley distance is measured on the circle, which keeps the box edges and
 /// the wind scroll free of seams. Coverage comes from 2D Worley FBM in the
 /// x/z plane (a few large weather systems), erosion from 3D Worley FBM, and a
@@ -475,19 +457,14 @@ fn make_cloud_density_texture(seed: u32, biome: &str) -> Image {
             let profile = smoothstep(0.0, 0.28, py) * (1.0 - smoothstep(0.58, 0.92, py));
             for x in 0..DENSITY_W {
                 let px = x as f32 / DENSITY_W as f32;
-                // large-scale coverage in the x/z plane (4 base cells per box)
-                let cover = worley_fbm2_periodic(
-                    Vec2::new(px, pz) * 4.0,
-                    4.0,
-                    biome_seed ^ 0x51A7,
-                );
+                // Preserve roughly the old cloud-system world size after the
+                // field grew from 1.1 km to 16 km.
+                let cover =
+                    worley_fbm2_periodic(Vec2::new(px, pz) * 60.0, 60.0, biome_seed ^ 0x51A7);
                 let cover = smoothstep(threshold, (threshold + 0.22).min(0.95), cover);
                 // 3D detail erosion
-                let detail = worley_fbm3_periodic(
-                    Vec3::new(px, py, pz) * 6.0,
-                    6.0,
-                    biome_seed ^ 0xC011,
-                );
+                let detail =
+                    worley_fbm3_periodic(Vec3::new(px, py, pz) * 90.0, 90.0, biome_seed ^ 0xC011);
                 let detail = smoothstep(0.42, 0.78, detail);
                 let density = (cover * (0.30 + 0.70 * detail) * profile).clamp(0.0, 1.0);
                 let at = ((z * DENSITY_H + y) * DENSITY_W + x) as usize;
@@ -786,7 +763,10 @@ mod tests {
         for period in [4.0f32, 8.0, 16.0] {
             let a = worley_fbm2_periodic(Vec2::new(0.0, 0.5) * period, period, seed);
             let b = worley_fbm2_periodic(Vec2::new(1.0, 0.5) * period, period, seed);
-            assert!((a - b).abs() < 1e-4, "2D seam at period {period}: {a} vs {b}");
+            assert!(
+                (a - b).abs() < 1e-4,
+                "2D seam at period {period}: {a} vs {b}"
+            );
         }
         let a = worley_fbm3_periodic(Vec3::new(0.0, 0.5, 0.3) * 6.0, 6.0, seed);
         let b = worley_fbm3_periodic(Vec3::new(1.0, 0.5, 0.3) * 6.0, 6.0, seed);

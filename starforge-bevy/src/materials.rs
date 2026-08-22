@@ -22,6 +22,9 @@ pub struct TerrainMaterials {
     /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）。
     /// Vertex alpha is rewritten on the CPU every frame for the far-hole ring.
     pub far: Handle<StandardMaterial>,
+    /// Opaque, fully rough material for hierarchical LOD sections. Keeping it
+    /// separate from `far` avoids transparent-section sorting seams.
+    pub lod: Handle<StandardMaterial>,
     pub atlas_image: Handle<Image>,
 }
 
@@ -86,10 +89,19 @@ impl TerrainMaterials {
             alpha_mode: AlphaMode::Blend,
             ..default()
         });
+        let lod = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            double_sided: true,
+            cull_mode: None,
+            perceptual_roughness: 1.0,
+            reflectance: 0.1,
+            ..default()
+        });
         Self {
             solid,
             water,
             far,
+            lod,
             atlas_image,
         }
     }

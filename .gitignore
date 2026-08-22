@@ -21,6 +21,12 @@ Thumbs.db
 desktop.ini
 *.log
 
+# 本地调试产物（截图、日志报告、临时 Bevy 补丁与探针，勿提交）
+starforge-bevy/debug_shots/
+starforge-bevy/examples/
+starforge-bevy/patches/
+starforge-bevy/shadow_log_out.txt
+
 # DSH 运行时目录（本机工具生成，勿提交）
 .dsh-vision-router/
 

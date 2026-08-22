@@ -1463,7 +1463,10 @@ const FACE_DIRS: [[i32; 3]; 6] = [
     [0, 0, 1],
     [0, 0, -1],
 ];
-const FACE_SHADE: [f32; 6] = [0.80, 0.80, 1.00, 0.50, 0.65, 0.65];
+// Keep a subtle voxel-face orientation cue without baking most of the scene's
+// contrast into vertex color. Real-time sunlight and its shadow map now carry
+// more of the lighting relationship, so cast shadows remain visible.
+const FACE_SHADE: [f32; 6] = [0.90, 0.90, 1.00, 0.70, 0.80, 0.80];
 
 /// Build solid + water meshes for one chunk. Neighbors must exist.
 pub fn build_chunk_meshes(
@@ -1676,10 +1679,16 @@ pub const FAR_SINK: f32 = 2.2; // 下沉偏置：近处由真实区块覆盖
 /// 远景网格的基准数据（自定义顶点属性）：原始地表色与原始高度。
 /// `update_far_hole_alpha` 每帧从基准值重新计算过渡混合（alpha、向雾色
 /// 渐隐、高度下沉），避免在已混合的 COLOR/POSITION 上反复叠加造成漂移。
-pub const FAR_BASE_COLOR: bevy::mesh::MeshVertexAttribute =
-    bevy::mesh::MeshVertexAttribute::new("Far_Base_Color", 8, bevy::render::render_resource::VertexFormat::Float32x4);
-pub const FAR_BASE_HEIGHT: bevy::mesh::MeshVertexAttribute =
-    bevy::mesh::MeshVertexAttribute::new("Far_Base_Height", 9, bevy::render::render_resource::VertexFormat::Float32);
+pub const FAR_BASE_COLOR: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "Far_Base_Color",
+    8,
+    bevy::render::render_resource::VertexFormat::Float32x4,
+);
+pub const FAR_BASE_HEIGHT: bevy::mesh::MeshVertexAttribute = bevy::mesh::MeshVertexAttribute::new(
+    "Far_Base_Height",
+    9,
+    bevy::render::render_resource::VertexFormat::Float32,
+);
 
 /// 中心向外行序（64, 63, 65, 62, 66, …）：重建时新旧高度场接缝始终停留在
 /// 网格边缘（最远、最不易察觉），不再从一侧到另一侧横扫整个远景。
@@ -1699,7 +1708,7 @@ pub fn far_row_order(i: usize) -> usize {
 /// （近处地形走 sRGB 纹理、由采样器自动转线性）。JS 原版 three.js 会为
 /// 顶点色做同样的 sRGB→线性转换，Bevy 不会，所以这里必须手动转，
 /// 否则远景地表会比近处地形亮约 2.4 倍。
-fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
+pub(crate) fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
     let Some(&idx) = atlas.index.get(tile) else {
         return [0.5, 0.6, 0.4].map(srgb_to_linear);
     };
@@ -1716,6 +1725,78 @@ fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
         srgb_to_linear(g as f32 / n),
         srgb_to_linear(b as f32 / n),
     ]
+}
+
+/// Deterministic surface sample shared by the legacy far grid and the
+/// hierarchical LOD renderer.  This path intentionally does not materialize a
+/// full 16×16×96 chunk, making multi-kilometre terrain requests cheap enough
+/// to queue by projected importance.
+pub(crate) fn far_surface_sample(
+    world: &World,
+    atlas: &crate::textures::Atlas,
+    wx: f32,
+    wz: f32,
+) -> (f32, [f32; 4]) {
+    let g = &world.g;
+    let b = g.biome;
+    let sea = g.sea() as f32;
+    let mut height = g.height_at(wx.floor(), wz.floor()) as f32;
+    let mut island = false;
+    if b.key == "alien"
+        && let Some((base, thick)) = g.float_island_at(wx, wz)
+        && height + 6.0 <= base as f32
+    {
+        height = (base + thick) as f32;
+        island = true;
+    }
+
+    if height < sea && (!b.dry || b.lava) && !island {
+        let depth = (sea - height).max(0.0);
+        let shade = (0.78 - depth * 0.008).clamp(0.0, 1.0);
+        let tint = b.water_tint;
+        return (
+            sea,
+            [
+                srgb_to_linear(((tint >> 16) & 0xff) as f32 / 255.0) * shade,
+                srgb_to_linear(((tint >> 8) & 0xff) as f32 / 255.0) * shade,
+                srgb_to_linear((tint & 0xff) as f32 / 255.0) * shade,
+                1.0,
+            ],
+        );
+    }
+
+    let ground = g
+        .sub_at(wx.floor(), wz.floor())
+        .map(|sub| sub.0)
+        .filter(|key| !key.is_empty())
+        .unwrap_or(b.grass);
+    let tile = match ground {
+        "grass" => "grass_top",
+        "snow" => "snow_top",
+        "alien" => "alien_top",
+        "murk" => "murk_top",
+        "redmoss" => "redmoss_top",
+        other => other,
+    };
+    let no_beach = matches!(
+        b.grass,
+        "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
+    );
+    let avg = if height < sea + 1.0 && !no_beach && !island {
+        far_tile_avg(atlas, "sand")
+    } else {
+        far_tile_avg(atlas, tile)
+    };
+    let shade = (0.72 + (height - 14.0) * 0.012).clamp(0.0, 1.35);
+    (
+        height,
+        [
+            (avg[0] * shade).min(1.0),
+            (avg[1] * shade).min(1.0),
+            (avg[2] * shade).min(1.0),
+            1.0,
+        ],
+    )
 }
 
 /// sRGB [0,1] → 线性 [0,1]（Bevy 顶点色要求线性空间）。

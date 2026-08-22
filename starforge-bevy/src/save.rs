@@ -589,9 +589,19 @@ pub fn world_summaries() -> Vec<(String, u32, String)> {
 }
 
 /// Settings persisted to saves/settings.json.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LodMode {
+    Legacy,
+    #[default]
+    Hierarchical,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Resource)]
 pub struct Settings {
     pub view_dist: i32,
+    #[serde(default)]
+    pub lod_mode: LodMode,
     pub mouse_sens: f32,
     pub volume: f32,
     pub show_fps: bool,
@@ -645,6 +655,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             view_dist: 10,
+            lod_mode: LodMode::Hierarchical,
             mouse_sens: 1.0,
             volume: 0.8,
             show_fps: false,

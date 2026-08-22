@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 /// The local voxel world is a small section of a much larger planet. These
 /// radii keep the atmospheric horizon visually close to flat while still
 /// giving Bevy's scattering integrator a real shell to march through.
-pub const GROUND_ATMOSPHERE_INNER_RADIUS: f32 = 2_000.0;
-pub const GROUND_ATMOSPHERE_OUTER_RADIUS: f32 = 2_320.0;
+pub const GROUND_ATMOSPHERE_INNER_RADIUS: f32 =
+    crate::planet_scale::PLANET_SCALE.local_planet_radius;
+pub const GROUND_ATMOSPHERE_OUTER_RADIUS: f32 =
+    GROUND_ATMOSPHERE_INNER_RADIUS + crate::planet_scale::PLANET_SCALE.atmosphere_top;
 /// The voxel scene is much smaller than Bevy's physical-scale examples, so
 /// the physical RAW_SUNLIGHT value needs a strong direct-light boost.
 ///
@@ -27,6 +29,12 @@ pub const GROUND_ATMOSPHERE_OUTER_RADIUS: f32 = 2_320.0;
 /// fixed `Exposure { ev100: 13.0 }` baseline (Bevy's atmosphere example
 /// configuration), RAW_SUNLIGHT × 1.0 is the correct physical value.
 pub const DIRECT_SUNLIGHT_BOOST: f32 = 1.0;
+/// Presentation baselines keep indirect light from washing out cast shadows.
+/// The runtime F3 values remain multipliers, so an existing saved value of
+/// 1.0 automatically receives the balanced baseline without a settings
+/// migration.
+const GROUND_ATMOSPHERE_FILL_BASE: f32 = 0.75;
+const GROUND_AMBIENT_BASE: f32 = 0.75;
 
 /// Runtime lighting controls exposed by the in-game F3 panel. These are
 /// deliberately kept separate from the physical scene setup so artists can
@@ -272,7 +280,7 @@ pub fn daynight_system(
     let sf = if mode.space_scene() {
         1.0
     } else {
-        ((cam_y - 80.0) / (150.0 - 80.0)).clamp(0.0, 1.0)
+        crate::planet_scale::space_fade(cam_y)
     };
     space.0 = sf;
 
@@ -295,11 +303,10 @@ pub fn daynight_system(
     sky = lerp_color(sky, space_black, sf);
     clear.0 = sky;
 
-    // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘。
-    // 原版曲率/淡出着色器已移除：爬升（atmo）时把雾距向相机收拢，让平面体素
-    // 地形在出大气前被雾色（≈天空色）吞没——读起来就是大气密度，出大气
-    // （EXIT_Y）瞬间由太空场景的球面星球无缝接棒。
-    let climb = ((cam_y - 100.0) / (crate::space::EXIT_Y - 100.0)).clamp(0.0, 1.0);
+    // Distance fog now models haze instead of erasing the flat terrain before
+    // the orbital hand-off.  The old climb curve crushed the far distance to
+    // roughly 120 units at exit and produced a visibly raised fog horizon.
+    let atmosphere_thin = crate::planet_scale::smoothstep(600.0, 2_400.0, cam_y);
     let fog_color = lerp_color(sky, Color::WHITE, 0.15 * f * (1.0 - sf));
     for mut fog in &mut fog_q {
         if mode.space_scene() {
@@ -308,9 +315,8 @@ pub fn daynight_system(
                 end: 1e9,
             };
         } else {
-            // 地面 90..1050；爬到 EXIT_Y（220）时收拢到 ~58..120，下方地形完全雾化
-            let start = 90.0 * (1.0 - climb * 0.35);
-            let end = 1050.0 * (1.0 - climb * 0.885);
+            let start = 120.0 + atmosphere_thin * 1_080.0;
+            let end = 2_400.0 + atmosphere_thin * 5_600.0;
             fog.falloff = FogFalloff::Linear { start, end };
             fog.color = fog_color;
         }
@@ -323,7 +329,7 @@ pub fn daynight_system(
     let atmosphere_fill = if mode.space_scene() {
         tuning.space_atmosphere_fill.max(0.0)
     } else {
-        tuning.atmosphere_fill.max(0.0)
+        GROUND_ATMOSPHERE_FILL_BASE * tuning.atmosphere_fill.max(0.0)
     };
     for mut fill in &mut atmosphere_fill_q {
         fill.intensity = atmosphere_fill;
@@ -338,12 +344,11 @@ pub fn daynight_system(
     let day_amb = Color::srgb(0.75, 0.8, 0.9);
     let night_amb = Color::srgb(0.16, 0.17, 0.26);
     ambient.color = lerp_color(day_amb, night_amb, 1.0 - f);
-    // JS 原版补光 = AmbientLight 0.35 + HemisphereLight 0.5 ≈ 太阳强度的 85%，
-    // 方块地面/树几乎不落黑。Bevy 物理光照下按 Bevy 默认 GlobalAmbientLight
-    // （80 cd/m²，正午）取环境光，夜间降到 12 保留暗部层次；F3 面板
-    // ambient_multiplier 仍可整体缩放。旧曲线 (3+f*5) 只有 Bevy 默认的 4~10%，
-    // 叠加侧/底面顶点色 0.65~0.8/0.5 的烘焙压暗后，背光面近乎全黑。
-    ambient.brightness = (12.0 + f * 68.0) * tuning.ambient_multiplier.max(0.0);
+    // 保留夜间暗部层次，同时把默认环境光降低 25%，让实时方向光阴影在
+    // 地形顶面可读。体素侧/底面的 FACE_SHADE 也同步抬高，避免降低补光后
+    // 背光面重新变成纯黑；F3 ambient_multiplier 仍可整体缩放。
+    ambient.brightness =
+        (12.0 + f * 68.0) * GROUND_AMBIENT_BASE * tuning.ambient_multiplier.max(0.0);
 
     for mut vis in &mut stars {
         *vis = if sf > 0.6 {

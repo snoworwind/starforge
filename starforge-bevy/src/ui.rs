@@ -30,6 +30,12 @@ pub(crate) struct HudCamera<'w, 's> {
     query: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<Camera3d>>,
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct HudRuntime<'w> {
+    power: Res<'w, crate::factory::Power>,
+    lod: Res<'w, crate::lod::LodRuntime>,
+}
+
 #[derive(Default, PartialEq, Clone, Copy)]
 pub enum Panel {
     #[default]
@@ -294,7 +300,7 @@ pub fn hud_system(
     ship: Option<Res<crate::space::ShipState>>,
     game: Option<Res<crate::space::SpaceGame>>,
     quests: Option<Res<crate::quests::Quests>>,
-    power: Res<crate::factory::Power>,
+    runtime: HudRuntime,
     cam_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     let Ok(p) = player.single() else { return };
@@ -528,13 +534,16 @@ pub fn hud_system(
             }
             // 电力
             ui.label(
-                egui::RichText::new(format!("⚡ {} / {:.0} kW", power.generation, power.used))
-                    .size(13.0)
-                    .color(if power.sat < 0.99 {
-                        egui::Color32::from_rgb(0xff, 0x55, 0x55)
-                    } else {
-                        egui::Color32::from_rgb(0xff, 0xb3, 0x47)
-                    }),
+                egui::RichText::new(format!(
+                    "⚡ {} / {:.0} kW",
+                    runtime.power.generation, runtime.power.used
+                ))
+                .size(13.0)
+                .color(if runtime.power.sat < 0.99 {
+                    egui::Color32::from_rgb(0xff, 0x55, 0x55)
+                } else {
+                    egui::Color32::from_rgb(0xff, 0xb3, 0x47)
+                }),
             );
         });
 
@@ -837,10 +846,24 @@ pub fn hud_system(
     // fps
     if settings.show_fps {
         egui::Area::new(egui::Id::new("fps"))
-            .fixed_pos(egui::pos2(screen.max.x - 90.0, 10.0))
+            .fixed_pos(egui::pos2(screen.max.x - 260.0, 10.0))
             .interactable(false)
             .show(ctx, |ui| {
                 ui.label(format!("{:.0} fps", 1.0 / time.delta_secs().max(1e-6)));
+                ui.label(format!(
+                    "高度 {:.0} · LOD 目标/驻留/可见 {}/{}/{}",
+                    p.eye().y,
+                    runtime.lod.stats.target_sections,
+                    runtime.lod.stats.resident_sections,
+                    runtime.lod.stats.visible_sections,
+                ));
+                ui.label(format!(
+                    "队列 {} · 本帧 {} · {:.2} ms · 父级回退 {}",
+                    runtime.lod.stats.queued_sections,
+                    runtime.lod.stats.generated_this_frame,
+                    runtime.lod.stats.build_ms,
+                    runtime.lod.stats.parent_fallbacks,
+                ));
             });
     }
 
@@ -2805,6 +2828,18 @@ pub fn pause_panel_system(
                     w.view_dist = settings.view_dist;
                 }
             });
+            let mut hierarchical = settings.lod_mode == crate::save::LodMode::Hierarchical;
+            if ui
+                .checkbox(&mut hierarchical, "层级体素远景（Voxy 模式）")
+                .changed()
+            {
+                settings.lod_mode = if hierarchical {
+                    crate::save::LodMode::Hierarchical
+                } else {
+                    crate::save::LodMode::Legacy
+                };
+                let _ = crate::save::save_settings(&settings);
+            }
             ui.horizontal(|ui| {
                 ui.label("鼠标灵敏度");
                 ui.add(egui::Slider::new(&mut settings.mouse_sens, 0.3..=2.5));
@@ -3140,8 +3175,8 @@ pub fn scan_system(
     for (e, mut ring, mut tf) in &mut rings {
         ring.t += dt;
         let r = ring.t * 480.0;
-        let a = (ring.t * 0.9).clamp(0.0, 0.9)
-            * (1.0 - (ring.t - 0.9).max(0.0) / 0.5).clamp(0.0, 1.0);
+        let a =
+            (ring.t * 0.9).clamp(0.0, 0.9) * (1.0 - (ring.t - 0.9).max(0.0) / 0.5).clamp(0.0, 1.0);
         tf.scale = Vec3::splat(r);
         if let Some(mut m) = stdmats.get_mut(&ring.mat) {
             m.base_color = Color::srgba(0.13, 0.86, 0.9, a);

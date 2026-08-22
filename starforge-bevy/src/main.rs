@@ -13,8 +13,10 @@ mod daynight;
 mod factory;
 mod feedback;
 mod inventory;
+mod lod;
 mod materials;
 mod network;
+mod planet_scale;
 mod player;
 mod quests;
 mod rng;
@@ -69,7 +71,7 @@ fn safe_player_position(pos: [f32; 3]) -> Option<Vec3> {
     }
     Some(Vec3::new(
         pos[0].clamp(-1_000_000.0, 1_000_000.0),
-        pos[1].clamp(-256.0, 512.0),
+        pos[1].clamp(-256.0, planet_scale::PLANET_SCALE.atmosphere_top + 256.0),
         pos[2].clamp(-1_000_000.0, 1_000_000.0),
     ))
 }
@@ -241,7 +243,14 @@ fn main() {
     let smoke = std::env::args().any(|a| a == "--smoke");
     let play = std::env::args().any(|a| a == "--play");
     let asset_dir = executable_asset_dir();
-    let settings = save::load_settings();
+    let mut settings = save::load_settings();
+    // Read-only visual probe overrides. They never persist to settings.json.
+    if std::env::args().any(|arg| arg == "--clouds-off") {
+        settings.clouds = false;
+    }
+    if std::env::args().any(|arg| arg == "--legacy-lod") {
+        settings.lod_mode = save::LodMode::Legacy;
+    }
     let cloud_tuning = weather::CloudTuning::from_settings(&settings);
     let lighting_tuning = daynight::LightingTuning::from_settings(&settings);
     let mut app = App::new();
@@ -296,6 +305,7 @@ fn main() {
         .insert_resource(SpaceInput::default())
         .insert_resource(FlightCamera::default())
         .insert_resource(space::ShipCam::default())
+        .init_resource::<lod::LodRuntime>()
         .insert_resource(player::PlayerCameraMode::default())
         .insert_resource(feedback::FeedbackAssets::default())
         .insert_resource(station::StationState::default())
@@ -535,6 +545,12 @@ fn main() {
         .add_systems(
             Update,
             space::space_stars_follow_system.run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            lod::hierarchical_lod_system
+                .before(far_mesh_system)
+                .run_if(in_state(GameState::Playing)),
         )
         .add_systems(Update, far_mesh_system.run_if(in_state(GameState::Playing)))
         .add_systems(
@@ -1511,7 +1527,8 @@ fn spawn_scene(
             0.0
         };
         p.pitch = if cd.pitch.is_finite() {
-            cd.pitch.clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2)
+            cd.pitch
+                .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2)
         } else {
             0.0
         };
@@ -1883,42 +1900,38 @@ fn stream_world_step(
                 if !neighbors_exist {
                     continue;
                 }
+                let old_solid = c.mesh;
+                let old_water = c.water_mesh;
                 let (solid_m, water_m) = world::build_chunk_meshes(world, c, atlas);
-                if let Some(e) = c.mesh {
-                    commands.entity(e).despawn();
-                }
-                if let Some(e) = c.water_mesh {
-                    commands.entity(e).despawn();
-                }
                 // Conservative per-chunk AABB: static meshes with the full
                 // height range, so frustum culling never drops a chunk that
                 // is actually visible.
                 let y_min = -160.0 - 8.0;
+                let solid_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_solid,
+                    cx,
+                    cz,
+                    world.seed,
+                    solid_m,
+                    mats.solid.clone(),
+                    y_min,
+                );
+                let water_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_water,
+                    cx,
+                    cz,
+                    world.seed,
+                    water_m,
+                    mats.water.clone(),
+                    y_min,
+                );
                 let c = world.chunks.get_mut(&key).unwrap();
-                c.mesh = solid_m.map(|m| {
-                    spawn_chunk_mesh(
-                        commands,
-                        meshes,
-                        cx,
-                        cz,
-                        world.seed,
-                        m,
-                        mats.solid.clone(),
-                        y_min,
-                    )
-                });
-                c.water_mesh = water_m.map(|m| {
-                    spawn_chunk_mesh(
-                        commands,
-                        meshes,
-                        cx,
-                        cz,
-                        world.seed,
-                        m,
-                        mats.water.clone(),
-                        y_min,
-                    )
-                });
+                c.mesh = solid_entity;
+                c.water_mesh = water_entity;
                 c.dirty = false;
                 mesh_left -= 1;
                 if mesh_left == 0 {
@@ -1971,16 +1984,26 @@ fn stream_world_step(
     })
 }
 
-fn spawn_chunk_mesh(
+/// Replace a chunk's mesh handle in place when possible. Keeping the entity
+/// alive avoids an extraction frame in which the old entity has been removed
+/// but the replacement has not reached the renderer yet.
+fn upsert_chunk_mesh(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    existing: Option<Entity>,
     cx: i32,
     cz: i32,
     world_seed: u32,
-    vm: VoxelMesh,
+    vm: Option<VoxelMesh>,
     mat: Handle<StandardMaterial>,
     y_min: f32,
-) -> Entity {
+) -> Option<Entity> {
+    let Some(vm) = vm else {
+        if let Some(entity) = existing {
+            commands.entity(entity).despawn();
+        }
+        return None;
+    };
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
@@ -1995,20 +2018,33 @@ fn spawn_chunk_mesh(
         Vec3::new(cx as f32 * 16.0, y_min, cz as f32 * 16.0),
         Vec3::new(cx as f32 * 16.0 + 16.0, 130.0, cz as f32 * 16.0 + 16.0),
     );
-    commands
-        .spawn((
+    if let Some(entity) = existing {
+        commands.entity(entity).insert((
             Mesh3d(handle),
             MeshMaterial3d(mat),
-            // 顶点已是绝对世界坐标（build_chunk_meshes 以 x0+lx / z0+lz 生成），
-            // 不能再叠加区块原点平移，否则每块地形被双倍偏移、块间出现大空洞。
-            Transform::default(),
             aabb,
             NoAutoAabb,
-            Visibility::default(),
             ChunkMesh { cx, cz, world_seed },
-            InGame,
-        ))
-        .id()
+        ));
+        Some(entity)
+    } else {
+        Some(
+            commands
+                .spawn((
+                    Mesh3d(handle),
+                    MeshMaterial3d(mat),
+                    // 顶点已是绝对世界坐标（build_chunk_meshes 以 x0+lx / z0+lz 生成），
+                    // 不能再叠加区块原点平移，否则每块地形被双倍偏移、块间出现大空洞。
+                    Transform::default(),
+                    aabb,
+                    NoAutoAabb,
+                    Visibility::default(),
+                    ChunkMesh { cx, cz, world_seed },
+                    InGame,
+                ))
+                .id(),
+        )
+    }
 }
 
 fn stream_system(
@@ -2079,11 +2115,14 @@ struct FarMesh {
     cx: f32,
     cz: f32,
     seed: u32,
-    /// 待填充的下一行（< FAR_N 表示正在重建）
+    /// 待填充的下一行（< FAR_N 表示正在后台重建 staging_mesh）
     row: usize,
     target_cx: f32,
     target_cz: f32,
-    mesh: Handle<Mesh>,
+    /// 当前实体正在显示的完整网格。
+    active_mesh: Handle<Mesh>,
+    /// 后台逐行重建的网格；完成后与 active_mesh 原子交换。
+    staging_mesh: Handle<Mesh>,
     /// 上次写入挖空环的玩家位置（用于节流 CPU 顶点 alpha 更新）
     hole_x: f32,
     hole_z: f32,
@@ -2104,6 +2143,8 @@ fn far_mesh_system(
     player: Query<&Player>,
     ship: Res<ShipState>,
     mode: Res<FlightMode>,
+    settings: Res<save::Settings>,
+    lod_runtime: Res<lod::LodRuntime>,
     clear: Res<ClearColor>,
     mut meshes: ResMut<Assets<Mesh>>,
     mats: Res<TerrainMaterials>,
@@ -2111,6 +2152,7 @@ fn far_mesh_system(
     mut far_q: Query<(
         Entity,
         &mut FarMesh,
+        &mut Mesh3d,
         &mut Visibility,
         &mut MeshMaterial3d<StandardMaterial>,
     )>,
@@ -2123,11 +2165,15 @@ fn far_mesh_system(
             Err(_) => return,
         }
     };
-    let show = mode.ground_scene();
+    let show = mode.ground_scene()
+        && (settings.lod_mode == save::LodMode::Legacy || !lod_runtime.coverage_ready);
     let tcx = (px / world::FAR_SNAP).round() * world::FAR_SNAP;
     let tcz = (pz / world::FAR_SNAP).round() * world::FAR_SNAP;
-    if let Ok((e, mut fm, mut vis, mut mmat)) = far_q.single_mut() {
-        *vis = if show && fm.row >= world::FAR_N {
+    if let Ok((e, mut fm, mut mesh3d, mut vis, mut mmat)) = far_q.single_mut() {
+        // Rebuilding happens in a second mesh. The last complete mesh remains
+        // visible until the replacement is ready, so crossing a FAR_SNAP
+        // boundary can no longer expose the clear color for seven frames.
+        *vis = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -2138,20 +2184,22 @@ fn far_mesh_system(
             fm.target_cx = tcx;
             fm.target_cz = tcz;
             fm.row = 0;
-            *vis = Visibility::Hidden;
         }
         if fm.row >= world::FAR_N && (tcx != fm.cx || tcz != fm.cz) {
             fm.target_cx = tcx;
             fm.target_cz = tcz;
             fm.row = 0;
-            // 不把新中心的部分行写入当前可见网格，避免高速穿越时出现
-            // 半幅旧地形 + 半幅新地形的撕裂/跳变。
-            *vis = Visibility::Hidden;
+        } else if fm.row < world::FAR_N && (tcx != fm.target_cx || tcz != fm.target_cz) {
+            // 高速移动可能在七帧重建完成前再次跨格。丢弃尚未显示的
+            // staging 内容，从最新中心重新开始；active 仍保持完整可见。
+            fm.target_cx = tcx;
+            fm.target_cz = tcz;
+            fm.row = 0;
         }
         if fm.row < world::FAR_N {
             let from = fm.row;
             let to = (fm.row + world::FAR_ROWS_PER_FRAME).min(world::FAR_N);
-            if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
+            if let Some(mut mesh) = meshes.get_mut(&fm.staging_mesh) {
                 world::fill_far_rows(
                     &world,
                     &atlas.atlas,
@@ -2164,11 +2212,26 @@ fn far_mesh_system(
             }
             fm.row = to;
             if fm.row >= world::FAR_N {
+                let (r0, r1) = far_hole_radii(world.view_dist);
+                let fog_rgb = clear.0.to_linear().to_f32_array();
+                if let Some(mut mesh) = meshes.get_mut(&fm.staging_mesh) {
+                    world::update_far_hole_alpha(
+                        &mut mesh,
+                        px,
+                        pz,
+                        r0,
+                        r1,
+                        [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
+                    );
+                }
+                let old_active = fm.active_mesh.clone();
+                fm.active_mesh = fm.staging_mesh.clone();
+                fm.staging_mesh = old_active;
+                mesh3d.0 = fm.active_mesh.clone();
                 fm.cx = fm.target_cx;
                 fm.cz = fm.target_cz;
-                if show {
-                    *vis = Visibility::Visible;
-                }
+                fm.hole_x = px;
+                fm.hole_z = pz;
             }
         }
         // 过渡带：CPU 顶点 alpha + 颜色向雾色渐隐 + 高度下沉渐变（JS 原版
@@ -2176,9 +2239,16 @@ fn far_mesh_system(
         let (r0, r1) = far_hole_radii(world.view_dist);
         let fog_rgb = clear.0.to_linear().to_f32_array();
         let moved = (px - fm.hole_x).abs() > 2.0 || (pz - fm.hole_z).abs() > 2.0;
-        if show && (moved || fm.row < world::FAR_N) {
-            if let Some(mut mesh) = meshes.get_mut(&fm.mesh) {
-                world::update_far_hole_alpha(&mut mesh, px, pz, r0, r1, [fog_rgb[0], fog_rgb[1], fog_rgb[2]]);
+        if show && moved {
+            if let Some(mut mesh) = meshes.get_mut(&fm.active_mesh) {
+                world::update_far_hole_alpha(
+                    &mut mesh,
+                    px,
+                    pz,
+                    r0,
+                    r1,
+                    [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
+                );
             }
             fm.hole_x = px;
             fm.hole_z = pz;
@@ -2188,9 +2258,13 @@ fn far_mesh_system(
         }
         let _ = e;
     } else if show {
-        let handle = meshes.add(world::build_far_mesh(&world, &atlas.atlas, tcx, tcz));
+        let active = world::build_far_mesh(&world, &atlas.atlas, tcx, tcz);
+        // Both allocations are retained and swapped forever, keeping mesh
+        // asset count constant across recenter operations.
+        let staging_handle = meshes.add(active.clone());
+        let active_handle = meshes.add(active);
         // 首帧即写入过渡带，避免生成后到玩家移动前远景直穿地表
-        if let Some(mut mesh) = meshes.get_mut(&handle) {
+        if let Some(mut mesh) = meshes.get_mut(&active_handle) {
             let (r0, r1) = far_hole_radii(world.view_dist);
             let fog_rgb = clear.0.to_linear().to_f32_array();
             world::update_far_hole_alpha(
@@ -2203,7 +2277,7 @@ fn far_mesh_system(
             );
         }
         commands.spawn((
-            Mesh3d(handle.clone()),
+            Mesh3d(active_handle.clone()),
             MeshMaterial3d(mats.far.clone()),
             Transform::default(),
             Visibility::Visible,
@@ -2214,7 +2288,8 @@ fn far_mesh_system(
                 row: world::FAR_N,
                 target_cx: tcx,
                 target_cz: tcz,
-                mesh: handle,
+                active_mesh: active_handle,
+                staging_mesh: staging_handle,
                 hole_x: px,
                 hole_z: pz,
             },

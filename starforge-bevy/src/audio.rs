@@ -7,6 +7,8 @@ use bevy::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::schedule::GameSet;
+
 /// 主音量（0..1），f32 位存储以支持原子读写。
 static MASTER_VOL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
 
@@ -297,4 +299,24 @@ pub fn play_loop_spatial(
             crate::InGame,
         ))
         .id()
+}
+
+/// Builds the SFX library once at startup from the settings volume.
+fn build_sfx(
+    mut commands: Commands,
+    mut assets: ResMut<Assets<AudioSource>>,
+    settings: Res<crate::save::Settings>,
+) {
+    commands.insert_resource(Sfx::build(&mut assets, settings.volume));
+}
+
+/// Audio plugin: SFX library + one-shot/loop cleanup + jetpack intro→loop.
+pub struct GameAudioPlugin;
+
+impl Plugin for GameAudioPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, build_sfx)
+            .add_systems(Update, limit_one_shots)
+            .add_systems(Update, advance_jet_sounds.before(GameSet::GroundPlayer));
+    }
 }

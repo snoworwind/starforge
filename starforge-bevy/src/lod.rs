@@ -471,7 +471,7 @@ pub fn hierarchical_lod_system(
     mode: Res<FlightMode>,
     player: Query<&Player>,
     world: Res<World>,
-    atlas: Res<crate::AtlasRes>,
+    atlas: Res<crate::textures::AtlasRes>,
     materials: Res<TerrainMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut runtime: ResMut<LodRuntime>,
@@ -608,6 +608,22 @@ pub fn hierarchical_lod_system(
     }
 }
 
+/// Distant terrain plugin: hierarchical LOD selection (legacy far mesh fallback runs
+/// in `GameSet::FarMesh`, after this set).
+pub struct LodPlugin;
+
+impl Plugin for LodPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LodRuntime>().add_systems(
+            Update,
+            hierarchical_lod_system
+                .in_set(crate::schedule::GameSet::FarLod)
+                .before(crate::schedule::GameSet::FarMesh)
+                .run_if(in_state(crate::schedule::GameState::Playing)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,3 +723,5 @@ mod tests {
         assert!(curved_drop(8_000.0) < curved_drop(2_000.0));
     }
 }
+
+// ---------- Plugin ----------

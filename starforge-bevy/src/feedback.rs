@@ -151,3 +151,15 @@ pub fn particle_system(
         transform.scale = Vec3::splat(1.0 + (1.0 - k) * 0.18);
     }
 }
+
+/// Effects plugin: cached burst assets + shard/flash lifetime step.
+pub struct FeedbackPlugin;
+
+impl Plugin for FeedbackPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FeedbackAssets>().add_systems(
+            Update,
+            particle_system.run_if(in_state(crate::schedule::GameState::Playing)),
+        );
+    }
+}

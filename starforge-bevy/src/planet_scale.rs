@@ -88,6 +88,14 @@ pub fn planet_direction_to_local(direction: Vec3) -> Vec2 {
     )
 }
 
+/// Leaf plugin: planetary scale contract (constants/functions only today; a
+/// future altitude-consistency check system can slot in here).
+pub struct PlanetScalePlugin;
+
+impl bevy::prelude::Plugin for PlanetScalePlugin {
+    fn build(&self, _app: &mut bevy::prelude::App) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

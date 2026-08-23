@@ -6,6 +6,7 @@ use crate::factory::{Machine, MachineKind, MachineState};
 use crate::inventory::Slot;
 use crate::player::Player;
 use crate::save::Settings;
+use crate::schedule::{GameSet, GameState, ground_mode, in_planet_mode};
 use crate::textures::{Atlas, IconBuf, item_icon};
 use crate::world::World;
 use bevy::prelude::*;
@@ -4340,5 +4341,151 @@ pub fn galaxy_map_system(
             name: data::galaxy_name(seed),
         });
         map.galaxy_sel = Some(seed);
+    }
+}
+
+// ---------- Plugin ----------
+
+/// egui 0.35 requires one contiguous begin_pass → draw → end_pass lifecycle per
+/// frame (as egui's own `run_ui` does). bevy_egui 0.41.1's split calls
+/// (begin_pass in PreUpdate, end_pass in PostUpdate) break egui 0.35's hit-test
+/// data chain (`prev_pass.widgets` stays empty, so no widget is ever hovered or
+/// clicked). Fix: switch the context to manual mode and run the whole pass
+/// inside Update, with all UI systems chained between the two.
+fn egui_manual_pass(mut q: Query<&mut bevy_egui::EguiContextSettings>) {
+    for mut s in &mut q {
+        if !s.run_manually {
+            s.run_manually = true;
+        }
+    }
+}
+
+fn egui_begin_pass(mut contexts: EguiContexts, mut input: Query<&mut bevy_egui::EguiInput>) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    if let Ok(mut inp) = input.single_mut() {
+        let raw = std::mem::take(&mut inp.0);
+        ctx.begin_pass(raw);
+    }
+}
+
+fn egui_end_pass(mut contexts: EguiContexts, mut full: Query<&mut bevy_egui::EguiFullOutput>) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let out = ctx.end_pass();
+    if let Ok(mut f) = full.single_mut() {
+        f.0 = Some(out);
+    }
+}
+
+/// Startup: build item icon meshes/materials plus the textured egui icon registry.
+fn build_icon_assets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut stdmats: ResMut<Assets<StandardMaterial>>,
+) {
+    let (icon_mats, mut icon_imgs) = build_icons(&mut meshes, &mut images, &mut stdmats);
+    // white fallback icon (1×1) — egui texture registration happens lazily in setup_egui
+    let white = images.add(Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        vec![255u8, 255, 255, 255],
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    ));
+    icon_imgs.map.insert("fallback".to_string(), white);
+    commands.insert_resource(icon_mats);
+    commands.insert_resource(icon_imgs);
+}
+
+/// egui/UI plugin: panel state machine, HUD, icons and the manual egui pass loop.
+pub struct UiPlugin;
+
+impl Plugin for UiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<SaveEvent>()
+            .add_message::<QuitToMenuEvent>()
+            .init_resource::<UiState>()
+            .init_resource::<Research>()
+            .init_resource::<EguiIcons>()
+            .init_resource::<ScanState>()
+            .init_resource::<MapState>()
+            .add_systems(Startup, build_icon_assets)
+            .add_systems(
+                PreUpdate,
+                egui_manual_pass
+                    .after(bevy_egui::EguiPreUpdateSet::InitContexts)
+                    .before(bevy_egui::EguiPreUpdateSet::BeginPass),
+            )
+            .add_systems(PostUpdate, setup_egui)
+            .add_systems(Update, egui_begin_pass.in_set(GameSet::UiBeginPass))
+            .add_systems(Update, egui_end_pass.in_set(GameSet::UiEndPass))
+            // playing 通用：面板热键 → 存档触发 → 失焦清键 → 大字消息 → 科技进度
+            .add_systems(
+                Update,
+                (
+                    (
+                        panel_hotkeys_system,
+                        quicksave_system,
+                        clear_input_on_focus_lost,
+                        big_message_system,
+                    )
+                        .chain()
+                        .in_set(GameSet::CommonUi),
+                    research_system.in_set(GameSet::CommonResearch),
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                scan_system
+                    .in_set(GameSet::LateScan)
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(ground_mode),
+            )
+            .add_systems(
+                Update,
+                (
+                    ghost_system
+                        .in_set(GameSet::HudGhostUi)
+                        .run_if(in_planet_mode),
+                    (hud_system, ship_label_system)
+                        .chain()
+                        .in_set(GameSet::HudMain),
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                (
+                    lighting_panel_system.in_set(GameSet::PanelLighting),
+                    inventory_panel_system.in_set(GameSet::PanelInventory),
+                    tech_panel_system.in_set(GameSet::PanelTech),
+                    machine_panel_system.in_set(GameSet::PanelMachine),
+                    pause_panel_system.in_set(GameSet::PanelPause),
+                    trade_panel_system.in_set(GameSet::PanelTrade),
+                    garage_panel_system.in_set(GameSet::PanelGarage),
+                    station_services_panel_system.in_set(GameSet::PanelStationServices),
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                (
+                    (buy_ship_panel_system, galaxy_map_system)
+                        .chain()
+                        .in_set(GameSet::SaveBuy),
+                    creative_panel_system.in_set(GameSet::SaveCreative),
+                    planet_map_system.in_set(GameSet::SaveMap),
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }

@@ -6,6 +6,7 @@ use crate::data::{self, ids};
 use crate::daynight;
 use crate::inventory::Slot;
 use crate::player::Player;
+use crate::schedule::{GameSet, GameState, ground_mode};
 use crate::world::World as GameWorld;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1807,6 +1808,29 @@ pub fn deserialize_machines(
         out.push((e, s.clone()));
     }
     out
+}
+
+// ---------- Plugin ----------
+
+/// Factory plugin: machine world systems and power accounting.
+pub struct FactoryPlugin;
+
+impl Plugin for FactoryPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Power>()
+            .init_resource::<TickAcc>()
+            .add_systems(
+                Update,
+                (
+                    factory_system.run_if(ground_mode),
+                    machine_sync_system.run_if(ground_mode),
+                    lumberbot_visual_system.run_if(ground_mode),
+                )
+                    .chain()
+                    .in_set(GameSet::LateFactory)
+                    .run_if(in_state(GameState::Playing)),
+            );
+    }
 }
 
 #[cfg(test)]

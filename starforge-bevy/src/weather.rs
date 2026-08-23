@@ -740,6 +740,32 @@ pub fn space_cloud_system(
     }
 }
 
+/// Weather/clouds plugin. Tuning is captured from settings in `main` and
+/// passed in (no resource lookup during plugin build).
+pub struct WeatherPlugin {
+    pub cloud: CloudTuning,
+}
+
+impl Plugin for WeatherPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(self.cloud)
+            .init_resource::<ClimateRuntime>()
+            .init_resource::<RainAudio>()
+            .add_systems(
+                Update,
+                (climate_system, rain_audio_system)
+                    .chain()
+                    .in_set(crate::schedule::GameSet::CommonWeather)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                // 与 JS 原版一致：云壳独立于地面天气链，逐一注册
+                space_cloud_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,6 +5,7 @@ use crate::audio;
 use crate::creatures::{Creature, spawn_drop};
 use crate::data::{self, CHARGE_DEFS, Difficulty, DropEntry, ids};
 use crate::inventory::{Inventory, Slot};
+use crate::schedule::{GameSet, GameState, ground_mode, in_planet_mode, walk_look_mode};
 use crate::ui::{Ghost, UiState};
 use crate::world::World;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
@@ -1103,5 +1104,147 @@ pub fn cursor_system(
             opts.visible = !want_lock;
             println!("CURSOR locked={} visible={}", want_lock, !want_lock);
         }
+    }
+}
+
+// ---------- Laser beam & interact prompt (former main.rs gameplay HUD) ----------
+
+#[derive(Component)]
+pub struct Beam;
+
+pub fn beam_system(
+    mut q: Query<(&mut Transform, &mut Visibility), With<Beam>>,
+    player: Query<&Player>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    world: Res<World>,
+    ui: Res<UiState>,
+) {
+    for (mut tf, mut vis) in &mut q {
+        let Ok(p) = player.single() else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        let firing = p.hot_idx == -1 && mouse.pressed(MouseButton::Left) && !ui.locked() && !p.dead;
+        if !firing {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let origin = p.eye();
+        let dir = p.look_dir();
+        let dist = world
+            .raycast(origin, dir, 22.0)
+            .map(|(_, _, d)| d)
+            .unwrap_or(22.0)
+            .max(0.3);
+        let mid = origin + dir * (dist * 0.5);
+        tf.translation = mid;
+        tf.rotation = Quat::from_rotation_arc(Vec3::Z, dir);
+        tf.scale = Vec3::new(1.0, 1.0, dist);
+        *vis = Visibility::Visible;
+    }
+}
+
+pub fn prompt_system(
+    mut ui_state: ResMut<UiState>,
+    player: Query<&Player>,
+    world: Res<World>,
+    machines: Query<&crate::factory::Machine>,
+    game: Res<crate::space::SpaceGame>,
+) {
+    if ui_state.locked() {
+        ui_state.prompt = None;
+        return;
+    }
+    let Ok(p) = player.single() else {
+        ui_state.prompt = None;
+        return;
+    };
+    // 飞船优先（与登船判定半径一致：JS 4.5）
+    if p.pos.distance(game.ship_pos) < 4.5 {
+        ui_state.prompt = Some("[E] 检查飞船 / 登船".into());
+        return;
+    }
+    let mut prompt = None;
+    if let Some((cell, _n, dist)) = world.raycast(p.eye(), p.look_dir(), 5.0)
+        && dist <= 5.0
+        && let Some(m) = machines.iter().find(|m| m.pos == cell)
+    {
+        prompt = Some(format!("[E] 打开{}", m.kind.label()));
+    }
+    ui_state.prompt = prompt;
+}
+
+// ---------- Enter/exit cursor handling ----------
+
+fn on_enter_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>) {
+    for mut opts in &mut windows {
+        opts.grab_mode = CursorGrabMode::Locked;
+        opts.visible = false;
+    }
+}
+
+/// 返回主菜单时释放鼠标（否则菜单里光标不可见/被锁）。
+fn on_exit_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>) {
+    for mut opts in &mut windows {
+        opts.grab_mode = CursorGrabMode::None;
+        opts.visible = true;
+    }
+}
+
+// ---------- Plugin ----------
+
+/// Player controller plugin: movement/combat/inventory systems plus the
+/// shared camera bootstrap and enter/exit cursor locking.
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PlayerCameraMode>()
+            .init_resource::<BreakQueue>()
+            .add_systems(OnEnter(GameState::Playing), on_enter_playing)
+            .add_systems(OnExit(GameState::Playing), on_exit_playing)
+            .add_systems(
+                Update,
+                (
+                    movement_system.run_if(ground_mode),
+                    collision_system.run_if(ground_mode),
+                    survival_system.run_if(ground_mode),
+                    mining_system.run_if(ground_mode),
+                    break_system.run_if(ground_mode),
+                    placement_system.run_if(ground_mode),
+                    hotbar_system.run_if(ground_mode),
+                )
+                    .chain()
+                    .in_set(GameSet::GroundPlayer)
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                (
+                    look_system.run_if(walk_look_mode),
+                    camera_toggle_system.run_if(in_planet_mode),
+                    camera_system.run_if(in_planet_mode),
+                )
+                    .chain()
+                    .in_set(GameSet::LateLook)
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                cursor_system
+                    .in_set(GameSet::LateSwitchCursor)
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                ((
+                    beam_system.run_if(in_planet_mode),
+                    prompt_system.run_if(in_planet_mode),
+                )
+                    .chain()
+                    .in_set(GameSet::HudGhostPlayer),)
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }

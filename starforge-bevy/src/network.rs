@@ -1018,6 +1018,30 @@ pub fn disconnect_system(mut net: ResMut<NetworkState>) {
     net.reset();
 }
 
+/// Multiplayer plugin: UDP host/client relay, remote avatars and the panel UI.
+pub struct NetworkPlugin;
+
+impl Plugin for NetworkPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<BlockChanged>()
+            .init_resource::<NetworkState>()
+            .add_systems(
+                Update,
+                network_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                network_ui_system
+                    .in_set(crate::schedule::GameSet::SaveNetworkUi)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                OnExit(crate::schedule::GameState::Playing),
+                disconnect_system,
+            );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1145,3 +1169,5 @@ mod tests {
         let _ = stop.send(());
     }
 }
+
+// ---------- Plugin ----------

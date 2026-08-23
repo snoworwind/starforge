@@ -3943,6 +3943,119 @@ pub fn serialize_ship_state(ship: &ShipState) -> save::ShipStateSave {
 
 // ---------- 测试 ----------
 
+// ---------- Plugin ----------
+
+/// Space plugin: flight modes, ship movement/warp, orbital scene and visitors.
+pub struct SpacePlugin;
+
+impl Plugin for SpacePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<LandPlanetEvent>()
+            .add_message::<WarpArriveEvent>()
+            .insert_resource(FlightMode::default())
+            .insert_resource(ShipState::default())
+            .insert_resource(ShipRecall::default())
+            .insert_resource(SpaceInput::default())
+            .insert_resource(FlightCamera::default())
+            .insert_resource(ShipCam::default())
+            .insert_resource(WarpAnim::default())
+            .insert_resource(WarpVisuals::default())
+            .insert_resource(VisitorRespawn::default())
+            .insert_resource(VisitorTraffic::default())
+            .init_resource::<ExternalAnimationLibrary>()
+            .add_systems(
+                Update,
+                (
+                    space_input_system,
+                    ship_interact_system,
+                    ship_recall_system,
+                    seated_system,
+                    atmo_land_trigger_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceInput)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            // 飞行系统（模式互斥，无需严格顺序；逐一注册规避 tuple 配置组合问题）
+            .add_systems(
+                Update,
+                atmo_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                atmoland_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                seated_camera_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                space_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                warp_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                warp_visual_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                space_scene_sync_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                sphere_fade_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                warp_arrive_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                flight_camera_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                ship_sync_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                ship_parked_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                bolt_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                space_drop_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                visitor_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                asteroid_spin_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                engine_loop_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                ship_cam_input_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                space_stars_follow_system.run_if(in_state(crate::schedule::GameState::Playing)),
+            );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

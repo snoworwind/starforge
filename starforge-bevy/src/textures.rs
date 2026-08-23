@@ -2,7 +2,27 @@
 //! All painters follow the exact spec in TEXTURES_SPEC.md (registration order = tile index).
 
 use crate::rng::Rng;
+use bevy::prelude::*;
 use std::collections::HashMap;
+
+/// The atlas structure (block tiles) shared by meshing + icons.
+#[derive(Resource)]
+pub struct AtlasRes {
+    pub atlas: Atlas,
+}
+
+/// Builds the block atlas once at startup (shared by meshing/streaming/UI).
+pub struct TexturePlugin;
+
+impl Plugin for TexturePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands.insert_resource(AtlasRes {
+                atlas: Atlas::build(),
+            });
+        });
+    }
+}
 
 pub type Pixel = [u8; 4];
 

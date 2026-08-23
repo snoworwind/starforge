@@ -4,6 +4,7 @@ use crate::data;
 use crate::inventory::Slot;
 use crate::player::Player;
 use crate::rng::Rng;
+use crate::schedule::{GameSet, GameState, creature_mode};
 use crate::ui::IconMaterials;
 use crate::world::World;
 use bevy::gltf::GltfAssetLabel;
@@ -1425,7 +1426,10 @@ pub fn sentinel_system(
         spawner.timer = 2.0;
         let mut nearest: Option<([i32; 3], f32)> = None;
         let (px, pz) = (ppos.x as i32, ppos.z as i32);
-        for s in world.g.structures_in_rect(px - 48, pz - 48, px + 48, pz + 48) {
+        for s in world
+            .g
+            .structures_in_rect(px - 48, pz - 48, px + 48, pz + 48)
+        {
             if let crate::world::Structure::Ruin { x, z, .. } = s {
                 let dx = ppos.x - x as f32;
                 let dz = ppos.z - z as f32;
@@ -1768,6 +1772,41 @@ pub fn slot(item: &str, n: i32) -> Slot {
     Slot {
         item: item.to_string(),
         n,
+    }
+}
+
+// ---------- Plugin ----------
+
+/// Creatures plugin: herd spawner/AI, drops, sentinel spawner and animation cache.
+pub struct CreaturesPlugin;
+
+impl Plugin for CreaturesPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<CreatureAnimationLibrary>()
+            .init_resource::<SentinelSpawner>()
+            .add_systems(
+                Update,
+                (
+                    creature_spawn_system.run_if(creature_mode),
+                    creature_system.run_if(creature_mode),
+                    creature_sound_system.run_if(creature_mode),
+                    creature_animation_system.run_if(creature_mode),
+                    sentinel_system.run_if(creature_mode),
+                )
+                    .chain()
+                    .in_set(GameSet::GroundCreatures)
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                (
+                    creature_despawn_system.run_if(creature_mode),
+                    drops_system.run_if(creature_mode),
+                )
+                    .chain()
+                    .in_set(GameSet::LateCreatures)
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }
 

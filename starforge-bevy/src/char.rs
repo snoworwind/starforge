@@ -171,3 +171,17 @@ pub fn npc_idle_system(time: Res<Time>, mut q: Query<(&mut NpcIdle, &mut Transfo
 pub fn random_appearance(seed: u32) -> Appearance {
     Appearance::random(seed)
 }
+
+/// NPC plugin: humanoid idle animation library for questers/villagers/traders.
+pub struct CharPlugin;
+
+impl Plugin for CharPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<NpcAnimationLibrary>().add_systems(
+            Update,
+            npc_idle_system
+                .in_set(crate::schedule::GameSet::CommonNpc)
+                .run_if(in_state(crate::schedule::GameState::Playing)),
+        );
+    }
+}

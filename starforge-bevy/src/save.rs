@@ -728,3 +728,13 @@ pub fn save_settings(s: &Settings) -> bool {
     sanitize_cloud_settings(&mut safe);
     write_json(&saves_dir().join("settings.json"), &safe)
 }
+
+/// Inserts the app-wide Settings resource (loaded once from disk by main
+/// and passed in through the plugin group config).
+pub struct SaveSettingsPlugin(pub Settings);
+
+impl Plugin for SaveSettingsPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(self.0.clone());
+    }
+}

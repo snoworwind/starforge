@@ -2235,3 +2235,11 @@ pub fn trade_sell_price(item: &str, market: &std::collections::HashMap<String, f
     let mult = market.get(item).copied().unwrap_or(1.0);
     ((base * mult * 0.8).round() as i32).max(1)
 }
+
+/// Leaf plugin: static block/item/recipe/tech data; plugin form keeps the
+/// 'everything is a plugin' contract uniform across the crate.
+pub struct DataPlugin;
+
+impl bevy::prelude::Plugin for DataPlugin {
+    fn build(&self, _app: &mut bevy::prelude::App) {}
+}

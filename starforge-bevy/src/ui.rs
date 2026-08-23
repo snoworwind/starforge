@@ -2901,7 +2901,7 @@ pub fn pause_panel_system(
                         )
                         .changed();
                 });
-                // 原生体积雾（FogVolume）全分辨率渲染，无低分辨率目标可选。
+                // 球壳云随主 HDR 目标分辨率渲染，无独立低分辨率目标。
                 ui.small("步数越高，体积雾 GPU 开销越大");
             });
             if cloud_changed {

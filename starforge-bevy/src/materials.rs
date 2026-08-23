@@ -1,17 +1,52 @@
-//! Terrain materials — native `StandardMaterial` instances (no custom WGSL).
+//! Terrain materials and the shared GPU curvature extension for distant land.
 //!
-//! The old port used an `ExtendedMaterial` with hand-written WGSL to apply
-//! planet curvature, water waves, scan pulses and edge fades on the GPU. This
-//! native version uses only Bevy's built-in PBR pipeline: face shading and
+//! The near terrain uses Bevy's built-in PBR pipeline: face shading and
 //! glow-block brightness are carried per-vertex through the mesh `COLOR`
 //! attribute (which Bevy's `StandardMaterial` multiplies into the base color
 //! automatically when the mesh layout contains it), and the remaining effects
 //! (far-mesh fade ring, altitude haze) are handled by CPU vertex alpha and
-//! Bevy's native `DistanceFog` respectively.
+//! Bevy's native `DistanceFog` respectively. Distant LOD and fallback meshes
+//! share a vertex extension so their planet curvature can follow continuously.
 
 use bevy::image::{ImageFilterMode, ImageSampler};
-use bevy::pbr::StandardMaterial;
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin, StandardMaterial};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType, SpecializedMeshPipelineError};
+use bevy::shader::ShaderRef;
+
+#[derive(ShaderType, Clone, Copy, Debug, Default)]
+pub struct PlanetCurveUniform {
+    pub center_radius: Vec4,
+    pub profile: Vec4,
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
+pub struct PlanetCurveExtension {
+    #[uniform(100)]
+    pub curve: PlanetCurveUniform,
+}
+
+impl MaterialExtension for PlanetCurveExtension {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/planet_curvature.wgsl".into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/planet_curvature_prepass.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        _descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        Ok(())
+    }
+}
+
+pub type CurvedTerrainMaterial = ExtendedMaterial<StandardMaterial, PlanetCurveExtension>;
 
 /// Shared terrain material handles (one instance per world so the atlas
 /// upload is shared by every chunk mesh).
@@ -21,16 +56,17 @@ pub struct TerrainMaterials {
     pub water: Handle<StandardMaterial>,
     /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）。
     /// Vertex alpha is rewritten on the CPU every frame for the far-hole ring.
-    pub far: Handle<StandardMaterial>,
+    pub far: Handle<CurvedTerrainMaterial>,
     /// Opaque, fully rough material for hierarchical LOD sections. Keeping it
     /// separate from `far` avoids transparent-section sorting seams.
-    pub lod: Handle<StandardMaterial>,
+    pub lod: Handle<CurvedTerrainMaterial>,
     pub atlas_image: Handle<Image>,
 }
 
 impl TerrainMaterials {
     pub fn build(
         materials: &mut Assets<StandardMaterial>,
+        curved_materials: &mut Assets<CurvedTerrainMaterial>,
         images: &mut Assets<Image>,
         atlas_bytes: Vec<u8>,
         water_tint: u32,
@@ -81,21 +117,27 @@ impl TerrainMaterials {
             metallic: 0.12,
             ..default()
         });
-        let far = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            double_sided: true,
-            cull_mode: None,
-            // 半透明：RGB 来自顶点色（地表色），alpha 由 CPU 每帧写入挖空环
-            alpha_mode: AlphaMode::Blend,
-            ..default()
+        let far = curved_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                double_sided: true,
+                cull_mode: None,
+                // RGB 来自顶点色，alpha 由 CPU 写入近景挖空环。
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            },
+            extension: PlanetCurveExtension::default(),
         });
-        let lod = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            double_sided: true,
-            cull_mode: None,
-            perceptual_roughness: 1.0,
-            reflectance: 0.1,
-            ..default()
+        let lod = curved_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                double_sided: true,
+                cull_mode: None,
+                perceptual_roughness: 1.0,
+                reflectance: 0.1,
+                ..default()
+            },
+            extension: PlanetCurveExtension::default(),
         });
         Self {
             solid,
@@ -103,6 +145,23 @@ impl TerrainMaterials {
             far,
             lod,
             atlas_image,
+        }
+    }
+}
+
+fn sync_planet_curve_materials(
+    frame: Res<crate::planet_scale::PlanetVisualFrame>,
+    handles: Option<Res<TerrainMaterials>>,
+    mut materials: ResMut<Assets<CurvedTerrainMaterial>>,
+) {
+    let Some(handles) = handles else { return };
+    let uniform = PlanetCurveUniform {
+        center_radius: frame.center.extend(frame.radius),
+        profile: Vec4::new(frame.datum_y, frame.flat_radius, frame.full_radius, 0.0),
+    };
+    for handle in [&handles.far, &handles.lod] {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.extension.curve = uniform;
         }
     }
 }
@@ -189,11 +248,18 @@ pub struct MaterialsPlugin;
 
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            lamp_pool_system
-                .in_set(crate::schedule::GameSet::CommonLamp)
-                .run_if(in_state(crate::schedule::GameState::Playing)),
-        );
+        app.add_plugins(MaterialPlugin::<CurvedTerrainMaterial>::default())
+            .add_systems(
+                Update,
+                lamp_pool_system
+                    .in_set(crate::schedule::GameSet::CommonLamp)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                PostUpdate,
+                sync_planet_curve_materials
+                    .after(crate::planet_scale::update_visual_frame)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }

@@ -2482,10 +2482,16 @@ fn stream_system(
     // During atmospheric flight the ship can cross several chunks per second.
     // Keep each streaming slice small so terrain generation never stalls the
     // render frame; walking keeps the larger budget for quick world loading.
-    let jump = (pcx - world.last_pcx)
+    // `last_pcx`/`last_pcz` start at i32::MAX as a "no previous position"
+    // sentinel (see World::new). A fresh planet swapped in by
+    // planet_switch_system resets them, so the first subtraction after a
+    // planet change can be huge and would overflow an i32 in debug builds.
+    // Compute the jump in i64 to keep the sentinel's "force full recenter"
+    // semantics while avoiding panic in debug / silent wraparound in release.
+    let jump = (pcx as i64 - world.last_pcx as i64)
         .abs()
-        .max((pcz - world.last_pcz).abs());
-    let fast_recenter = jump > world.view_dist + 2;
+        .max((pcz as i64 - world.last_pcz as i64).abs());
+    let fast_recenter = jump > (world.view_dist + 2) as i64;
     let atmo = matches!(*mode, FlightMode::Atmo | FlightMode::AtmoLand);
     let (normal_gen, normal_mesh) = if atmo { (4, 2) } else { (12, 6) };
     let (fast_gen, fast_mesh) = if atmo { (8, 2) } else { (48, 16) };
@@ -2563,7 +2569,7 @@ fn far_mesh_system(
         &mut FarMesh,
         &mut Mesh3d,
         &mut Visibility,
-        &mut MeshMaterial3d<StandardMaterial>,
+        &mut MeshMaterial3d<crate::materials::CurvedTerrainMaterial>,
     )>,
 ) {
     let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {

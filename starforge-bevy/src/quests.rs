@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::data::{self, QuestType};
 use crate::player::Player;
+use crate::schedule::{GameSet, GameState};
 
 /// 主线旗标（checkQuest 消费）。事件置位与立即检查解耦：event 旗标在事件里
 /// 先写入 flags，再由每帧的 quest_tick 检查推进。
@@ -348,7 +349,10 @@ pub fn village_side_quest_system(
     // 找最近村庄（无限地表：按格哈希查玩家附近区域）
     let mut best: Option<(i32, i32, i32, f32)> = None;
     let (px, pz) = (p.pos.x as i32, p.pos.z as i32);
-    for s in world.g.structures_in_rect(px - 32, pz - 32, px + 32, pz + 32) {
+    for s in world
+        .g
+        .structures_in_rect(px - 32, pz - 32, px + 32, pz + 32)
+    {
         if let crate::world::Structure::Village { x, z, h, .. } = s {
             let dx = p.pos.x - (x as f32 + 0.5);
             let dz = p.pos.z - (z as f32 + 0.5);
@@ -462,6 +466,29 @@ pub fn village_side_quest_system(
                 on_close: Some(DialogAction::SideReward),
             });
         }
+    }
+}
+
+/// Quests plugin: quest state machine + the game messages it owns.
+pub struct QuestsPlugin;
+
+impl Plugin for QuestsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Quests>()
+            .add_message::<PlacedEvent>()
+            .add_message::<FlagEvent>()
+            .add_message::<BigMessageEvent>()
+            .add_systems(
+                Update,
+                (
+                    quest_tick_system,
+                    side_quest_system,
+                    village_side_quest_system,
+                )
+                    .chain()
+                    .in_set(GameSet::CommonQuests)
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }
 

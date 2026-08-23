@@ -781,3 +781,28 @@ pub fn station_npc_spawn_system(
         }
     }
 }
+
+// ---------- Plugin ----------
+
+/// Station plugin: docking state machine, defense, visitors and ship switching.
+pub struct StationPlugin;
+
+impl Plugin for StationPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<ShipSwitchEvent>()
+            .init_resource::<StationState>()
+            .init_resource::<StationDefense>()
+            .add_systems(
+                Update,
+                (
+                    station_system,
+                    station_defense_system,
+                    station_npc_spawn_system,
+                    ship_switch_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateStation)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            );
+    }
+}

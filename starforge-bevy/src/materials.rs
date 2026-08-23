@@ -182,3 +182,18 @@ pub fn lamp_pool_system(
         }
     }
 }
+
+/// Terrain materials & lamp pool plugin: runtime light-follow system only;
+/// `TerrainMaterials` is rebuilt per world (biome water tint) by the game flow.
+pub struct MaterialsPlugin;
+
+impl Plugin for MaterialsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            lamp_pool_system
+                .in_set(crate::schedule::GameSet::CommonLamp)
+                .run_if(in_state(crate::schedule::GameState::Playing)),
+        );
+    }
+}

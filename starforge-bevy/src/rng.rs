@@ -194,6 +194,14 @@ pub fn batch_seed(seed: u32, x: i32, z: i32) -> u32 {
     (h ^ ((h as u32 >> 13) as i32)) as u32
 }
 
+/// Leaf plugin: RNG & noise are pure functions today; kept as a plugin so any
+/// future RNG-driven system has a home.
+pub struct RngPlugin;
+
+impl bevy::prelude::Plugin for RngPlugin {
+    fn build(&self, _app: &mut bevy::prelude::App) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

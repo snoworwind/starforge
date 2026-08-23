@@ -21,6 +21,7 @@ mod player;
 mod quests;
 mod rng;
 mod save;
+mod schedule;
 mod space;
 mod station;
 mod textures;
@@ -28,8 +29,6 @@ mod ui;
 mod weather;
 mod world;
 
-use bevy::camera::primitives::Aabb;
-use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
 use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -37,7 +36,6 @@ use bevy::light::{
     AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, VolumetricFog,
     atmosphere::ScatteringMedium,
 };
-use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{
     AtmosphereMode, AtmosphereSettings, ContactShadows, DistanceFog, FogFalloff,
     ScreenSpaceAmbientOcclusion,
@@ -47,14 +45,15 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PresentMode};
 use bevy_egui::{EguiContexts, EguiPlugin, egui};
 use materials::TerrainMaterials;
-use player::Player;
-use space::{FlightCamera, FlightMode, ShipAsset, ShipRecall, ShipState, SpaceGame, SpaceInput};
+use player::{Beam, Player};
+pub use schedule::{
+    GameSet, GameState, InGame, creature_mode, ground_mode, ground_scene_mode, in_planet_mode,
+    walk_look_mode,
+};
+use space::{FlightCamera, FlightMode, ShipAsset, ShipState, SpaceGame, SpaceInput};
+use textures::AtlasRes;
 use ui::{Research, UiState};
-use world::{VoxelMesh, World};
-
-/// Everything spawned in-game gets this marker (cleared when returning to menu).
-#[derive(Component)]
-pub struct InGame;
+use world::{ChunkMesh, World};
 
 #[inline]
 fn finite_clamp(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
@@ -74,34 +73,6 @@ fn safe_player_position(pos: [f32; 3]) -> Option<Vec3> {
         pos[1].clamp(-256.0, planet_scale::PLANET_SCALE.atmosphere_top + 256.0),
         pos[2].clamp(-1_000_000.0, 1_000_000.0),
     ))
-}
-
-/// Chunk terrain meshes (cleared on planet switch).
-#[derive(Component)]
-pub struct ChunkMesh {
-    /// 区块坐标用于流式卸载。
-    pub cx: i32,
-    pub cz: i32,
-    /// Prevents one frame of the previous planet leaking through while its
-    /// chunk entities are waiting for deferred despawn.
-    pub world_seed: u32,
-}
-
-#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-enum GameState {
-    #[default]
-    Menu,
-    Loading,
-    Playing,
-}
-
-#[derive(Component)]
-struct Beam;
-
-/// The atlas structure (block tiles) shared by meshing + icons.
-#[derive(Resource)]
-struct AtlasRes {
-    atlas: textures::Atlas,
 }
 
 /// What the user asked the Loading state to build.
@@ -222,6 +193,109 @@ fn smoke_boot(req: Option<Res<WorldRequest>>, mut next: ResMut<NextState<GameSta
     }
 }
 
+// ---------- Plugin composition ----------
+
+/// 全部游戏模块插件的装配顺序（依赖序）。
+pub struct StarForgePlugins {
+    settings: save::Settings,
+    cloud_tuning: weather::CloudTuning,
+    lighting_tuning: daynight::LightingTuning,
+}
+
+impl StarForgePlugins {
+    pub fn new(
+        settings: save::Settings,
+        cloud_tuning: weather::CloudTuning,
+        lighting_tuning: daynight::LightingTuning,
+    ) -> Self {
+        Self {
+            settings,
+            cloud_tuning,
+            lighting_tuning,
+        }
+    }
+}
+
+impl PluginGroup for StarForgePlugins {
+    fn build(self) -> bevy::app::PluginGroupBuilder {
+        use bevy::app::PluginGroupBuilder;
+        PluginGroupBuilder::start::<Self>()
+            .add(rng::RngPlugin)
+            .add(data::DataPlugin)
+            .add(planet_scale::PlanetScalePlugin)
+            .add(inventory::InventoryPlugin)
+            .add(save::SaveSettingsPlugin(self.settings))
+            .add(audio::GameAudioPlugin)
+            .add(textures::TexturePlugin)
+            .add(feedback::FeedbackPlugin)
+            .add(ui::UiPlugin)
+            .add(quests::QuestsPlugin)
+            .add(char::CharPlugin)
+            .add(materials::MaterialsPlugin)
+            .add(daynight::DayNightPlugin {
+                lighting: self.lighting_tuning,
+            })
+            .add(weather::WeatherPlugin {
+                cloud: self.cloud_tuning,
+            })
+            .add(player::PlayerPlugin)
+            .add(creatures::CreaturesPlugin)
+            .add(factory::FactoryPlugin)
+            .add(station::StationPlugin)
+            .add(space::SpacePlugin)
+            .add(network::NetworkPlugin)
+            .add(lod::LodPlugin)
+            .add(world::WorldPlugin)
+    }
+}
+
+/// 游戏流程插件：状态机、菜单/加载、进驻清理与调度契约配置。
+pub struct GameFlowPlugin;
+
+impl Plugin for GameFlowPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_state::<GameState>()
+            .add_systems(Startup, startup)
+            .add_systems(OnEnter(GameState::Loading), on_enter_loading)
+            .add_systems(OnExit(GameState::Loading), on_exit_loading)
+            .add_systems(
+                Update,
+                (
+                    (smoke_boot, menu_system)
+                        .chain()
+                        .in_set(GameSet::Menu)
+                        .run_if(in_state(GameState::Menu)),
+                    loading_system
+                        .in_set(GameSet::Loading)
+                        .run_if(in_state(GameState::Loading)),
+                ),
+            )
+            // playing 后段：星球切换/可见性（天空同步归 daynight 插件）
+            .add_systems(
+                Update,
+                ((planet_switch_system, ground_scene_visibility_system)
+                    .chain()
+                    .in_set(GameSet::LateSwitchFlow)
+                    .run_if(in_state(GameState::Playing)),),
+            )
+            // playing 保存尾链（map → save → quit → smoke）
+            .add_systems(
+                Update,
+                (
+                    (save_settings_system, save_system)
+                        .chain()
+                        .in_set(GameSet::SaveWrite),
+                    (quit_to_menu_system, smoke_exit)
+                        .chain()
+                        .in_set(GameSet::SaveQuit),
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Playing)),
+            );
+        crate::schedule::configure(app);
+    }
+}
+
 fn main() {
     // Silence the expected egui first-frame font bootstrap panic (caught & retried
     // by ui::egui_fonts_ready); keep printing any other panic.
@@ -281,286 +355,12 @@ fn main() {
                 }),
         )
         .add_plugins(EguiPlugin::default())
-        .insert_resource(settings)
-        .insert_resource(cloud_tuning)
-        .insert_resource(lighting_tuning)
-        .insert_resource(UiState::default())
-        .insert_resource(Research::default())
-        .insert_resource(ui::EguiIcons::default())
-        .insert_resource(ui::ScanState::default())
-        .insert_resource(ui::MapState::default())
-        .init_state::<GameState>()
-        .add_message::<ui::SaveEvent>()
-        .add_message::<ui::QuitToMenuEvent>()
-        .add_message::<quests::PlacedEvent>()
-        .add_message::<quests::FlagEvent>()
-        .add_message::<quests::BigMessageEvent>()
-        .add_message::<space::LandPlanetEvent>()
-        .add_message::<space::WarpArriveEvent>()
-        .add_message::<station::ShipSwitchEvent>()
-        .add_message::<network::BlockChanged>()
-        .insert_resource(FlightMode::default())
-        .insert_resource(ShipState::default())
-        .insert_resource(ShipRecall::default())
-        .insert_resource(SpaceInput::default())
-        .insert_resource(FlightCamera::default())
-        .insert_resource(space::ShipCam::default())
-        .init_resource::<lod::LodRuntime>()
-        .insert_resource(player::PlayerCameraMode::default())
-        .insert_resource(feedback::FeedbackAssets::default())
-        .insert_resource(station::StationState::default())
-        .insert_resource(station::StationDefense::default())
-        .insert_resource(quests::Quests::default())
-        .insert_resource(factory::Power::default())
-        .insert_resource(factory::TickAcc::default())
-        .insert_resource(space::WarpAnim::default())
-        .insert_resource(space::WarpVisuals::default())
-        .insert_resource(space::VisitorRespawn::default())
-        .insert_resource(space::VisitorTraffic::default())
-        .init_resource::<space::ExternalAnimationLibrary>()
-        .insert_resource(weather::ClimateRuntime::default())
-        .insert_resource(weather::RainAudio::default())
-        .insert_resource(network::NetworkState::default())
-        .insert_resource(creatures::SentinelSpawner::default())
-        .init_resource::<char::NpcAnimationLibrary>()
-        .init_resource::<creatures::CreatureAnimationLibrary>()
-        .add_systems(Startup, startup)
-        .add_systems(
-            PreUpdate,
-            egui_manual_pass
-                .after(bevy_egui::EguiPreUpdateSet::InitContexts)
-                .before(bevy_egui::EguiPreUpdateSet::BeginPass),
-        )
-        .add_systems(PostUpdate, ui::setup_egui)
-        .add_systems(Update, audio::limit_one_shots)
-        .add_systems(
-            Update,
-            audio::advance_jet_sounds.before(player::movement_system),
-        )
-        .add_systems(OnEnter(GameState::Loading), on_enter_loading)
-        .add_systems(OnExit(GameState::Loading), on_exit_loading)
-        .add_systems(OnEnter(GameState::Playing), on_enter_playing)
-        .add_systems(
-            OnExit(GameState::Playing),
-            (on_exit_playing, network::disconnect_system),
-        )
-        // menu
-        .add_systems(
-            Update,
-            (
-                egui_begin_pass,
-                (
-                    (smoke_boot, menu_system)
-                        .chain()
-                        .run_if(in_state(GameState::Menu)),
-                    // loading
-                    loading_system.run_if(in_state(GameState::Loading)),
-                    // playing
-                    (
-                        (
-                            (
-                                // 通用
-                                ui::panel_hotkeys_system,
-                                ui::quicksave_system,
-                                ui::clear_input_on_focus_lost,
-                                ui::big_message_system,
-                                quests::quest_tick_system,
-                                quests::side_quest_system,
-                                quests::village_side_quest_system,
-                                char::npc_idle_system,
-                                ui::research_system,
-                                materials::lamp_pool_system,
-                                daynight::daynight_system,
-                                weather::climate_system,
-                                weather::rain_audio_system,
-                            )
-                                .chain(),
-                            (
-                                // 地面
-                                player::movement_system.run_if(ground_mode),
-                                player::collision_system.run_if(ground_mode),
-                                player::survival_system.run_if(ground_mode),
-                                player::mining_system.run_if(ground_mode),
-                                player::break_system.run_if(ground_mode),
-                                player::placement_system.run_if(ground_mode),
-                                player::hotbar_system.run_if(ground_mode),
-                                stream_system.run_if(ground_scene_mode),
-                                creatures::creature_spawn_system.run_if(creature_mode),
-                                creatures::creature_system.run_if(creature_mode),
-                                creatures::creature_sound_system.run_if(creature_mode),
-                                creatures::creature_animation_system.run_if(creature_mode),
-                                creatures::sentinel_system.run_if(creature_mode),
-                            )
-                                .chain(),
-                            (
-                                creatures::creature_despawn_system.run_if(creature_mode),
-                                creatures::drops_system.run_if(creature_mode),
-                                factory::factory_system.run_if(ground_mode),
-                                factory::machine_sync_system.run_if(ground_mode),
-                                factory::lumberbot_visual_system.run_if(ground_mode),
-                                ui::scan_system.run_if(ground_mode),
-                                // 视角
-                                player::look_system.run_if(walk_look_mode),
-                                player::camera_toggle_system.run_if(in_planet_mode),
-                                player::camera_system.run_if(in_planet_mode),
-                                // 太空
-                                space::space_input_system,
-                                space::ship_interact_system,
-                                space::ship_recall_system,
-                                space::seated_system,
-                                space::atmo_land_trigger_system,
-                            )
-                                .chain(),
-                            (
-                                station::station_system,
-                                station::station_defense_system,
-                                station::station_npc_spawn_system,
-                                station::ship_switch_system,
-                                planet_switch_system,
-                                space_sky_sync_system,
-                                ground_scene_visibility_system,
-                                // 光标管理：所有模式（含太空/空间站）都按面板状态锁定/解锁
-                                player::cursor_system,
-                            )
-                                .chain(),
-                        )
-                            .chain(),
-                        (
-                            (
-                                ui::ghost_system.run_if(in_planet_mode),
-                                beam_system.run_if(in_planet_mode),
-                                prompt_system.run_if(in_planet_mode),
-                                (ui::hud_system, ui::ship_label_system).chain(),
-                            )
-                                .chain(),
-                            (
-                                ui::lighting_panel_system,
-                                ui::inventory_panel_system,
-                                ui::tech_panel_system,
-                                ui::machine_panel_system,
-                                ui::pause_panel_system,
-                                ui::trade_panel_system,
-                                ui::garage_panel_system,
-                                ui::station_services_panel_system,
-                            )
-                                .chain(),
-                            (
-                                (ui::buy_ship_panel_system, ui::galaxy_map_system).chain(),
-                                (network::network_ui_system, ui::creative_panel_system).chain(),
-                                (
-                                    ui::planet_map_system,
-                                    (save_settings_system, save_system).chain(),
-                                )
-                                    .chain(),
-                                (quit_to_menu_system, smoke_exit).chain(),
-                            )
-                                .chain(),
-                        )
-                            .chain(),
-                    )
-                        .chain()
-                        .run_if(in_state(GameState::Playing)),
-                ),
-                egui_end_pass,
-            )
-                .chain(),
-        )
-        // 飞行系统（模式互斥，无需严格顺序；逐一注册规避 tuple 配置组合问题）
-        .add_systems(
-            Update,
-            space::atmo_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::atmoland_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::seated_camera_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::space_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::warp_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::warp_visual_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::space_scene_sync_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::sphere_fade_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            weather::space_cloud_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::warp_arrive_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::flight_camera_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::ship_sync_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::ship_parked_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::bolt_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::space_drop_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::visitor_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::asteroid_spin_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::engine_loop_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::ship_cam_input_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            space::space_stars_follow_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            lod::hierarchical_lod_system
-                .before(far_mesh_system)
-                .run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(Update, far_mesh_system.run_if(in_state(GameState::Playing)))
-        .add_systems(
-            Update,
-            feedback::particle_system.run_if(in_state(GameState::Playing)),
-        )
-        .add_systems(
-            Update,
-            network::network_system.run_if(in_state(GameState::Playing)),
-        );
+        .add_plugins(StarForgePlugins::new(
+            settings,
+            cloud_tuning,
+            lighting_tuning,
+        ))
+        .add_plugins(GameFlowPlugin);
     if smoke || play {
         // 自动建世界进入游戏（--play 不退出，供交互验证；--smoke 额外自测退出）
         app.insert_resource(WorldRequest {
@@ -577,28 +377,6 @@ fn main() {
         app.insert_resource(SmokeFlag { frames: 0 });
     }
     app.run();
-}
-
-fn ground_mode(mode: Res<FlightMode>) -> bool {
-    *mode == FlightMode::Planet
-}
-
-/// 只要地表场景仍可见，生物就继续运行完整 AI；飞船飞过大气层时不能
-/// 只播放骨骼动画而冻结位置。
-fn creature_mode(mode: Res<FlightMode>) -> bool {
-    mode.ground_scene()
-}
-
-fn in_planet_mode(mode: Res<FlightMode>) -> bool {
-    *mode == FlightMode::Planet || *mode == FlightMode::Seated
-}
-
-fn ground_scene_mode(mode: Res<FlightMode>) -> bool {
-    mode.ground_scene()
-}
-
-fn walk_look_mode(mode: Res<FlightMode>) -> bool {
-    *mode == FlightMode::Planet || *mode == FlightMode::Seated || *mode == FlightMode::Station
 }
 
 /// 发布版资源根目录固定在可执行文件旁，避免受启动时当前工作目录或
@@ -621,10 +399,7 @@ fn executable_asset_dir() -> String {
 
 fn startup(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut stdmats: ResMut<Assets<StandardMaterial>>,
-    mut audio_assets: ResMut<Assets<bevy::audio::AudioSource>>,
     settings: Res<save::Settings>,
 ) {
     // Self-extract the model assets next to the executable so the
@@ -659,26 +434,6 @@ fn startup(
             }
         }
     }
-    let atlas = textures::Atlas::build();
-    commands.insert_resource(AtlasRes { atlas });
-    let (icon_mats, mut icon_imgs) = ui::build_icons(&mut meshes, &mut images, &mut stdmats);
-    // white fallback icon (1×1) — egui texture registration happens lazily in ui::setup_egui
-    let white = images.add(Image::new(
-        bevy::render::render_resource::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        bevy::render::render_resource::TextureDimension::D2,
-        vec![255u8, 255, 255, 255],
-        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD,
-    ));
-    icon_imgs.map.insert("fallback".to_string(), white);
-    commands.insert_resource(icon_mats);
-    commands.insert_resource(icon_imgs);
-    commands.insert_resource(audio::Sfx::build(&mut audio_assets, settings.volume));
-
     // persistent camera: created now so bevy_egui's primary context exists in menus too.
     // The player camera system drives it during Playing.
     let cam = commands
@@ -832,36 +587,6 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 }
 
 // ---------- Menu ----------
-
-/// egui 0.35 requires one contiguous begin_pass → draw → end_pass lifecycle per
-/// frame (as egui's own `run_ui` does). bevy_egui 0.41.1's split calls
-/// (begin_pass in PreUpdate, end_pass in PostUpdate) break egui 0.35's hit-test
-/// data chain (`prev_pass.widgets` stays empty, so no widget is ever hovered or
-/// clicked). Fix: switch the context to manual mode and run the whole pass
-/// inside Update, with all UI systems chained between the two.
-fn egui_manual_pass(mut q: Query<&mut bevy_egui::EguiContextSettings>) {
-    for mut s in &mut q {
-        if !s.run_manually {
-            s.run_manually = true;
-        }
-    }
-}
-
-fn egui_begin_pass(mut contexts: EguiContexts, mut input: Query<&mut bevy_egui::EguiInput>) {
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-    if let Ok(mut inp) = input.single_mut() {
-        let raw = std::mem::take(&mut inp.0);
-        ctx.begin_pass(raw);
-    }
-}
-
-fn egui_end_pass(mut contexts: EguiContexts, mut full: Query<&mut bevy_egui::EguiFullOutput>) {
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-    let out = ctx.end_pass();
-    if let Ok(mut f) = full.single_mut() {
-        f.0 = Some(out);
-    }
-}
 
 #[derive(Default, PartialEq)]
 enum MenuScreen {
@@ -1367,7 +1092,7 @@ fn loading_system(
     for _ in 0..8 {
         let pcx = world::cf(ls.spawn.x);
         let pcz = world::cf(ls.spawn.z);
-        done = stream_world_step(
+        done = world::stream_world_step(
             &mut ls.world,
             pcx,
             pcz,
@@ -1840,465 +1565,6 @@ fn prompt_system(
     ui_state.prompt = prompt;
 }
 
-// ---------- Streaming ----------
-
-fn stream_world_step(
-    world: &mut World,
-    pcx: i32,
-    pcz: i32,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    atlas: &textures::Atlas,
-    mats: &TerrainMaterials,
-    gen_budget: usize,
-    mesh_budget: usize,
-) -> bool {
-    let mut gen_left = gen_budget;
-    let mut mesh_left = mesh_budget;
-    // generation rings (inside-out, Chebyshev)：预生成到 view+2，
-    // 玩家跨区块时新视距环的数据已就绪，只差网格化（不会出现"穿越区块→远处大量区块重新生成"）
-    'outer: for r in 0..=world.view_dist + 2 {
-        if gen_left == 0 {
-            break;
-        }
-        for cz in pcz - r..=pcz + r {
-            for cx in pcx - r..=pcx + r {
-                if World::cheb(cx, cz, pcx, pcz) != r {
-                    continue;
-                }
-                if world.get_chunk(cx, cz).is_none() {
-                    world.ensure_chunk(cx, cz);
-                    gen_left -= 1;
-                    if gen_left == 0 {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
-    // meshing rings (neighbors must exist)：网格化到 view+1（含预载环）——
-    // 玩家跨区块后新视距环立即有网格，地平线不再短暂只剩粗糙远景
-    'mesh_outer: for r in 0..=world.view_dist + 1 {
-        if mesh_left == 0 {
-            break;
-        }
-        for cz in pcz - r..=pcz + r {
-            for cx in pcx - r..=pcx + r {
-                if World::cheb(cx, cz, pcx, pcz) != r {
-                    continue;
-                }
-                let key = world::ckey(cx, cz);
-                let Some(c) = world.chunks.get(&key) else {
-                    continue;
-                };
-                if (c.mesh.is_some() || c.water_mesh.is_some()) && !c.dirty {
-                    continue;
-                }
-                let neighbors_exist = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
-                    .iter()
-                    .all(|(nx, nz)| world.get_chunk(*nx, *nz).is_some());
-                if !neighbors_exist {
-                    continue;
-                }
-                let old_solid = c.mesh;
-                let old_water = c.water_mesh;
-                let (solid_m, water_m) = world::build_chunk_meshes(world, c, atlas);
-                // Conservative per-chunk AABB: static meshes with the full
-                // height range, so frustum culling never drops a chunk that
-                // is actually visible.
-                let y_min = -160.0 - 8.0;
-                let solid_entity = upsert_chunk_mesh(
-                    commands,
-                    meshes,
-                    old_solid,
-                    cx,
-                    cz,
-                    world.seed,
-                    solid_m,
-                    mats.solid.clone(),
-                    y_min,
-                );
-                let water_entity = upsert_chunk_mesh(
-                    commands,
-                    meshes,
-                    old_water,
-                    cx,
-                    cz,
-                    world.seed,
-                    water_m,
-                    mats.water.clone(),
-                    y_min,
-                );
-                let c = world.chunks.get_mut(&key).unwrap();
-                c.mesh = solid_entity;
-                c.water_mesh = water_entity;
-                c.dirty = false;
-                mesh_left -= 1;
-                if mesh_left == 0 {
-                    break 'mesh_outer;
-                }
-            }
-        }
-    }
-    // unload far meshes (keep data)
-    for c in world.chunks.values_mut() {
-        if (c.mesh.is_some() || c.water_mesh.is_some())
-            && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 3
-        {
-            if let Some(e) = c.mesh.take() {
-                commands.entity(e).despawn();
-            }
-            if let Some(e) = c.water_mesh.take() {
-                commands.entity(e).despawn();
-            }
-            c.dirty = true;
-        }
-    }
-    // data eviction
-    world.chunks.retain(|_, c| {
-        !(c.mesh.is_none()
-            && c.water_mesh.is_none()
-            && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 9
-            && !c.modified)
-    });
-    // completeness check: every chunk in view distance generated & meshed
-
-    (0..=world.view_dist).all(|r| {
-        let mut ok = true;
-        for cz in pcz - r..=pcz + r {
-            for cx in pcx - r..=pcx + r {
-                if World::cheb(cx, cz, pcx, pcz) != r {
-                    continue;
-                }
-                match world.get_chunk(cx, cz) {
-                    Some(c) => {
-                        if (c.mesh.is_none() && c.water_mesh.is_none()) || c.dirty {
-                            ok = false;
-                        }
-                    }
-                    None => ok = false,
-                }
-            }
-        }
-        ok
-    })
-}
-
-/// Replace a chunk's mesh handle in place when possible. Keeping the entity
-/// alive avoids an extraction frame in which the old entity has been removed
-/// but the replacement has not reached the renderer yet.
-fn upsert_chunk_mesh(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    existing: Option<Entity>,
-    cx: i32,
-    cz: i32,
-    world_seed: u32,
-    vm: Option<VoxelMesh>,
-    mat: Handle<StandardMaterial>,
-    y_min: f32,
-) -> Option<Entity> {
-    let Some(vm) = vm else {
-        if let Some(entity) = existing {
-            commands.entity(entity).despawn();
-        }
-        return None;
-    };
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vm.positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vm.normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vm.uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vm.colors);
-    mesh.insert_indices(Indices::U32(vm.indices));
-    let handle = meshes.add(mesh);
-    let aabb = Aabb::from_min_max(
-        Vec3::new(cx as f32 * 16.0, y_min, cz as f32 * 16.0),
-        Vec3::new(cx as f32 * 16.0 + 16.0, 130.0, cz as f32 * 16.0 + 16.0),
-    );
-    if let Some(entity) = existing {
-        commands.entity(entity).insert((
-            Mesh3d(handle),
-            MeshMaterial3d(mat),
-            aabb,
-            NoAutoAabb,
-            ChunkMesh { cx, cz, world_seed },
-        ));
-        Some(entity)
-    } else {
-        Some(
-            commands
-                .spawn((
-                    Mesh3d(handle),
-                    MeshMaterial3d(mat),
-                    // 顶点已是绝对世界坐标（build_chunk_meshes 以 x0+lx / z0+lz 生成），
-                    // 不能再叠加区块原点平移，否则每块地形被双倍偏移、块间出现大空洞。
-                    Transform::default(),
-                    aabb,
-                    NoAutoAabb,
-                    Visibility::default(),
-                    ChunkMesh { cx, cz, world_seed },
-                    InGame,
-                ))
-                .id(),
-        )
-    }
-}
-
-fn stream_system(
-    mut world: ResMut<World>,
-    player: Query<&Player>,
-    ship: Res<ShipState>,
-    mode: Res<FlightMode>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    atlas: Res<AtlasRes>,
-    mats: Res<TerrainMaterials>,
-) {
-    let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
-        (ship.pos.x, ship.pos.z)
-    } else {
-        match player.single() {
-            Ok(p) => (p.pos.x, p.pos.z),
-            Err(_) => return,
-        }
-    };
-    let pcx = world::cf(px);
-    let pcz = world::cf(pz);
-    if !world.stream_dirty && pcx == world.last_pcx && pcz == world.last_pcz {
-        return;
-    }
-    // During atmospheric flight the ship can cross several chunks per second.
-    // Keep each streaming slice small so terrain generation never stalls the
-    // render frame; walking keeps the larger budget for quick world loading.
-    let jump = (pcx - world.last_pcx)
-        .abs()
-        .max((pcz - world.last_pcz).abs());
-    let fast_recenter = jump > world.view_dist + 2;
-    let atmo = matches!(*mode, FlightMode::Atmo | FlightMode::AtmoLand);
-    let (normal_gen, normal_mesh) = if atmo { (4, 2) } else { (12, 6) };
-    let (fast_gen, fast_mesh) = if atmo { (8, 2) } else { (48, 16) };
-    stream_world_step(
-        &mut world,
-        pcx,
-        pcz,
-        &mut commands,
-        &mut meshes,
-        &atlas.atlas,
-        &mats,
-        if fast_recenter { fast_gen } else { normal_gen },
-        if fast_recenter {
-            fast_mesh
-        } else {
-            normal_mesh
-        },
-    );
-    world.last_pcx = pcx;
-    world.last_pcz = pcz;
-    // 空闲门控：只统计网格化范围内（≤ view+1）的脏块——view+2 纯数据预载环保持脏状态
-    // 但不唤醒扫描（旧实现统计到 view+3，预载环永远脏 → 每帧全环扫描永不空闲）
-    world.stream_dirty = world
-        .chunks
-        .values()
-        .any(|c| c.dirty && World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 1);
-}
-
-// ---------- 远景模拟地形（JS farMesh 移植） ----------
-
-/// 远景地形状态：±1536 格低细节高度场，跟随玩家分帧重建；
-/// 缺失时高空/远望的地表在视距边缘戛然而止，流式区块边缘完全暴露（巨大闪动/残影）。
-#[derive(Component)]
-struct FarMesh {
-    /// 已完成的网格中心（世界坐标，按 FAR_SNAP 对齐）
-    cx: f32,
-    cz: f32,
-    seed: u32,
-    /// 待填充的下一行（< FAR_N 表示正在后台重建 staging_mesh）
-    row: usize,
-    target_cx: f32,
-    target_cz: f32,
-    /// 当前实体正在显示的完整网格。
-    active_mesh: Handle<Mesh>,
-    /// 后台逐行重建的网格；完成后与 active_mesh 原子交换。
-    staging_mesh: Handle<Mesh>,
-    /// 上次写入挖空环的玩家位置（用于节流 CPU 顶点 alpha 更新）
-    hole_x: f32,
-    hole_z: f32,
-}
-
-/// 远景挖空环（JS farHoleU 同口径）：玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
-/// 过渡带从 JS 的 90 格加宽到 ~120 格（r0 下限也从 56 降到 30），
-/// 让远景淡入更平缓、更不易察觉。
-fn far_hole_radii(view_dist: i32) -> (f32, f32) {
-    let r1 = view_dist as f32 * 16.0 - 8.0;
-    let r0 = (r1 - 120.0).max(30.0).min(r1 - 20.0);
-    (r0, r1)
-}
-
-fn far_mesh_system(
-    mut commands: Commands,
-    world: Res<World>,
-    player: Query<&Player>,
-    ship: Res<ShipState>,
-    mode: Res<FlightMode>,
-    settings: Res<save::Settings>,
-    lod_runtime: Res<lod::LodRuntime>,
-    clear: Res<ClearColor>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mats: Res<TerrainMaterials>,
-    atlas: Res<AtlasRes>,
-    mut far_q: Query<(
-        Entity,
-        &mut FarMesh,
-        &mut Mesh3d,
-        &mut Visibility,
-        &mut MeshMaterial3d<StandardMaterial>,
-    )>,
-) {
-    let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
-        (ship.pos.x, ship.pos.z)
-    } else {
-        match player.single() {
-            Ok(p) => (p.pos.x, p.pos.z),
-            Err(_) => return,
-        }
-    };
-    let show = mode.ground_scene()
-        && (settings.lod_mode == save::LodMode::Legacy || !lod_runtime.coverage_ready);
-    let tcx = (px / world::FAR_SNAP).round() * world::FAR_SNAP;
-    let tcz = (pz / world::FAR_SNAP).round() * world::FAR_SNAP;
-    if let Ok((e, mut fm, mut mesh3d, mut vis, mut mmat)) = far_q.single_mut() {
-        // Rebuilding happens in a second mesh. The last complete mesh remains
-        // visible until the replacement is ready, so crossing a FAR_SNAP
-        // boundary can no longer expose the clear color for seven frames.
-        *vis = if show {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        // 换球/读档：世界种子变化 → 整体重刷
-        if fm.seed != world.seed {
-            fm.seed = world.seed;
-            fm.target_cx = tcx;
-            fm.target_cz = tcz;
-            fm.row = 0;
-        }
-        if fm.row >= world::FAR_N && (tcx != fm.cx || tcz != fm.cz) {
-            fm.target_cx = tcx;
-            fm.target_cz = tcz;
-            fm.row = 0;
-        } else if fm.row < world::FAR_N && (tcx != fm.target_cx || tcz != fm.target_cz) {
-            // 高速移动可能在七帧重建完成前再次跨格。丢弃尚未显示的
-            // staging 内容，从最新中心重新开始；active 仍保持完整可见。
-            fm.target_cx = tcx;
-            fm.target_cz = tcz;
-            fm.row = 0;
-        }
-        if fm.row < world::FAR_N {
-            let from = fm.row;
-            let to = (fm.row + world::FAR_ROWS_PER_FRAME).min(world::FAR_N);
-            if let Some(mut mesh) = meshes.get_mut(&fm.staging_mesh) {
-                world::fill_far_rows(
-                    &world,
-                    &atlas.atlas,
-                    fm.target_cx,
-                    fm.target_cz,
-                    from,
-                    to,
-                    &mut mesh,
-                );
-            }
-            fm.row = to;
-            if fm.row >= world::FAR_N {
-                let (r0, r1) = far_hole_radii(world.view_dist);
-                let fog_rgb = clear.0.to_linear().to_f32_array();
-                if let Some(mut mesh) = meshes.get_mut(&fm.staging_mesh) {
-                    world::update_far_hole_alpha(
-                        &mut mesh,
-                        px,
-                        pz,
-                        r0,
-                        r1,
-                        [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
-                    );
-                }
-                let old_active = fm.active_mesh.clone();
-                fm.active_mesh = fm.staging_mesh.clone();
-                fm.staging_mesh = old_active;
-                mesh3d.0 = fm.active_mesh.clone();
-                fm.cx = fm.target_cx;
-                fm.cz = fm.target_cz;
-                fm.hole_x = px;
-                fm.hole_z = pz;
-            }
-        }
-        // 过渡带：CPU 顶点 alpha + 颜色向雾色渐隐 + 高度下沉渐变（JS 原版
-        // 每帧改写顶点同口径），仅当玩家移动或网格重建后刷新，避免每帧上传。
-        let (r0, r1) = far_hole_radii(world.view_dist);
-        let fog_rgb = clear.0.to_linear().to_f32_array();
-        let moved = (px - fm.hole_x).abs() > 2.0 || (pz - fm.hole_z).abs() > 2.0;
-        if show && moved {
-            if let Some(mut mesh) = meshes.get_mut(&fm.active_mesh) {
-                world::update_far_hole_alpha(
-                    &mut mesh,
-                    px,
-                    pz,
-                    r0,
-                    r1,
-                    [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
-                );
-            }
-            fm.hole_x = px;
-            fm.hole_z = pz;
-        }
-        if mmat.0 != mats.far {
-            mmat.0 = mats.far.clone();
-        }
-        let _ = e;
-    } else if show {
-        let active = world::build_far_mesh(&world, &atlas.atlas, tcx, tcz);
-        // Both allocations are retained and swapped forever, keeping mesh
-        // asset count constant across recenter operations.
-        let staging_handle = meshes.add(active.clone());
-        let active_handle = meshes.add(active);
-        // 首帧即写入过渡带，避免生成后到玩家移动前远景直穿地表
-        if let Some(mut mesh) = meshes.get_mut(&active_handle) {
-            let (r0, r1) = far_hole_radii(world.view_dist);
-            let fog_rgb = clear.0.to_linear().to_f32_array();
-            world::update_far_hole_alpha(
-                &mut mesh,
-                px,
-                pz,
-                r0,
-                r1,
-                [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
-            );
-        }
-        commands.spawn((
-            Mesh3d(active_handle.clone()),
-            MeshMaterial3d(mats.far.clone()),
-            Transform::default(),
-            Visibility::Visible,
-            FarMesh {
-                cx: tcx,
-                cz: tcz,
-                seed: world.seed,
-                row: world::FAR_N,
-                target_cx: tcx,
-                target_cz: tcz,
-                active_mesh: active_handle,
-                staging_mesh: staging_handle,
-                hole_x: px,
-                hole_z: pz,
-            },
-            NoFrustumCulling,
-            InGame,
-        ));
-    }
-}
-
 // ---------- 星球切换（无缝再入） ----------
 
 /// 响应 LandPlanetEvent：归档当前星球 → 重建新星球世界/材质/机器。
@@ -2405,25 +1671,6 @@ fn planet_switch_system(
 // ---------- 太空天空切换 ----------
 
 /// 太空/空间站模式隐藏地面天空（日盘与星光）。
-fn space_sky_sync_system(
-    mode: Res<FlightMode>,
-    mut stars: Query<&mut Visibility, With<daynight::Star>>,
-) {
-    let show = mode.ground_scene();
-    for mut vis in &mut stars {
-        *vis = if show && stars_ok() {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
-}
-
-fn stars_ok() -> bool {
-    true
-}
-
-/// 地面体素场景实体（区块地形/生物/掉落物/建造虚影/激光束）随模式显隐：
 /// JS 原版太空态不渲染 planetScene（独立场景切换），Bevy 单相机下必须显式隐藏，
 /// 否则冲出大气后平面地形残影留在宇宙里，与太空星球球形外壳错位同屏。
 fn ground_scene_visibility_system(

@@ -3,6 +3,10 @@
 
 use crate::data::{self, Biome, CHUNK, SEA, WORLD_H, ids};
 use crate::rng::{Noise2, Rng, hash2, vnoise3};
+use crate::schedule::{GameSet, GameState, ground_scene_mode};
+use crate::space::FlightMode;
+use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -2232,5 +2236,497 @@ mod tests {
                 p
             );
         }
+    }
+}
+// ---------- Streaming ----------
+
+/// Chunk terrain meshes (cleared on planet switch).
+#[derive(Component)]
+pub struct ChunkMesh {
+    /// 区块坐标用于流式卸载。
+    pub cx: i32,
+    pub cz: i32,
+    /// Prevents one frame of the previous planet leaking through while its
+    /// chunk entities are waiting for deferred despawn.
+    pub world_seed: u32,
+}
+
+pub fn stream_world_step(
+    world: &mut World,
+    pcx: i32,
+    pcz: i32,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    atlas: &crate::textures::Atlas,
+    mats: &crate::materials::TerrainMaterials,
+    gen_budget: usize,
+    mesh_budget: usize,
+) -> bool {
+    let mut gen_left = gen_budget;
+    let mut mesh_left = mesh_budget;
+    // generation rings (inside-out, Chebyshev)：预生成到 view+2，
+    // 玩家跨区块时新视距环的数据已就绪，只差网格化（不会出现"穿越区块→远处大量区块重新生成"）
+    'outer: for r in 0..=world.view_dist + 2 {
+        if gen_left == 0 {
+            break;
+        }
+        for cz in pcz - r..=pcz + r {
+            for cx in pcx - r..=pcx + r {
+                if World::cheb(cx, cz, pcx, pcz) != r {
+                    continue;
+                }
+                if world.get_chunk(cx, cz).is_none() {
+                    world.ensure_chunk(cx, cz);
+                    gen_left -= 1;
+                    if gen_left == 0 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    // meshing rings (neighbors must exist)：网格化到 view+1（含预载环）——
+    // 玩家跨区块后新视距环立即有网格，地平线不再短暂只剩粗糙远景
+    'mesh_outer: for r in 0..=world.view_dist + 1 {
+        if mesh_left == 0 {
+            break;
+        }
+        for cz in pcz - r..=pcz + r {
+            for cx in pcx - r..=pcx + r {
+                if World::cheb(cx, cz, pcx, pcz) != r {
+                    continue;
+                }
+                let key = ckey(cx, cz);
+                let Some(c) = world.chunks.get(&key) else {
+                    continue;
+                };
+                if (c.mesh.is_some() || c.water_mesh.is_some()) && !c.dirty {
+                    continue;
+                }
+                let neighbors_exist = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
+                    .iter()
+                    .all(|(nx, nz)| world.get_chunk(*nx, *nz).is_some());
+                if !neighbors_exist {
+                    continue;
+                }
+                let old_solid = c.mesh;
+                let old_water = c.water_mesh;
+                let (solid_m, water_m) = build_chunk_meshes(world, c, atlas);
+                // Conservative per-chunk AABB: static meshes with the full
+                // height range, so frustum culling never drops a chunk that
+                // is actually visible.
+                let y_min = -160.0 - 8.0;
+                let solid_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_solid,
+                    cx,
+                    cz,
+                    world.seed,
+                    solid_m,
+                    mats.solid.clone(),
+                    y_min,
+                );
+                let water_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_water,
+                    cx,
+                    cz,
+                    world.seed,
+                    water_m,
+                    mats.water.clone(),
+                    y_min,
+                );
+                let c = world.chunks.get_mut(&key).unwrap();
+                c.mesh = solid_entity;
+                c.water_mesh = water_entity;
+                c.dirty = false;
+                mesh_left -= 1;
+                if mesh_left == 0 {
+                    break 'mesh_outer;
+                }
+            }
+        }
+    }
+    // unload far meshes (keep data)
+    for c in world.chunks.values_mut() {
+        if (c.mesh.is_some() || c.water_mesh.is_some())
+            && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 3
+        {
+            if let Some(e) = c.mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.water_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            c.dirty = true;
+        }
+    }
+    // data eviction
+    world.chunks.retain(|_, c| {
+        !(c.mesh.is_none()
+            && c.water_mesh.is_none()
+            && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 9
+            && !c.modified)
+    });
+    // completeness check: every chunk in view distance generated & meshed
+
+    (0..=world.view_dist).all(|r| {
+        let mut ok = true;
+        for cz in pcz - r..=pcz + r {
+            for cx in pcx - r..=pcx + r {
+                if World::cheb(cx, cz, pcx, pcz) != r {
+                    continue;
+                }
+                match world.get_chunk(cx, cz) {
+                    Some(c) => {
+                        if (c.mesh.is_none() && c.water_mesh.is_none()) || c.dirty {
+                            ok = false;
+                        }
+                    }
+                    None => ok = false,
+                }
+            }
+        }
+        ok
+    })
+}
+
+/// Replace a chunk's mesh handle in place when possible. Keeping the entity
+/// alive avoids an extraction frame in which the old entity has been removed
+/// but the replacement has not reached the renderer yet.
+fn upsert_chunk_mesh(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    existing: Option<Entity>,
+    cx: i32,
+    cz: i32,
+    world_seed: u32,
+    vm: Option<VoxelMesh>,
+    mat: Handle<StandardMaterial>,
+    y_min: f32,
+) -> Option<Entity> {
+    let Some(vm) = vm else {
+        if let Some(entity) = existing {
+            commands.entity(entity).despawn();
+        }
+        return None;
+    };
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vm.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vm.normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vm.uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vm.colors);
+    mesh.insert_indices(Indices::U32(vm.indices));
+    let handle = meshes.add(mesh);
+    let aabb = Aabb::from_min_max(
+        Vec3::new(cx as f32 * 16.0, y_min, cz as f32 * 16.0),
+        Vec3::new(cx as f32 * 16.0 + 16.0, 130.0, cz as f32 * 16.0 + 16.0),
+    );
+    if let Some(entity) = existing {
+        commands.entity(entity).insert((
+            Mesh3d(handle),
+            MeshMaterial3d(mat),
+            aabb,
+            NoAutoAabb,
+            ChunkMesh { cx, cz, world_seed },
+        ));
+        Some(entity)
+    } else {
+        Some(
+            commands
+                .spawn((
+                    Mesh3d(handle),
+                    MeshMaterial3d(mat),
+                    // 顶点已是绝对世界坐标（build_chunk_meshes 以 x0+lx / z0+lz 生成），
+                    // 不能再叠加区块原点平移，否则每块地形被双倍偏移、块间出现大空洞。
+                    Transform::default(),
+                    aabb,
+                    NoAutoAabb,
+                    Visibility::default(),
+                    ChunkMesh { cx, cz, world_seed },
+                    crate::InGame,
+                ))
+                .id(),
+        )
+    }
+}
+
+fn stream_system(
+    mut world: ResMut<World>,
+    player: Query<&crate::player::Player>,
+    ship: Res<crate::space::ShipState>,
+    mode: Res<crate::space::FlightMode>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    atlas: Res<crate::textures::AtlasRes>,
+    mats: Res<crate::materials::TerrainMaterials>,
+) {
+    let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
+        (ship.pos.x, ship.pos.z)
+    } else {
+        match player.single() {
+            Ok(p) => (p.pos.x, p.pos.z),
+            Err(_) => return,
+        }
+    };
+    let pcx = cf(px);
+    let pcz = cf(pz);
+    if !world.stream_dirty && pcx == world.last_pcx && pcz == world.last_pcz {
+        return;
+    }
+    // During atmospheric flight the ship can cross several chunks per second.
+    // Keep each streaming slice small so terrain generation never stalls the
+    // render frame; walking keeps the larger budget for quick world loading.
+    let jump = (pcx - world.last_pcx)
+        .abs()
+        .max((pcz - world.last_pcz).abs());
+    let fast_recenter = jump > world.view_dist + 2;
+    let atmo = matches!(*mode, FlightMode::Atmo | FlightMode::AtmoLand);
+    let (normal_gen, normal_mesh) = if atmo { (4, 2) } else { (12, 6) };
+    let (fast_gen, fast_mesh) = if atmo { (8, 2) } else { (48, 16) };
+    stream_world_step(
+        &mut world,
+        pcx,
+        pcz,
+        &mut commands,
+        &mut meshes,
+        &atlas.atlas,
+        &mats,
+        if fast_recenter { fast_gen } else { normal_gen },
+        if fast_recenter {
+            fast_mesh
+        } else {
+            normal_mesh
+        },
+    );
+    world.last_pcx = pcx;
+    world.last_pcz = pcz;
+    // 空闲门控：只统计网格化范围内（≤ view+1）的脏块——view+2 纯数据预载环保持脏状态
+    // 但不唤醒扫描（旧实现统计到 view+3，预载环永远脏 → 每帧全环扫描永不空闲）
+    world.stream_dirty = world
+        .chunks
+        .values()
+        .any(|c| c.dirty && World::cheb(c.cx, c.cz, pcx, pcz) <= world.view_dist + 1);
+}
+
+// ---------- 远景模拟地形（JS farMesh 移植） ----------
+
+/// 远景地形状态：±1536 格低细节高度场，跟随玩家分帧重建；
+/// 缺失时高空/远望的地表在视距边缘戛然而止，流式区块边缘完全暴露（巨大闪动/残影）。
+#[derive(Component)]
+struct FarMesh {
+    /// 已完成的网格中心（世界坐标，按 FAR_SNAP 对齐）
+    cx: f32,
+    cz: f32,
+    seed: u32,
+    /// 待填充的下一行（< FAR_N 表示正在后台重建 staging_mesh）
+    row: usize,
+    target_cx: f32,
+    target_cz: f32,
+    /// 当前实体正在显示的完整网格。
+    active_mesh: Handle<Mesh>,
+    /// 后台逐行重建的网格；完成后与 active_mesh 原子交换。
+    staging_mesh: Handle<Mesh>,
+    /// 上次写入挖空环的玩家位置（用于节流 CPU 顶点 alpha 更新）
+    hole_x: f32,
+    hole_z: f32,
+}
+
+/// 远景挖空环（JS farHoleU 同口径）：玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
+/// 过渡带从 JS 的 90 格加宽到 ~120 格（r0 下限也从 56 降到 30），
+/// 让远景淡入更平缓、更不易察觉。
+fn far_hole_radii(view_dist: i32) -> (f32, f32) {
+    let r1 = view_dist as f32 * 16.0 - 8.0;
+    let r0 = (r1 - 120.0).max(30.0).min(r1 - 20.0);
+    (r0, r1)
+}
+
+fn far_mesh_system(
+    mut commands: Commands,
+    world: Res<World>,
+    player: Query<&crate::player::Player>,
+    ship: Res<crate::space::ShipState>,
+    mode: Res<crate::space::FlightMode>,
+    settings: Res<crate::save::Settings>,
+    lod_runtime: Res<crate::lod::LodRuntime>,
+    clear: Res<ClearColor>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mats: Res<crate::materials::TerrainMaterials>,
+    atlas: Res<crate::textures::AtlasRes>,
+    mut far_q: Query<(
+        Entity,
+        &mut FarMesh,
+        &mut Mesh3d,
+        &mut Visibility,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+) {
+    let (px, pz) = if *mode == FlightMode::Atmo || *mode == FlightMode::AtmoLand {
+        (ship.pos.x, ship.pos.z)
+    } else {
+        match player.single() {
+            Ok(p) => (p.pos.x, p.pos.z),
+            Err(_) => return,
+        }
+    };
+    let show = mode.ground_scene()
+        && (settings.lod_mode == crate::save::LodMode::Legacy || !lod_runtime.coverage_ready);
+    let tcx = (px / FAR_SNAP).round() * FAR_SNAP;
+    let tcz = (pz / FAR_SNAP).round() * FAR_SNAP;
+    if let Ok((e, mut fm, mut mesh3d, mut vis, mut mmat)) = far_q.single_mut() {
+        // Rebuilding happens in a second mesh. The last complete mesh remains
+        // visible until the replacement is ready, so crossing a FAR_SNAP
+        // boundary can no longer expose the clear color for seven frames.
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        // 换球/读档：世界种子变化 → 整体重刷
+        if fm.seed != world.seed {
+            fm.seed = world.seed;
+            fm.target_cx = tcx;
+            fm.target_cz = tcz;
+            fm.row = 0;
+        }
+        if fm.row >= FAR_N && (tcx != fm.cx || tcz != fm.cz) {
+            fm.target_cx = tcx;
+            fm.target_cz = tcz;
+            fm.row = 0;
+        } else if fm.row < FAR_N && (tcx != fm.target_cx || tcz != fm.target_cz) {
+            // 高速移动可能在七帧重建完成前再次跨格。丢弃尚未显示的
+            // staging 内容，从最新中心重新开始；active 仍保持完整可见。
+            fm.target_cx = tcx;
+            fm.target_cz = tcz;
+            fm.row = 0;
+        }
+        if fm.row < FAR_N {
+            let from = fm.row;
+            let to = (fm.row + FAR_ROWS_PER_FRAME).min(FAR_N);
+            if let Some(mut mesh) = meshes.get_mut(&fm.staging_mesh) {
+                fill_far_rows(
+                    &world,
+                    &atlas.atlas,
+                    fm.target_cx,
+                    fm.target_cz,
+                    from,
+                    to,
+                    &mut mesh,
+                );
+            }
+            fm.row = to;
+            if fm.row >= FAR_N {
+                let (r0, r1) = far_hole_radii(world.view_dist);
+                let fog_rgb = clear.0.to_linear().to_f32_array();
+                if let Some(mut mesh) = meshes.get_mut(&fm.staging_mesh) {
+                    update_far_hole_alpha(
+                        &mut mesh,
+                        px,
+                        pz,
+                        r0,
+                        r1,
+                        [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
+                    );
+                }
+                let old_active = fm.active_mesh.clone();
+                fm.active_mesh = fm.staging_mesh.clone();
+                fm.staging_mesh = old_active;
+                mesh3d.0 = fm.active_mesh.clone();
+                fm.cx = fm.target_cx;
+                fm.cz = fm.target_cz;
+                fm.hole_x = px;
+                fm.hole_z = pz;
+            }
+        }
+        // 过渡带：CPU 顶点 alpha + 颜色向雾色渐隐 + 高度下沉渐变（JS 原版
+        // 每帧改写顶点同口径），仅当玩家移动或网格重建后刷新，避免每帧上传。
+        let (r0, r1) = far_hole_radii(world.view_dist);
+        let fog_rgb = clear.0.to_linear().to_f32_array();
+        let moved = (px - fm.hole_x).abs() > 2.0 || (pz - fm.hole_z).abs() > 2.0;
+        if show && moved {
+            if let Some(mut mesh) = meshes.get_mut(&fm.active_mesh) {
+                update_far_hole_alpha(
+                    &mut mesh,
+                    px,
+                    pz,
+                    r0,
+                    r1,
+                    [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
+                );
+            }
+            fm.hole_x = px;
+            fm.hole_z = pz;
+        }
+        if mmat.0 != mats.far {
+            mmat.0 = mats.far.clone();
+        }
+        let _ = e;
+    } else if show {
+        let active = build_far_mesh(&world, &atlas.atlas, tcx, tcz);
+        // Both allocations are retained and swapped forever, keeping mesh
+        // asset count constant across recenter operations.
+        let staging_handle = meshes.add(active.clone());
+        let active_handle = meshes.add(active);
+        // 首帧即写入过渡带，避免生成后到玩家移动前远景直穿地表
+        if let Some(mut mesh) = meshes.get_mut(&active_handle) {
+            let (r0, r1) = far_hole_radii(world.view_dist);
+            let fog_rgb = clear.0.to_linear().to_f32_array();
+            update_far_hole_alpha(
+                &mut mesh,
+                px,
+                pz,
+                r0,
+                r1,
+                [fog_rgb[0], fog_rgb[1], fog_rgb[2]],
+            );
+        }
+        commands.spawn((
+            Mesh3d(active_handle.clone()),
+            MeshMaterial3d(mats.far.clone()),
+            Transform::default(),
+            Visibility::Visible,
+            FarMesh {
+                cx: tcx,
+                cz: tcz,
+                seed: world.seed,
+                row: FAR_N,
+                target_cx: tcx,
+                target_cz: tcz,
+                active_mesh: active_handle,
+                staging_mesh: staging_handle,
+                hole_x: px,
+                hole_z: pz,
+            },
+            NoFrustumCulling,
+            crate::InGame,
+        ));
+    }
+}
+
+// ---------- Plugin ----------
+
+/// World rendering plugin: terrain streaming and the distant-landscape fallback mesh.
+pub struct WorldPlugin;
+
+impl Plugin for WorldPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            stream_system
+                .in_set(GameSet::GroundStream)
+                .run_if(ground_scene_mode)
+                .run_if(in_state(GameState::Playing)),
+        )
+        .add_systems(
+            Update,
+            far_mesh_system
+                .in_set(GameSet::FarMesh)
+                .run_if(in_state(GameState::Playing)),
+        );
     }
 }

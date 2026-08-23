@@ -458,3 +458,44 @@ pub fn spawn_sky(
     }
     pool
 }
+
+/// Day/night, sky & atmosphere plugin. Tuning is captured from settings in
+/// `main` and passed in (no resource lookup during plugin build).
+pub struct DayNightPlugin {
+    pub lighting: LightingTuning,
+}
+
+impl Plugin for DayNightPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(self.lighting)
+            .add_systems(
+                Update,
+                daynight_system
+                    .in_set(crate::schedule::GameSet::CommonDaynight)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                space_sky_sync_system
+                    .in_set(crate::schedule::GameSet::LateSwitchSky)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            );
+    }
+}
+fn space_sky_sync_system(
+    mode: Res<crate::space::FlightMode>,
+    mut stars: Query<&mut Visibility, With<Star>>,
+) {
+    let show = mode.ground_scene();
+    for mut vis in &mut stars {
+        *vis = if show && stars_ok() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+fn stars_ok() -> bool {
+    true
+}

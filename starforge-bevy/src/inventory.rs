@@ -181,3 +181,11 @@ impl Inventory {
         room
     }
 }
+
+/// Leaf plugin: inventory data/logic; plugin form keeps the 'everything is a
+/// plugin' contract uniform (a pick-up system could live here later).
+pub struct InventoryPlugin;
+
+impl bevy::prelude::Plugin for InventoryPlugin {
+    fn build(&self, _app: &mut bevy::prelude::App) {}
+}

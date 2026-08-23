@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -29,7 +30,6 @@ const LOD_RADIUS: f32 = 16_384.0;
 // cell error. Standard Bevy mesh entities are intentionally coarser than
 // Voxy's batched GPU arena so the initial implementation stays draw-call safe.
 const PROJECTED_ERROR_DISTANCE: f32 = 100.0;
-const CURVATURE_ANCHOR_SNAP: f32 = 512.0;
 const BUILD_BUDGET_PER_FRAME: usize = 4;
 const EVICT_AFTER_FRAMES: u64 = 900;
 
@@ -205,7 +205,6 @@ pub struct LodStats {
 #[derive(Resource, Default)]
 pub struct LodRuntime {
     world_seed: Option<u32>,
-    curvature_anchor: Vec2,
     frame: u64,
     nodes: HashMap<LodSectionKey, ResidentNode>,
     pub coverage_ready: bool,
@@ -345,23 +344,7 @@ fn resolve_visible(
     }
 }
 
-fn curved_drop(distance: f32) -> f32 {
-    let profile = crate::planet_scale::PLANET_SCALE;
-    let blend = crate::planet_scale::smoothstep(
-        profile.curvature_flat_radius,
-        profile.curvature_full_radius,
-        distance,
-    );
-    let angle = (distance / profile.local_planet_radius).min(1.45);
-    profile.local_planet_radius * (angle.cos() - 1.0) * blend
-}
-
-fn build_surface_mesh(
-    world: &World,
-    atlas: &crate::textures::Atlas,
-    key: LodSectionKey,
-    anchor: Vec2,
-) -> Mesh {
+fn build_surface_mesh(world: &World, atlas: &crate::textures::Atlas, key: LodSectionKey) -> Mesh {
     let edge = SECTION_EDGE + 1;
     let cell = key.cell_size();
     let span = key.span();
@@ -377,8 +360,7 @@ fn build_surface_mesh(
             let wx = origin_x + x as f32 * cell;
             let wz = origin_z + z as f32 * cell;
             let (height, color) = world::far_surface_sample(world, atlas, wx, wz);
-            let distance = Vec2::new(wx - anchor.x, wz - anchor.y).length();
-            positions.push([wx, height - world::FAR_SINK + curved_drop(distance), wz]);
+            positions.push([wx, height - world::FAR_SINK, wz]);
             colors.push(color);
         }
     }
@@ -487,14 +469,9 @@ pub fn hierarchical_lod_system(
     }
     let Ok(player) = player.single() else { return };
     let player_xz = player.pos.xz();
-    let anchor = Vec2::new(
-        (player_xz.x / CURVATURE_ANCHOR_SNAP).round() * CURVATURE_ANCHOR_SNAP,
-        (player_xz.y / CURVATURE_ANCHOR_SNAP).round() * CURVATURE_ANCHOR_SNAP,
-    );
-    if runtime.world_seed != Some(world.seed) || runtime.curvature_anchor != anchor {
+    if runtime.world_seed != Some(world.seed) {
         runtime.clear(&mut commands, &mut meshes);
         runtime.world_seed = Some(world.seed);
-        runtime.curvature_anchor = anchor;
     }
 
     let exact_radius = world.view_dist as f32 * crate::data::CHUNK as f32 - 8.0;
@@ -518,7 +495,7 @@ pub fn hierarchical_lod_system(
     let mut generated = 0;
     let current_frame = runtime.frame;
     for key in missing.iter().take(BUILD_BUDGET_PER_FRAME).copied() {
-        let mesh = meshes.add(build_surface_mesh(&world, &atlas.atlas, key, anchor));
+        let mesh = meshes.add(build_surface_mesh(&world, &atlas.atlas, key));
         let entity = commands
             .spawn((
                 Mesh3d(mesh.clone()),
@@ -526,6 +503,7 @@ pub fn hierarchical_lod_system(
                 Transform::IDENTITY,
                 Visibility::Hidden,
                 NotShadowCaster,
+                NoFrustumCulling,
                 LodMesh,
                 crate::InGame,
             ))
@@ -714,13 +692,6 @@ mod tests {
             "too many unbatched target sections: {}",
             selection.targets.len()
         );
-    }
-
-    #[test]
-    fn curvature_is_flat_near_camera_and_drops_far_horizon() {
-        assert_eq!(curved_drop(128.0), 0.0);
-        assert!(curved_drop(2_000.0) < -50.0);
-        assert!(curved_drop(8_000.0) < curved_drop(2_000.0));
     }
 }
 

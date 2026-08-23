@@ -187,6 +187,7 @@ pub fn daynight_system(
     >,
     mut stars: Query<&mut Visibility, (With<Star>, Without<Sun>)>,
     mut ground_atmosphere: Query<&mut Transform, (With<GroundAtmosphere>, Without<Sun>)>,
+    visual_frame: Res<crate::planet_scale::PlanetVisualFrame>,
     player: Query<&Player>,
     mut clear: ResMut<ClearColor>,
     world: Option<Res<World>>,
@@ -264,7 +265,7 @@ pub fn daynight_system(
     // without consulting Visibility, so moving this proxy far away is the
     // lightweight way to switch between the local and orbital shells.
     let atmosphere_center = if mode.ground_scene() {
-        Vec3::new(0.0, -GROUND_ATMOSPHERE_INNER_RADIUS, 0.0)
+        visual_frame.center
     } else {
         Vec3::new(0.0, 1.0e9, 0.0)
     };
@@ -376,7 +377,11 @@ pub fn spawn_sky(
             ground_albedo: Vec3::splat(0.3),
             medium: earth_medium,
         },
-        Transform::from_xyz(0.0, -GROUND_ATMOSPHERE_INNER_RADIUS, 0.0),
+        Transform::from_xyz(
+            0.0,
+            crate::data::SEA_Y - GROUND_ATMOSPHERE_INNER_RADIUS,
+            0.0,
+        ),
         GroundAtmosphere,
         crate::InGame,
     ));
@@ -408,8 +413,8 @@ pub fn spawn_sky(
         }
         .build(),
         Transform::IDENTITY,
-        // 原生体积云（FogVolume）需要太阳标记为 volumetric 才能产生
-        // 光柱/云影（阴影贴图已开启）。
+        // Keep the volumetric marker for other fog/light-shaft effects; the
+        // spherical cloud shader reads the same live sun transform directly.
         VolumetricLight,
         Sun,
         crate::InGame,
@@ -465,6 +470,21 @@ pub struct DayNightPlugin {
     pub lighting: LightingTuning,
 }
 
+fn sync_ground_atmosphere(
+    mode: Res<FlightMode>,
+    visual_frame: Res<crate::planet_scale::PlanetVisualFrame>,
+    mut atmosphere: Query<&mut Transform, With<GroundAtmosphere>>,
+) {
+    let center = if mode.ground_scene() {
+        visual_frame.center
+    } else {
+        Vec3::new(0.0, 1.0e9, 0.0)
+    };
+    for mut transform in &mut atmosphere {
+        transform.translation = center;
+    }
+}
+
 impl Plugin for DayNightPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.lighting)
@@ -479,6 +499,12 @@ impl Plugin for DayNightPlugin {
                 space_sky_sync_system
                     .in_set(crate::schedule::GameSet::LateSwitchSky)
                     .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                PostUpdate,
+                sync_ground_atmosphere
+                    .after(crate::planet_scale::update_visual_frame)
+                    .before(bevy::transform::TransformSystems::Propagate),
             );
     }
 }

@@ -39,6 +39,65 @@ pub const PLANET_SCALE: PlanetScaleProfile = PlanetScaleProfile {
     curvature_full_radius: 1_500.0,
 };
 
+/// Continuous local planet frame used only by ground-scene rendering.
+/// Canonical voxel/space coordinates remain unchanged; moving this visual
+/// proxy keeps the local tangent patch, atmosphere and clouds aligned.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct PlanetVisualFrame {
+    pub focus: Vec2,
+    pub center: Vec3,
+    pub datum_y: f32,
+    pub radius: f32,
+    pub flat_radius: f32,
+    pub full_radius: f32,
+}
+
+impl Default for PlanetVisualFrame {
+    fn default() -> Self {
+        let datum_y = crate::data::SEA_Y;
+        let radius = PLANET_SCALE.local_planet_radius;
+        Self {
+            focus: Vec2::ZERO,
+            center: Vec3::new(0.0, datum_y - radius, 0.0),
+            datum_y,
+            radius,
+            flat_radius: PLANET_SCALE.curvature_flat_radius,
+            full_radius: PLANET_SCALE.curvature_full_radius,
+        }
+    }
+}
+
+pub(crate) fn update_visual_frame(
+    mode: Res<crate::space::FlightMode>,
+    player: Query<&crate::player::Player>,
+    ship: Res<crate::space::ShipState>,
+    world: Option<Res<crate::world::World>>,
+    mut frame: ResMut<PlanetVisualFrame>,
+) {
+    if !mode.ground_scene() {
+        return;
+    }
+    let Ok(player) = player.single() else { return };
+    let focus = if matches!(
+        *mode,
+        crate::space::FlightMode::Atmo | crate::space::FlightMode::AtmoLand
+    ) {
+        ship.pos.xz()
+    } else {
+        player.pos.xz()
+    };
+    frame.focus = focus;
+    frame.center = Vec3::new(focus.x, frame.datum_y - frame.radius, focus.y);
+    let exact_radius = world
+        .as_ref()
+        .map(|world| world.view_dist as f32 * crate::data::CHUNK as f32 + 8.0)
+        .unwrap_or(PLANET_SCALE.curvature_flat_radius);
+    frame.flat_radius = PLANET_SCALE.curvature_flat_radius.max(exact_radius);
+    frame.full_radius = PLANET_SCALE
+        .curvature_full_radius
+        .max(frame.flat_radius + 1_244.0);
+}
+
 #[inline]
 pub fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = ((value - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
@@ -88,12 +147,39 @@ pub fn planet_direction_to_local(direction: Vec3) -> Vec2 {
     )
 }
 
-/// Leaf plugin: planetary scale contract (constants/functions only today; a
-/// future altitude-consistency check system can slot in here).
+#[inline]
+pub fn curved_surface_position(flat: Vec3, frame: PlanetVisualFrame) -> Vec3 {
+    let delta = flat.xz() - frame.focus;
+    let distance = delta.length();
+    if distance <= frame.flat_radius {
+        return flat;
+    }
+    let direction = if distance > f32::EPSILON {
+        delta / distance
+    } else {
+        Vec2::X
+    };
+    let angle = (distance / frame.radius).min(1.45);
+    let radial = Vec3::new(
+        direction.x * angle.sin(),
+        angle.cos(),
+        direction.y * angle.sin(),
+    );
+    let sphere = frame.center + radial * (frame.radius + flat.y - frame.datum_y);
+    let blend = smoothstep(frame.flat_radius, frame.full_radius, distance);
+    flat.lerp(sphere, blend)
+}
+
+/// Planetary scale contract and the transient visual tangent frame.
 pub struct PlanetScalePlugin;
 
 impl bevy::prelude::Plugin for PlanetScalePlugin {
-    fn build(&self, _app: &mut bevy::prelude::App) {}
+    fn build(&self, app: &mut bevy::prelude::App) {
+        app.init_resource::<PlanetVisualFrame>().add_systems(
+            PostUpdate,
+            update_visual_frame.before(bevy::transform::TransformSystems::Propagate),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +217,27 @@ mod tests {
         assert_eq!(atmospheric_max_speed(0.0, true), 55.0);
         assert!((atmospheric_max_speed(1_500.0, false) - 90.0).abs() < 0.01);
         assert!((atmospheric_max_speed(1_500.0, true) - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn visual_center_stays_below_its_focus() {
+        let frame = PlanetVisualFrame::default();
+        assert_eq!(frame.center.xz(), frame.focus);
+        assert!((frame.center.y + frame.radius - frame.datum_y).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn visual_curvature_is_continuous_when_focus_moves() {
+        let mut frame = PlanetVisualFrame {
+            flat_radius: 256.0,
+            full_radius: 1_500.0,
+            ..default()
+        };
+        let flat = Vec3::new(4_000.0, crate::data::SEA_Y, 0.0);
+        let before = curved_surface_position(flat, frame);
+        frame.focus.x += 0.01;
+        frame.center.x += 0.01;
+        let after = curved_surface_position(flat, frame);
+        assert!(before.distance(after) < 0.02);
     }
 }

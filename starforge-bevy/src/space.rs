@@ -1889,7 +1889,7 @@ pub fn planet_texture(
         (wt & 0xFF) as f32 / 255.0,
     ];
     let seab = world.map(|wd| wd.g.sea() as f32).unwrap_or(32.0);
-    // 球面 UV ↔ 体素坐标（与 exit_to_space 的 lon/lat 映射一致：lon = x*0.004, lat = z*0.004）。
+    // 球面 UV ↔ 体素坐标，与 exit_to_space 的共享行星半径映射一致。
     // 有当前星球体素世界时采样真实地形（高度/地表覆盖/海平面），
     // 飞出大气后星球贴图与刚离开的地表一致（JS "整球回绘" 的近似）；否则程序化噪声回退。
     for y in 0..h {
@@ -1898,8 +1898,8 @@ pub fn planet_texture(
         for x in 0..w {
             let u = (x as f32 + 0.5) / w as f32;
             let lon = (u - 0.5) * std::f32::consts::TAU;
-            let wx = (lon / 0.004).floor();
-            let wz = (lat / 0.004).floor();
+            let wx = (lon * crate::planet_scale::PLANET_SCALE.local_planet_radius).floor();
+            let wz = (lat * crate::planet_scale::PLANET_SCALE.local_planet_radius).floor();
             let (mut r, mut g, mut bl) = if let Some(wd) = world {
                 let hgt = wd.g.height_at(wx, wz) as f32;
                 let mut grd = wd.g.biome.grass;

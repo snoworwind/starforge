@@ -33,8 +33,7 @@ use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::{
-    AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, VolumetricFog,
-    atmosphere::ScatteringMedium,
+    AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, atmosphere::ScatteringMedium,
 };
 use bevy::pbr::{
     AtmosphereMode, AtmosphereSettings, ContactShadows, DistanceFog, FogFalloff,
@@ -433,6 +432,11 @@ fn startup(
                 let _ = copy_dir_all(&s, &models_dir);
             }
         }
+        let shaders_dir = dir.join("assets").join("shaders");
+        let via_exe = dir.join("..").join("..").join("assets").join("shaders");
+        if via_exe.is_dir() {
+            let _ = copy_dir_all(&via_exe, &shaders_dir);
+        }
     }
     // persistent camera: created now so bevy_egui's primary context exists in menus too.
     // The player camera system drives it during Playing.
@@ -511,15 +515,6 @@ fn startup(
                 },
             },
         ))
-        // 原生体积雾（超过 15 元组 Bundle 上限，单独插入）
-        .insert(VolumetricFog {
-            step_count: 24,
-            // Cloud shadows fall back to the sky color, not black. 2.0 与
-            // weather.rs 中压低后的吸收/散射系数匹配（见 light_attenuation
-            // Beer 衰减说明）；0.3 会让云的背光面接近全黑。
-            ambient_intensity: 2.0,
-            ..default()
-        })
         .id();
     // 像素风低分辨率渲染：3D 相机渲染到 640×360 目标，UI 相机全屏最近邻放大
     if settings.pixelated {
@@ -1066,6 +1061,7 @@ fn loading_system(
     loading: Option<ResMut<LoadingState>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut stdmats: ResMut<Assets<StandardMaterial>>,
+    mut curved_mats: ResMut<Assets<materials::CurvedTerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     atlas: Res<AtlasRes>,
@@ -1080,6 +1076,7 @@ fn loading_system(
     if ls.mats.is_none() {
         let mats = TerrainMaterials::build(
             &mut stdmats,
+            &mut curved_mats,
             &mut images,
             atlas.atlas.to_image(),
             ls.world.biome().water_tint,
@@ -1582,6 +1579,7 @@ fn planet_switch_system(
     mut scan_state: ResMut<ui::ScanState>,
     scan_markers: Query<Entity, With<ui::ScanMarker>>,
     mut terrain_materials: ResMut<Assets<StandardMaterial>>,
+    mut curved_materials: ResMut<Assets<materials::CurvedTerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     atlas: Res<AtlasRes>,
 ) {
@@ -1646,6 +1644,7 @@ fn planet_switch_system(
         // 材质重建（水面染色随生态）
         let mats = TerrainMaterials::build(
             &mut terrain_materials,
+            &mut curved_materials,
             &mut images,
             atlas.atlas.to_image(),
             data::biome_by_key(&biome).water_tint,

@@ -3815,10 +3815,10 @@ pub fn garage_panel_system(
     let mut switch_req: Option<usize> = None;
     let mut cargo_take: Option<usize> = None;
     let mut cargo_put = false;
-    let selected_cargo = player
-        .single()
-        .ok()
-        .and_then(|p| p.selected_item().cloned());
+    let selected_cargo = player.single().ok().and_then(|p| {
+        let index = p.hot_slot()?;
+        Some((index, p.inv.slots.get(index)?.as_ref()?.clone()))
+    });
     egui::Window::new("◈ 舰船调度终端")
         .default_size([420.0, 420.0])
         .resizable(false)
@@ -3861,7 +3861,9 @@ pub fn garage_panel_system(
             ui.label("（点击舱内物品取出到背包）");
             let put_label = selected_cargo
                 .as_ref()
-                .map(|slot| format!("存入当前快捷栏：{} ×{}", item_name(&slot.item), slot.n))
+                .map(|(_, slot)| {
+                    format!("存入当前快捷栏：{} ×{}", item_name(&slot.item), slot.n)
+                })
                 .unwrap_or_else(|| "当前快捷栏没有可存入物品".to_string());
             if ui
                 .add_enabled(selected_cargo.is_some(), egui::Button::new(put_label))
@@ -3925,7 +3927,7 @@ pub fn garage_panel_system(
         let Ok(mut p) = player.single_mut() else {
             return;
         };
-        if let Some(selected) = selected_cargo {
+        if let Some((selected_index, selected)) = selected_cargo {
             let capacity = data::ship_class_by_key(&ship_asset.data.cls).slots;
             let mut cargo = crate::inventory::Inventory::from_slots_with_capacity(
                 std::mem::take(&mut ship_asset.data.inv),
@@ -3934,7 +3936,11 @@ pub fn garage_panel_system(
             let added = cargo.add_item(&selected.item, selected.n);
             ship_asset.data.inv = cargo.slots;
             if added > 0 {
-                p.inv.remove_item(&selected.item, added);
+                // The action is explicitly tied to the selected hotbar slot.
+                // Removing by item key could consume a different stack and
+                // leave the clicked stack untouched.
+                let removed = p.inv.take_from_slot(selected_index, added);
+                debug_assert_eq!(removed.as_ref().map(|slot| slot.n), Some(added));
             }
             if added < selected.n {
                 p.toast("飞船货仓空间不足");

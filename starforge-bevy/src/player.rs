@@ -773,8 +773,14 @@ pub fn mining_system(
         if p.creative() {
             laser_mul = 1.0;
         }
-        // creature hit (nearest within 22)
-        let mut best = 22.0f32;
+        // Creature fire has a longer reach than block mining, but solid
+        // terrain must still occlude it. Without this cap the creature pass
+        // happened before the block raycast and allowed shots through walls.
+        let obstruction = world
+            .raycast(origin, dir, 22.0)
+            .map(|(_, _, distance)| distance)
+            .unwrap_or(22.0);
+        let mut best = obstruction.min(22.0);
         let mut hit_ent = None;
         for (ent, c, tf) in creatures.p0().iter() {
             let center = tf.translation + Vec3::Y * c.height * 0.4;

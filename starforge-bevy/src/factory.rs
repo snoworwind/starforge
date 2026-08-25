@@ -522,7 +522,9 @@ pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
             }
         }
         MachineState::Reactor(r) => {
-            push(&mut out, "uranium", (r.fuel / 60.0).round() as i32);
+            // Partial fuel has already produced power and must not round back
+            // into a whole uranium item when the reactor is dismantled.
+            push(&mut out, "uranium", (r.fuel / 60.0).floor() as i32);
         }
         MachineState::Burner(b) => {
             if let Some(s) = &b.fuel {
@@ -746,11 +748,13 @@ impl MachineState {
             })
         };
         let clean_slots = |slots: &[Option<Slot>], max_len: usize| {
-            slots
+            let mut cleaned = slots
                 .iter()
                 .take(max_len)
                 .map(clean_slot)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            cleaned.resize(max_len, None);
+            cleaned
         };
         let finite = |value: f32, fallback: f32, max: f32| {
             if value.is_finite() {
@@ -821,18 +825,10 @@ impl MachineState {
                 prog: finite(d.prog, 0.0, 1.0),
             }),
             MachineKind::Chest => Self::Chest(ChestState {
-                slots: if d.slots.is_empty() {
-                    vec![None; 24]
-                } else {
-                    clean_slots(&d.slots, 24)
-                },
+                slots: clean_slots(&d.slots, 24),
             }),
             MachineKind::Tank => Self::Tank(ChestState {
-                slots: if d.slots.is_empty() {
-                    vec![None; 12]
-                } else {
-                    clean_slots(&d.slots, 12)
-                },
+                slots: clean_slots(&d.slots, 12),
             }),
             MachineKind::Battery => Self::Battery(BatteryState {
                 charge: finite(d.charge, 0.0, BATTERY_CAPACITY),
@@ -847,7 +843,7 @@ impl MachineState {
                 output: clean_slot(&d.output).filter(|slot| slot.item == "data"),
                 prog: finite(d.prog, 0.0, 1.0),
                 habitat: d.habitat.clamp(0, 10_000),
-                residents: d.residents.clamp(0, 64),
+                residents: d.residents.clamp(0, 8),
                 scan_t: 0.0,
                 cycles: d.cycles.clamp(0, 1_000_000),
             }),
@@ -884,11 +880,7 @@ impl MachineState {
                 ..default()
             }),
             MachineKind::Collector => Self::Collector(CollectorState {
-                slots: if d.slots.is_empty() {
-                    vec![None; 12]
-                } else {
-                    clean_slots(&d.slots, 12)
-                },
+                slots: clean_slots(&d.slots, 12),
             }),
             MachineKind::Medbay => Self::Medbay(MedbayState {
                 heal_acc: finite(d.heal_acc, 0.0, 86_400.0),
@@ -1227,7 +1219,7 @@ fn furnace_tick(
     m: &mut Machine,
     f: &mut FurnaceState,
     snap: &mut Snapshot,
-    drops: &mut Vec<(String, i32)>,
+    drops: &mut Vec<([i32; 3], String, i32)>,
     commands: &mut Commands,
     sfx: &crate::audio::Sfx,
     researched: &[String],
@@ -1276,7 +1268,7 @@ fn furnace_tick(
                 if let Some(o) = f.output.as_mut()
                     && o.item != out_item
                 {
-                    drops.push((o.item.clone(), o.n));
+                    drops.push((m.pos, o.item.clone(), o.n));
                     f.output = None;
                 }
                 if f.output.is_none() {
@@ -1329,9 +1321,11 @@ fn miner_tick(
     if !below.ore {
         return;
     }
-    let eff = sat.max(0.35); // 无电 35% 手摇
+    if sat <= 0.05 {
+        return;
+    }
     m.active = true;
-    s.prog += TICK * 0.5 * eff;
+    s.prog += TICK * 0.5 * sat;
     if s.prog >= 1.0 {
         s.prog = 0.0;
         let drop = below.drops.first().map(|d| d.item).unwrap_or("stone");
@@ -1361,7 +1355,7 @@ fn crafter_tick(
     sat: f32,
     where_: &str,
     snap: &mut Snapshot,
-    drops: &mut Vec<(String, i32)>,
+    drops: &mut Vec<([i32; 3], String, i32)>,
     researched: &[String],
 ) {
     m.active = false;
@@ -1395,7 +1389,7 @@ fn crafter_tick(
             if let Some(o) = c.output.as_mut()
                 && o.item != out_item
             {
-                drops.push((o.item.clone(), o.n));
+                drops.push((m.pos, o.item.clone(), o.n));
                 c.output = None;
             }
             if c.output.is_none() {
@@ -1731,30 +1725,32 @@ fn lumberbot_tick(
             }
         }
         BotPhase::Chop => {
-            let Some(t) = lb.target else {
+            let Some(mut t) = lb.target else {
                 lb.phase = BotPhase::Scan;
                 return;
             };
             // 目标已被挖走 → 重新找
             if world.get(t[0], t[1], t[2]) != ids::LOG {
-                lb.target = find_log_segment(world, t[0], t[2]).or(lb.target);
-                if lb.target.map(|tg| world.get(tg[0], tg[1], tg[2])) != Some(ids::LOG) {
+                let Some(replacement) = find_log_segment(world, t[0], t[2]) else {
                     lb.phase = BotPhase::Scan;
                     return;
-                }
+                };
+                lb.target = Some(replacement);
+                t = replacement;
+                lb.chop_t = 0.0;
             }
             lb.chop_t += TICK;
             if lb.chop_t >= 1.1 {
                 lb.chop_t = 0.0;
                 // 砍一段：碳 +4
                 world_writes.push((t, ids::AIR));
-                lb.cargo += 4;
+                lb.cargo = (lb.cargo + 4).min(BOT_CARGO_FULL);
                 // 树干剩余？
-                if let Some(next) = find_log_segment(world, t[0], t[2]) {
+                if let Some(next) = find_log_segment_except(world, t[0], t[2], Some(t)) {
                     lb.target = Some(next);
                 } else {
                     // 整树砍完：碳 +6，清理 5×5×5 树叶（50% 各 +1）
-                    lb.cargo += 6;
+                    lb.cargo = (lb.cargo + 6).min(BOT_CARGO_FULL);
                     for dy in -1..=3 {
                         for ox in -2..=2 {
                             for oz in -2..=2 {
@@ -1769,7 +1765,7 @@ fn lumberbot_tick(
                                     .next()
                                         < 0.5
                                     {
-                                        lb.cargo += 1;
+                                        lb.cargo = (lb.cargo + 1).min(BOT_CARGO_FULL);
                                     }
                                 }
                             }
@@ -1790,6 +1786,11 @@ fn lumberbot_tick(
             let mut best_d = f32::MAX;
             for (e, mm) in &snap.machines {
                 if mm.kind != MachineKind::Collector {
+                    continue;
+                }
+                let home_d2 = (mm.pos[0] as f32 + 0.5 - home[0]).powi(2)
+                    + (mm.pos[2] as f32 + 0.5 - home[2]).powi(2);
+                if home_d2 > (BOT_RANGE * 2) as f32 * (BOT_RANGE * 2) as f32 {
                     continue;
                 }
                 let d = ((mm.pos[0] as f32 + 0.5 - lb.pos[0]).powi(2)
@@ -1850,14 +1851,24 @@ fn lumberbot_tick(
 
 /// 在 (x,z) 列从地表向下最多 12 格找原木段（返回最上方的 log）。
 fn find_log_segment(world: &GameWorld, x: i32, z: i32) -> Option<[i32; 3]> {
+    find_log_segment_except(world, x, z, None)
+}
+
+fn find_log_segment_except(
+    world: &GameWorld,
+    x: i32,
+    z: i32,
+    skip: Option<[i32; 3]>,
+) -> Option<[i32; 3]> {
     let top = world.top_at(x, z);
     for dy in 0..12 {
         let y = top - dy;
         if y < 1 {
             break;
         }
-        if world.get(x, y, z) == ids::LOG {
-            return Some([x, y, z]);
+        let pos = [x, y, z];
+        if Some(pos) != skip && world.get(x, y, z) == ids::LOG {
+            return Some(pos);
         }
     }
     None
@@ -2057,6 +2068,7 @@ pub fn factory_system(
                         let generated = power_gen(MachineKind::Solar) * day_f.max(0.0);
                         gen_total += generated;
                         gen_by.insert(e, generated);
+                        m.active = generated > 0.05;
                     }
                     if m.kind == MachineKind::Wind {
                         let alt = (m.pos[1] as f32 - data::SEA_Y).max(0.0) * 0.18;
@@ -2241,7 +2253,7 @@ pub fn factory_system(
     };
 
     // 阶段 B：快照逻辑
-    let mut drops: Vec<(String, i32)> = Vec::new();
+    let mut drops: Vec<([i32; 3], String, i32)> = Vec::new();
     let mut world_writes: Vec<([i32; 3], u8)> = Vec::new();
     let mut order: Vec<Entity> = snap.machines.keys().copied().collect();
     order.sort();
@@ -2317,13 +2329,19 @@ pub fn factory_system(
                 {
                     m.active = true;
                     ms.heal_acc += TICK * machine_sat;
-                    while ms.heal_acc >= 1.0 {
+                    while ms.heal_acc >= 1.0
+                        && p.stats.hp < 8.0
+                        && p.inv.count_item("sodium") >= 1
+                        && p.inv.count_item("oxygen") >= 1
+                    {
                         ms.heal_acc -= 1.0;
-                        if p.inv.remove_item("sodium", 1) && p.inv.remove_item("oxygen", 1) {
-                            p.stats.hp = (p.stats.hp + 3.0).min(8.0);
-                            p.toast("医疗站：生命 +3");
-                        }
+                        let removed_sodium = p.inv.remove_item("sodium", 1);
+                        let removed_oxygen = p.inv.remove_item("oxygen", 1);
+                        debug_assert!(removed_sodium && removed_oxygen);
+                        p.stats.hp = (p.stats.hp + 3.0).min(8.0);
+                        p.toast("医疗站：生命 +3");
                     }
+                    ms.heal_acc = ms.heal_acc.min(0.999);
                 }
             }
             _ => {}
@@ -2353,21 +2371,21 @@ pub fn factory_system(
         }
     }
     // 掉落物（产出无处可送时洒在机器上方）
-    for (item, n) in drops {
-        if let Some(pq) = player.as_ref()
-            && let Ok(p) = pq.single()
-        {
-            crate::creatures::spawn_drop(
-                &mut commands,
-                &world,
-                &icons,
-                p.pos + Vec3::Y,
-                Vec3::ZERO,
-                item,
-                n,
-                0.4,
-            );
-        }
+    for (pos, item, n) in drops {
+        crate::creatures::spawn_drop(
+            &mut commands,
+            &world,
+            &icons,
+            Vec3::new(
+                pos[0] as f32 + 0.5,
+                pos[1] as f32 + 1.2,
+                pos[2] as f32 + 0.5,
+            ),
+            Vec3::ZERO,
+            item,
+            n,
+            0.4,
+        );
     }
     // 世界改块（矿脉耗尽）
     for (pos, id) in world_writes {
@@ -2381,19 +2399,31 @@ pub fn machine_sync_system(
     machines: Query<(Entity, &Machine)>,
     mut commands: Commands,
 ) {
-    let existing: std::collections::HashSet<[i32; 3]> =
-        machines.iter().map(|(_, m)| m.pos).collect();
+    let mut existing = std::collections::HashSet::new();
+    let mut replacements = Vec::new();
     for (e, m) in &machines {
         // `World::get` intentionally returns AIR for an unloaded chunk. Do
         // not interpret that streaming placeholder as a deleted machine.
         let cx = m.pos[0].div_euclid(data::CHUNK);
         let cz = m.pos[2].div_euclid(data::CHUNK);
         if world.get_chunk(cx, cz).is_none() {
+            if !existing.insert(m.pos) {
+                commands.entity(e).despawn();
+            }
             continue;
         }
         let def = data::block_by_id(world.get(m.pos[0], m.pos[1], m.pos[2]));
-        if def.machine.is_none() {
+        if def.machine == Some(m.kind.block_key()) {
+            if !existing.insert(m.pos) {
+                commands.entity(e).despawn();
+            }
+        } else {
             commands.entity(e).despawn();
+            if let Some(key) = def.machine
+                && existing.insert(m.pos)
+            {
+                replacements.push((m.pos, key));
+            }
         }
     }
 
@@ -2403,7 +2433,7 @@ pub fn machine_sync_system(
     // silently stop after the player returns.
     let needs_scan = world.chunks.values().any(|chunk| chunk.machine_scan);
     if needs_scan {
-        let mut to_spawn = Vec::new();
+        let mut to_spawn = replacements;
         for chunk in world.chunks.values_mut() {
             if !chunk.machine_scan {
                 continue;
@@ -2427,6 +2457,10 @@ pub fn machine_sync_system(
             chunk.machine_scan = false;
         }
         for (pos, key) in to_spawn {
+            spawn_machine(&mut commands, pos, key, 0);
+        }
+    } else {
+        for (pos, key) in replacements {
             spawn_machine(&mut commands, pos, key, 0);
         }
     }
@@ -2521,14 +2555,18 @@ pub fn deserialize_machines(
     saves: &[MachineSave],
 ) -> Vec<(Entity, MachineSave)> {
     let mut out = Vec::new();
+    let mut positions = HashSet::new();
     for s in saves {
-        if s.y < 0
+        let kind = MachineKind::from_block_key(&s.kind);
+        if s.x.unsigned_abs() > 1_000_000
+            || s.z.unsigned_abs() > 1_000_000
+            || s.y < 0
             || s.y >= data::WORLD_H
-            || MachineKind::from_block_key(&s.kind) == MachineKind::Other
+            || kind == MachineKind::Other
+            || !positions.insert([s.x, s.y, s.z])
         {
             continue;
         }
-        let kind = MachineKind::from_block_key(&s.kind);
         let e = commands
             .spawn((
                 Transform::from_xyz(s.x as f32 + 0.5, s.y as f32 + 0.5, s.z as f32 + 0.5),
@@ -2737,6 +2775,11 @@ mod tests {
             }
             _ => panic!("expected furnace state"),
         }
+        let MachineState::Chest(chest) = MachineState::from_save(MachineKind::Chest, &data) else {
+            panic!("expected chest state");
+        };
+        assert_eq!(chest.slots.len(), 24);
+        assert!(chest.slots.iter().all(Option::is_none));
     }
 
     #[test]
@@ -2817,7 +2860,7 @@ mod tests {
         assert_eq!(colony.input, HashMap::from([("oxygen_cell".into(), 2)]));
         assert!(colony.output.is_none());
         assert_eq!(colony.habitat, 10_000);
-        assert_eq!(colony.residents, 64);
+        assert_eq!(colony.residents, 8);
         assert_eq!(colony.cycles, 1_000_000);
     }
 

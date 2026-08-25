@@ -390,9 +390,48 @@ impl CreatureSpawner {
     /// 读档恢复：兽群（位置/血量/领地）与击杀记录全部还原；被杀动物不会复活。
     /// 行为参数由 nid 确定性派生（JS herdParams）；物化时按当前生态取物种。
     pub fn restore(&mut self, world_seed: u32, herds: &[HerdSave], cells: &[CellSave]) {
+        self.cells.clear();
+        for c in cells.iter().take(100_000) {
+            if c.cx.unsigned_abs() > 1_000_000 || c.cz.unsigned_abs() > 1_000_000 {
+                continue;
+            }
+            self.cells
+                .entry((c.cx, c.cz))
+                .and_modify(|state| state.mask |= c.mask)
+                .or_insert(CellState {
+                    cands: Vec::new(),
+                    mask: c.mask,
+                    initialized: false,
+                });
+        }
         self.herds.clear();
-        for h in herds {
-            if h.cand >= u32::BITS as usize {
+        for h in herds.iter().take(100_000) {
+            if h.cand >= u32::BITS as usize
+                || h.cx.unsigned_abs() > 1_000_000
+                || h.cz.unsigned_abs() > 1_000_000
+            {
+                continue;
+            }
+            let bit = 1u32 << h.cand;
+            // A save can be captured after damage but before the regular
+            // despawn pass records the kill. Treat non-positive saved HP as
+            // dead and repair the cell mask instead of resurrecting it.
+            if !h.hp.is_finite() || h.hp <= 0.0 {
+                self.cells
+                    .entry((h.cx, h.cz))
+                    .and_modify(|state| state.mask |= bit)
+                    .or_insert(CellState {
+                        cands: Vec::new(),
+                        mask: bit,
+                        initialized: false,
+                    });
+                continue;
+            }
+            if self
+                .cells
+                .get(&(h.cx, h.cz))
+                .is_some_and(|state| state.mask & bit != 0)
+            {
                 continue;
             }
             let nid = crate::rng::batch_seed(world_seed, h.cx, h.cz) as u64 * 64 + h.cand as u64;
@@ -410,7 +449,7 @@ impl CreatureSpawner {
                     cand: h.cand,
                     x: if h.x.is_finite() { h.x } else { 0.0 },
                     z: if h.z.is_finite() { h.z } else { 0.0 },
-                    hp: if h.hp.is_finite() { h.hp.max(1.0) } else { 3.0 },
+                    hp: h.hp,
                     home_x: if h.home_x.is_finite() { h.home_x } else { 0.0 },
                     home_z: if h.home_z.is_finite() { h.home_z } else { 0.0 },
                     speed,
@@ -418,17 +457,6 @@ impl CreatureSpawner {
                     timer,
                     anim_t,
                     entity: None,
-                },
-            );
-        }
-        self.cells.clear();
-        for c in cells {
-            self.cells.insert(
-                (c.cx, c.cz),
-                CellState {
-                    cands: Vec::new(),
-                    mask: c.mask,
-                    initialized: false,
                 },
             );
         }
@@ -1946,7 +1974,7 @@ mod tests {
             CellSave {
                 cx: 2,
                 cz: -1,
-                mask: 0b1000,
+                mask: 0b0100,
             },
         ];
         let mut s = CreatureSpawner::default();
@@ -1976,5 +2004,41 @@ mod tests {
             assert_eq!(h.timer, h3.timer);
             assert_eq!(h.anim_t, h3.anim_t);
         }
+    }
+
+    #[test]
+    fn restore_does_not_resurrect_dead_or_masked_herds() {
+        let world = test_world(1234);
+        let herds = vec![
+            HerdSave {
+                cx: 0,
+                cz: 0,
+                cand: 1,
+                x: 1.0,
+                z: 1.0,
+                hp: 0.0,
+                home_x: 1.0,
+                home_z: 1.0,
+            },
+            HerdSave {
+                cx: 0,
+                cz: 0,
+                cand: 2,
+                x: 2.0,
+                z: 2.0,
+                hp: 3.0,
+                home_x: 2.0,
+                home_z: 2.0,
+            },
+        ];
+        let cells = vec![CellSave {
+            cx: 0,
+            cz: 0,
+            mask: 1 << 2,
+        }];
+        let mut spawner = CreatureSpawner::default();
+        spawner.restore(world.seed, &herds, &cells);
+        assert!(spawner.herds.is_empty());
+        assert_eq!(spawner.cells[&(0, 0)].mask & 0b110, 0b110);
     }
 }

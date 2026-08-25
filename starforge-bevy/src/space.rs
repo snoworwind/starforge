@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::creatures::Creature;
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
 use crate::daynight::DIRECT_SUNLIGHT_BOOST;
-use crate::factory::MachineSave;
+use crate::factory::{self, MachineSave};
 use crate::player::Player;
 use crate::quests::{BigMessageEvent, FlagEvent};
 use crate::save;
@@ -1517,6 +1517,9 @@ pub struct WarpArriveEvent;
 #[derive(Message)]
 pub struct LandPlanetEvent {
     pub pid: usize,
+    /// False after a cross-galaxy warp: the still-loaded voxel world belongs
+    /// to the galaxy that was already archived at warp completion.
+    pub archive_current: bool,
 }
 
 // ---------- 降落动画 ----------
@@ -3467,6 +3470,10 @@ pub fn warp_system(
     mut big_ev: MessageWriter<BigMessageEvent>,
     mut arrive_ev: MessageWriter<WarpArriveEvent>,
     mut flight_cam: ResMut<FlightCamera>,
+    world: Res<VoxelWorld>,
+    machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
+    spawner: Res<crate::creatures::CreatureSpawner>,
+    creatures: Query<(Entity, &mut Creature, &Transform)>,
 ) {
     if *next_mode != FlightMode::Warping {
         return;
@@ -3501,6 +3508,7 @@ pub fn warp_system(
     *flight_cam = FlightCamera::set(ship.pos + cam_off, q, 111.0);
     if anim.t >= total {
         anim.active = false;
+        snapshot_current_planet(&mut game, &world, &machines, &spawner, &creatures);
         finish_warp(
             &mut next_mode,
             &mut game,
@@ -3511,6 +3519,27 @@ pub fn warp_system(
             &mut ship,
         );
     }
+}
+
+fn snapshot_current_planet(
+    game: &mut SpaceGame,
+    world: &VoxelWorld,
+    machines: &Query<(Entity, &factory::Machine, &factory::MachineState)>,
+    spawner: &crate::creatures::CreatureSpawner,
+    creatures: &Query<(Entity, &mut Creature, &Transform)>,
+) {
+    let current = game.current_planet;
+    let mut archive = game.visited.get(&current).cloned().unwrap_or_default();
+    archive.seed = world.seed;
+    archive.biome = world.biome().key.to_string();
+    archive.ship_pos = [game.ship_pos.x, game.ship_pos.y, game.ship_pos.z];
+    archive.mods = world.serialize_mods();
+    archive.machines = factory::serialize_machines(machines);
+    archive.marks = game.marks.clone();
+    let (herds, cells) = spawner.serialize(creatures);
+    archive.creatures = herds;
+    archive.creature_cells = cells;
+    game.visited.insert(current, archive);
 }
 
 /// 曲速星线：在飞船局部空间循环 180 条发光细线，随加速阶段逐渐拉长。
@@ -3615,7 +3644,7 @@ fn finish_warp(
     } else {
         data::generate_galaxy(target_seed)
     };
-    let restored = game.archives.remove(&target_seed).unwrap_or_default();
+    let mut restored = game.archives.remove(&target_seed).unwrap_or_default();
     game.galaxy = gal;
     if !restored.market.is_empty() {
         game.galaxy.market = restored.market.clone();
@@ -3624,7 +3653,11 @@ fn finish_warp(
         game.galaxy.stock = restored.stock.clone();
     }
     game.visited = restored.planets;
-    game.marks = restored.marks.get(&0).cloned().unwrap_or_default();
+    game.marks = restored
+        .marks
+        .remove(&0)
+        .or_else(|| game.visited.get(&0).map(|archive| archive.marks.clone()))
+        .unwrap_or_default();
     game.current_planet = 0;
     game.landed_planet = -1;
     game.galaxy_count += 1;
@@ -3711,8 +3744,12 @@ fn enter_planet(
     }
     // 异球再入：发换球事件（planet_switch_system 用旧 current_planet 归档并重建场景）；
     // 同球再入：无需切换世界
-    if pid != game.current_planet {
-        land_ev.write(LandPlanetEvent { pid });
+    if let Some(archive_current) = planet_switch_policy(game.current_planet, game.landed_planet, pid)
+    {
+        land_ev.write(LandPlanetEvent {
+            pid,
+            archive_current,
+        });
     } else {
         game.current_planet = pid;
     }
@@ -3725,6 +3762,17 @@ fn enter_planet(
         dur: 4.0,
     });
     crate::audio::play(commands, sfx.laser_hit.clone(), 0.5, None);
+}
+
+fn planet_switch_policy(current_planet: usize, landed_planet: i32, target: usize) -> Option<bool> {
+    if landed_planet < 0 {
+        // A warp changed galaxies while the old voxel world stayed loaded.
+        Some(false)
+    } else if target != current_planet {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 // ---------- 降落动画 ----------
@@ -4208,6 +4256,14 @@ mod tests {
         assert!(!a.is_empty());
         let c = neighbor_seeds(999);
         assert!(c.contains(&data::HOME_GALAXY_SEED));
+    }
+
+    #[test]
+    fn planet_switch_policy_never_archives_old_world_into_new_galaxy() {
+        assert_eq!(planet_switch_policy(0, -1, 0), Some(false));
+        assert_eq!(planet_switch_policy(0, -1, 3), Some(false));
+        assert_eq!(planet_switch_policy(0, 0, 3), Some(true));
+        assert_eq!(planet_switch_policy(3, 3, 3), None);
     }
 
     #[test]

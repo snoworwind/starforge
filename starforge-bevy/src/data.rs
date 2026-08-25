@@ -2584,7 +2584,7 @@ pub const QUESTS: &[Quest] = &[
     Quest {
         id: "q_local_grid",
         title: "让电力有边界",
-        desc: "研究「储能技术」并铺设电力电缆 ×12",
+        desc: "研究「电网储能」并铺设电力电缆 ×12",
         qtype: QuestType::Place,
         flag: None,
         item: None,
@@ -2620,7 +2620,7 @@ pub const QUESTS: &[Quest] = &[
     Quest {
         id: "q_exosuit",
         title: "为未知而生",
-        desc: "研究「外骨骼工程」，解锁环境防护模块",
+        desc: "研究「外骨骼模块化」，解锁环境防护模块",
         qtype: QuestType::Tech,
         flag: None,
         item: None,

@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:17889";
-const PROTOCOL_VERSION: u16 = 1;
+const PROTOCOL_VERSION: u16 = 2;
 const MAX_PACKET: usize = 60_000;
 const MAX_PLAYERS: usize = 32;
 const MAX_BLOCK_LOG: usize = 100_000;
@@ -37,12 +37,14 @@ pub struct NetPlayer {
     pub yaw: f32,
     /// 0 ground, 1 atmosphere, 2 space/warp, 3 station.
     pub mode: u8,
+    pub galaxy: u32,
     pub planet: usize,
     pub seq: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockUpdate {
+    pub galaxy: u32,
     pub planet: usize,
     pub x: i32,
     pub y: i32,
@@ -120,6 +122,7 @@ pub struct RemoteAvatar {
     target: Vec3,
     yaw: f32,
     mode: u8,
+    galaxy: u32,
     planet: usize,
 }
 
@@ -147,7 +150,7 @@ pub struct NetworkState {
     events: Option<Mutex<Receiver<ClientEvent>>>,
     server_stop: Option<Sender<()>>,
     remote_entities: HashMap<u64, Entity>,
-    pending_blocks: HashMap<usize, Vec<BlockUpdate>>,
+    pending_blocks: HashMap<(u32, usize), Vec<BlockUpdate>>,
     send_acc: f32,
     seq: u32,
 }
@@ -291,8 +294,8 @@ fn valid_player(player: &NetPlayer) -> bool {
 
 fn valid_block(update: &BlockUpdate) -> bool {
     update.planet < 1024
-        && update.x.abs() <= 1_000_000
-        && update.z.abs() <= 1_000_000
+        && update.x.unsigned_abs() <= 1_000_000
+        && update.z.unsigned_abs() <= 1_000_000
         && (0..crate::data::WORLD_H).contains(&update.y)
         && crate::data::BLOCKS
             .iter()
@@ -311,7 +314,7 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
         .spawn(move || {
             let mut clients: HashMap<SocketAddr, ServerClient> = HashMap::new();
             let mut world_id: Option<u64> = None;
-            let mut block_log: HashMap<(usize, i32, i32, i32), BlockUpdate> = HashMap::new();
+            let mut block_log: HashMap<(u32, usize, i32, i32, i32), BlockUpdate> = HashMap::new();
             let mut next_id = 1u64;
             let mut last_snapshot = Instant::now();
             let mut block_window = Instant::now();
@@ -466,7 +469,13 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                                 continue;
                             }
                             block_count += 1;
-                            let key = (update.planet, update.x, update.y, update.z);
+                            let key = (
+                                update.galaxy,
+                                update.planet,
+                                update.x,
+                                update.y,
+                                update.z,
+                            );
                             if !block_log.contains_key(&key) && block_log.len() >= MAX_BLOCK_LOG {
                                 continue;
                             }
@@ -629,7 +638,15 @@ fn mode_code(mode: FlightMode) -> u8 {
     }
 }
 
-fn should_show_remote(remote: &RemoteAvatar, local_mode: u8, local_planet: usize) -> bool {
+fn should_show_remote(
+    remote: &RemoteAvatar,
+    local_mode: u8,
+    local_galaxy: u32,
+    local_planet: usize,
+) -> bool {
+    if remote.galaxy != local_galaxy {
+        return false;
+    }
     match local_mode {
         0 | 1 => remote.planet == local_planet && remote.mode == local_mode,
         2 => remote.mode == 2,
@@ -648,32 +665,38 @@ fn apply_block(
         return;
     }
     world.set(update.x, update.y, update.z, update.id);
-    if update.id == crate::data::ids::AIR {
-        if let Some((entity, _)) = machines
-            .iter()
-            .find(|(_, m)| m.pos == [update.x, update.y, update.z])
-        {
+    let pos = [update.x, update.y, update.z];
+    let block = crate::data::block_by_id(update.id);
+    let existing = machines.iter().find(|(_, machine)| machine.pos == pos);
+    let existing_matches = existing.is_some_and(|(_, machine)| {
+        block.machine.is_some() && machine.kind.block_key() == block.key
+    });
+    if !existing_matches {
+        if let Some((entity, _)) = existing {
             commands.entity(entity).despawn();
         }
-    } else {
-        let block = crate::data::block_by_id(update.id);
-        if block.machine.is_some()
-            && !machines
-                .iter()
-                .any(|(_, m)| m.pos == [update.x, update.y, update.z])
-        {
-            crate::factory::spawn_machine(
-                commands,
-                [update.x, update.y, update.z],
-                block.key,
-                update.dir,
-            );
+        if block.machine.is_some() {
+            crate::factory::spawn_machine(commands, pos, block.key, update.dir);
         }
     }
 }
 
 fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
     if !valid_block(&update) {
+        return;
+    }
+    if let Some(existing) = net
+        .pending_blocks
+        .entry((update.galaxy, update.planet))
+        .or_default()
+        .iter_mut()
+        .find(|pending| pending.x == update.x && pending.y == update.y && pending.z == update.z)
+    {
+        // Several UDP updates for one cell can arrive before the next Bevy
+        // frame. Only the newest state matters; applying every intermediate
+        // replacement against a deferred Commands queue can spawn duplicate
+        // logical machine entities.
+        *existing = update;
         return;
     }
     let pending = net.pending_blocks.values().map(Vec::len).sum::<usize>();
@@ -689,7 +712,7 @@ fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
         }
     }
     net.pending_blocks
-        .entry(update.planet)
+        .entry((update.galaxy, update.planet))
         .or_default()
         .push(update);
 }
@@ -732,12 +755,14 @@ pub fn network_system(
             }
             ClientEvent::Packet(packet) => match packet {
                 ServerPacket::Welcome { id, host_name } => {
+                    let host_name = clean_name(&host_name);
                     net.my_id = id;
                     net.connected = true;
                     net.status = format!("{} · P{id} · 主机 {host_name}", net.role.label());
                     net.chat.push(format!("已连接到 {host_name}"));
                 }
                 ServerPacket::Reject { reason } => {
+                    let reason = clean_chat(&reason);
                     clear_remote_entities(&mut net, &mut commands);
                     net.stop_transport();
                     net.status = format!("连接被拒绝：{reason}");
@@ -745,9 +770,29 @@ pub fn network_system(
                     net.chat.push(status);
                     net.connected = false;
                 }
-                ServerPacket::Snapshot { players } => latest_players = Some(players),
-                ServerPacket::Chat { name, text } => net.chat.push(format!("{name}：{text}")),
-                ServerPacket::Notice { text } => net.chat.push(text),
+                ServerPacket::Snapshot { players } => {
+                    let mut ids = HashSet::new();
+                    latest_players = Some(
+                        players
+                            .into_iter()
+                            .filter(valid_player)
+                            .filter(|player| player.id != 0 && ids.insert(player.id))
+                            .take(MAX_PLAYERS)
+                            .collect(),
+                    );
+                }
+                ServerPacket::Chat { name, text } => {
+                    let text = clean_chat(&text);
+                    if !text.is_empty() {
+                        net.chat.push(format!("{}：{text}", clean_name(&name)));
+                    }
+                }
+                ServerPacket::Notice { text } => {
+                    let text = clean_chat(&text);
+                    if !text.is_empty() {
+                        net.chat.push(text);
+                    }
+                }
                 ServerPacket::Block { update } => {
                     queue_pending_block(&mut net, update);
                 }
@@ -797,6 +842,7 @@ pub fn network_system(
                     target: Vec3::from(remote.pos),
                     yaw: remote.yaw,
                     mode: remote.mode,
+                    galaxy: remote.galaxy,
                     planet: remote.planet,
                 });
                 net.remote_entities.insert(remote.id, parts.root);
@@ -806,6 +852,7 @@ pub fn network_system(
                 avatar.target = Vec3::from(remote.pos);
                 avatar.yaw = remote.yaw;
                 avatar.mode = remote.mode;
+                avatar.galaxy = remote.galaxy;
                 avatar.planet = remote.planet;
             }
         }
@@ -816,7 +863,12 @@ pub fn network_system(
     let current_planet = game.current_planet;
     let smooth = 1.0 - (-12.0 * time.delta_secs()).exp();
     for (mut transform, mut visibility, avatar) in &mut avatars {
-        *visibility = if should_show_remote(&avatar, local_mode, current_planet) {
+        *visibility = if should_show_remote(
+            &avatar,
+            local_mode,
+            game.galaxy.seed,
+            current_planet,
+        ) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -827,7 +879,10 @@ pub fn network_system(
             .slerp(Quat::from_rotation_y(avatar.yaw), smooth);
     }
 
-    if let Some(updates) = net.pending_blocks.remove(&current_planet) {
+    if let Some(updates) = net
+        .pending_blocks
+        .remove(&(game.galaxy.seed, current_planet))
+    {
         for update in updates {
             apply_block(&update, &mut world, &mut commands, &machines);
         }
@@ -837,6 +892,7 @@ pub fn network_system(
         if net.connected {
             net.send(ClientPacket::Block {
                 update: BlockUpdate {
+                    galaxy: game.galaxy.seed,
                     planet: current_planet,
                     x: changed.x,
                     y: changed.y,
@@ -873,6 +929,7 @@ pub fn network_system(
                     ship.yaw
                 },
                 mode: local_mode,
+                galaxy: game.galaxy.seed,
                 planet: current_planet,
                 seq: net.seq,
             },
@@ -1050,6 +1107,7 @@ mod tests {
     fn protocol_round_trip() {
         let packet = ClientPacket::Block {
             update: BlockUpdate {
+                galaxy: 77,
                 planet: 2,
                 x: -4,
                 y: 42,
@@ -1074,6 +1132,7 @@ mod tests {
         assert_eq!(clean_name("  A\0B  "), "AB");
         assert_eq!(clean_chat(" hi\r\nthere "), "hithere");
         assert!(!valid_block(&BlockUpdate {
+            galaxy: 77,
             planet: 0,
             x: 0,
             y: crate::data::WORLD_H,
@@ -1082,6 +1141,16 @@ mod tests {
             dir: 0,
         }));
         assert!(!valid_block(&BlockUpdate {
+            galaxy: 77,
+            planet: 0,
+            x: i32::MIN,
+            y: 1,
+            z: 0,
+            id: 1,
+            dir: 0,
+        }));
+        assert!(!valid_block(&BlockUpdate {
+            galaxy: 77,
             planet: 0,
             x: 0,
             y: 1,
@@ -1089,6 +1158,42 @@ mod tests {
             id: u8::MAX,
             dir: 0,
         }));
+    }
+
+    #[test]
+    fn pending_blocks_coalesce_repeated_cells() {
+        let mut net = NetworkState::default();
+        for id in [crate::data::ids::STONE, crate::data::ids::AIR] {
+            queue_pending_block(
+                &mut net,
+                BlockUpdate {
+                    galaxy: 77,
+                    planet: 2,
+                    x: 3,
+                    y: 4,
+                    z: 5,
+                    id,
+                    dir: 0,
+                },
+            );
+        }
+        let pending = &net.pending_blocks[&(77, 2)];
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, crate::data::ids::AIR);
+    }
+
+    #[test]
+    fn remote_visibility_is_isolated_by_galaxy() {
+        let remote = RemoteAvatar {
+            id: 2,
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            mode: 0,
+            galaxy: 77,
+            planet: 0,
+        };
+        assert!(should_show_remote(&remote, 0, 77, 0));
+        assert!(!should_show_remote(&remote, 0, 78, 0));
     }
 
     #[test]
@@ -1122,6 +1227,7 @@ mod tests {
                     pos: [1.0, 42.0, 3.0],
                     yaw: 0.25,
                     mode: 0,
+                    galaxy: 77,
                     planet: 0,
                     seq,
                 },
@@ -1148,6 +1254,7 @@ mod tests {
 
         c1.send(ClientCommand::Packet(ClientPacket::Block {
             update: BlockUpdate {
+                galaxy: 77,
                 planet: 0,
                 x: 2,
                 y: 40,

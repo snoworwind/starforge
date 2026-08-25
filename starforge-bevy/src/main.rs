@@ -1179,7 +1179,41 @@ fn spawn_scene(
     } else {
         world.find_spawn(96, 96)
     };
-    // spawn logical machine entities for machine blocks present in loaded chunks
+    // Restore persisted machine state first. Old saves did not store active-
+    // planet machine data, so loaded block cells remain a compatibility
+    // fallback below. Saved machines in unloaded chunks must be kept: their
+    // blocks will be verified when those chunks stream back in.
+    let mut restored_machine_positions = std::collections::HashSet::new();
+    let mut valid_machine_saves = Vec::new();
+    if let Some(saved) = world_data.as_ref().map(|data| data.machines.as_slice()) {
+        for machine in saved {
+            let pos = [machine.x, machine.y, machine.z];
+            let kind = factory::MachineKind::from_block_key(&machine.kind);
+            if machine.y < 0
+                || machine.y >= data::WORLD_H
+                || machine.x.unsigned_abs() > 1_000_000
+                || machine.z.unsigned_abs() > 1_000_000
+                || kind == factory::MachineKind::Other
+                || !restored_machine_positions.insert(pos)
+            {
+                continue;
+            }
+            let cx = machine.x.div_euclid(data::CHUNK);
+            let cz = machine.z.div_euclid(data::CHUNK);
+            if world.get_chunk(cx, cz).is_some()
+                && data::block_by_id(world.get(machine.x, machine.y, machine.z)).machine
+                    != Some(kind.block_key())
+            {
+                restored_machine_positions.remove(&pos);
+                continue;
+            }
+            valid_machine_saves.push(machine.clone());
+        }
+    }
+    factory::deserialize_machines(commands, &valid_machine_saves);
+
+    // Spawn default logical state for machine blocks not represented in old
+    // or partially recovered saves.
     let machine_cells: Vec<([i32; 3], u8)> = world
         .chunks
         .values()
@@ -1202,6 +1236,9 @@ fn spawn_scene(
         })
         .collect();
     for (cell, id) in machine_cells {
+        if restored_machine_positions.contains(&cell) {
+            continue;
+        }
         let key = data::block_by_id(id).key;
         factory::spawn_machine(commands, cell, key, 0);
     }
@@ -1311,6 +1348,7 @@ fn spawn_scene(
         // 地图标记 / 跃迁锁定 / 跨星系档案 / 放置计数（JS mapMarks/warpLock/galaxyArchives/placedCount）
         game.marks = wd.marks.clone();
         game.warp_lock = wd.warp_lock.clone();
+        game.visited = wd.visited.clone();
         game.archives = wd.archives.clone();
         quests.placed = wd.placed.clone();
         if wd.state == "space" {
@@ -1330,6 +1368,24 @@ fn spawn_scene(
             }
         }
     }
+    // A save made in space immediately after a cross-galaxy warp still has
+    // the departed galaxy's voxel world loaded. That world is also present in
+    // the archived galaxy snapshot, which lets old saves (without an explicit
+    // owner field) be identified safely. The next landing must rebuild rather
+    // than treating it as planet 0 of the destination galaxy.
+    let loaded_world_is_archived = world_data.as_ref().is_some_and(|saved| {
+        saved.state == "space"
+            && saved.archives.values().any(|galaxy| {
+                galaxy.planets.values().any(|planet| {
+                    planet.seed == world.seed && planet.biome == world.biome().key
+                })
+            })
+    });
+    game.landed_planet = if loaded_world_is_archived {
+        -1
+    } else {
+        game.current_planet as i32
+    };
 
     // 初始飞船
     if start_mode == FlightMode::Space
@@ -1583,21 +1639,24 @@ fn planet_switch_system(
 ) {
     for e in ev.read() {
         let pid = e.pid;
-        // 归档当前星球
-        let cur = game.current_planet;
-        let machines_save = factory::serialize_machines(&machines);
-        let mut archive = game.visited.get(&cur).cloned().unwrap_or_default();
-        archive.machines = machines_save;
-        archive.ship_pos = [game.ship_pos.x, game.ship_pos.y, game.ship_pos.z];
-        archive.mods = world.serialize_mods();
-        archive.seed = world.seed;
-        archive.biome = world.biome().key.to_string();
-        archive.marks = game.marks.clone();
-        // 兽群随星球档案归档（MC 风格：位置/血量/领地/被杀记录）
-        let (herds_save, cells_save) = spawner.serialize(&creatures);
-        archive.creatures = herds_save;
-        archive.creature_cells = cells_save;
-        game.visited.insert(cur, archive);
+        if e.archive_current {
+            // 同一星系内换星：归档当前星球。跨星系时旧世界已在
+            // warp_system 完成前归档，不能写进目标星系的 visited。
+            let cur = game.current_planet;
+            let machines_save = factory::serialize_machines(&machines);
+            let mut archive = game.visited.get(&cur).cloned().unwrap_or_default();
+            archive.machines = machines_save;
+            archive.ship_pos = [game.ship_pos.x, game.ship_pos.y, game.ship_pos.z];
+            archive.mods = world.serialize_mods();
+            archive.seed = world.seed;
+            archive.biome = world.biome().key.to_string();
+            archive.marks = game.marks.clone();
+            // 兽群随星球档案归档（MC 风格：位置/血量/领地/被杀记录）
+            let (herds_save, cells_save) = spawner.serialize(&creatures);
+            archive.creatures = herds_save;
+            archive.creature_cells = cells_save;
+            game.visited.insert(cur, archive);
+        }
         // 清理当前场景
         for ent in &chunk_meshes {
             commands.entity(ent).despawn();
@@ -1738,6 +1797,7 @@ fn save_system(
     quests: Res<quests::Quests>,
     station: Option<Res<station::StationState>>,
     spawner: Res<creatures::CreatureSpawner>,
+    machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
     creatures_q: Query<(Entity, &mut creatures::Creature, &Transform)>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
@@ -1786,6 +1846,7 @@ fn save_system(
             None
         };
         let (creatures_save, creature_cells_save) = spawner.serialize(&creatures_q);
+        let machines_save = factory::serialize_machines(&machines);
         let ok_world = save::save_world_full(
             &world,
             &names.world,
@@ -1802,6 +1863,8 @@ fn save_system(
             &game.marks,
             game.warp_lock.as_ref(),
             &quests.placed,
+            &machines_save,
+            &game.visited,
             &game.archives,
             &creatures_save,
             &creature_cells_save,

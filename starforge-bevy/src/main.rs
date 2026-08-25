@@ -1240,6 +1240,8 @@ fn spawn_scene(
     let mut research_active: Option<(String, f32)> = None;
 
     if let Some(cd) = char_data.as_ref() {
+        p.equipment = cd.equipment.clone();
+        p.equipment.sanitize();
         if let Some(saved_position) = safe_player_position(cd.pos) {
             p.pos = saved_position;
         }
@@ -1254,12 +1256,14 @@ fn spawn_scene(
         } else {
             0.0
         };
+        let max_shield = p.stat_max("shield");
+        let max_o2 = p.stat_max("o2");
         p.stats = player::Stats {
             // A dead flag is not part of the save schema; never reload an
             // alive player with zero health and no respawn timer.
             hp: finite_clamp(cd.stats[0], 8.0, 0.1, 8.0),
-            shield: finite_clamp(cd.stats[1], 6.0, 0.0, 6.0),
-            o2: finite_clamp(cd.stats[2], 100.0, 0.0, 100.0),
+            shield: finite_clamp(cd.stats[1], 6.0, 0.0, max_shield),
+            o2: finite_clamp(cd.stats[2], 100.0, 0.0, max_o2),
             haz: finite_clamp(cd.stats[3], 100.0, 0.0, 100.0),
             jet: finite_clamp(cd.stats[4], 100.0, 0.0, 100.0),
             laser: finite_clamp(cd.stats[5], 100.0, 0.0, 100.0),
@@ -1295,6 +1299,9 @@ fn spawn_scene(
         game.galaxy_count = wd.galaxy_count.max(1);
         if !wd.market.is_empty() {
             game.galaxy.market = wd.market.clone();
+        }
+        if !wd.stock.is_empty() {
+            game.galaxy.stock = wd.stock.clone();
         }
         if let Some(sp) = wd.ship_pos
             && sp.iter().all(|v| v.is_finite())
@@ -1344,11 +1351,10 @@ fn spawn_scene(
     {
         ship_data = cd.player_ship.clone();
     }
-    let mut normalized_ship_inv =
-        crate::inventory::Inventory::from_slots(ship_data.inv.clone()).slots;
-    normalized_ship_inv.truncate(12);
-    normalized_ship_inv.resize(12, None);
-    ship_data.inv = normalized_ship_inv;
+    let cargo_slots = data::ship_class_by_key(&ship_data.cls).slots;
+    ship_data.inv =
+        crate::inventory::Inventory::from_slots_with_capacity(ship_data.inv.clone(), cargo_slots)
+            .slots;
     // 船放在玩家出生点旁边（太空开局用占位点，船随即被同步到存档太空位置）
     let ship_anchor = if start_mode == FlightMode::Space {
         Vec3::new(96.0, 40.0, 96.0)
@@ -1385,14 +1391,6 @@ fn spawn_scene(
         flames,
         data: ship_data.clone(),
     });
-    game.ship_inv = crate::inventory::Inventory::from_slots(ship_data.inv.clone())
-        .slots
-        .into_iter()
-        .take(12)
-        .chain(std::iter::repeat(None))
-        .take(12)
-        .collect();
-
     p.toast("欢迎来到星穹熔炉 · W A S D 移动 · Tab 背包");
     let player_pos = p.pos;
     commands.spawn((
@@ -1797,6 +1795,7 @@ fn save_system(
             game.galaxy.seed,
             game.galaxy_count,
             &game.galaxy.market,
+            &game.galaxy.stock,
             &quests.flags,
             ship_pos,
             ship_state.as_ref(),

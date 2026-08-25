@@ -1086,7 +1086,7 @@ mod tests {
             x: 0,
             y: 1,
             z: 0,
-            id: 60,
+            id: u8::MAX,
             dir: 0,
         }));
     }

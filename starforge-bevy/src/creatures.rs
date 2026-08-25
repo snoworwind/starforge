@@ -72,6 +72,9 @@ pub struct Creature {
     pub fade_t: f32,
     /// 受击反馈计时
     pub hit_t: f32,
+    /// Neutral creatures retaliate for a short period after being attacked.
+    pub aggro_t: f32,
+    pub attack_cd: f32,
 }
 
 /// A visual limb owned by a procedural creature body.
@@ -262,6 +265,8 @@ impl Creature {
             fading: false,
             fade_t: 0.0,
             hit_t: 0.0,
+            aggro_t: 0.0,
+            attack_cd: 0.0,
         }
     }
 }
@@ -956,6 +961,8 @@ fn materialize_herd(
                 fading: false,
                 fade_t: 0.0,
                 hit_t: 0.0,
+                aggro_t: 0.0,
+                attack_cd: 0.0,
             },
             crate::InGame,
         ))
@@ -1120,10 +1127,13 @@ pub fn creature_system(
     time: Res<Time>,
     mut q: Query<(&mut Creature, &mut Transform)>,
     world: Res<World>,
-    player: Query<&Player>,
+    mut player: Query<&mut Player>,
 ) {
     let dt = time.delta_secs();
-    let Ok(p) = player.single() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
+    let player_pos = p.pos;
     for (mut c, mut tf) in &mut q {
         if c.hp <= 0.0 {
             continue;
@@ -1142,6 +1152,8 @@ pub fn creature_system(
             }
         }
         c.hit_t = (c.hit_t - dt).max(0.0);
+        c.aggro_t = (c.aggro_t - dt).max(0.0);
+        c.attack_cd = (c.attack_cd - dt).max(0.0);
         // 散步/休息状态机（JS tickOne 同口径）：walk 2~7s → idle 1.5~4.5s 循环，
         // 每次开始散步只做小角度转向（±0.75 rad），不再每 1~4s 乱转
         c.ai_t -= dt;
@@ -1194,6 +1206,25 @@ pub fn creature_system(
                 c.ai_t = c.ai_t.min(0.35);
             }
         }
+        let player_delta = player_pos - pos;
+        let player_dist = player_delta.xz().length();
+        if c.aggro_t > 0.0 && matches!(c.kind, "crab" | "beetle" | "hopper") {
+            c.walking = true;
+            c.dir = Vec3::new(player_delta.x, 0.0, player_delta.z).normalize_or_zero();
+            c.vel.x = c.dir.x * c.speed * 1.8;
+            c.vel.z = c.dir.z * c.speed * 1.8;
+            if player_dist < 1.5 && c.attack_cd <= 0.0 {
+                c.attack_cd = 1.2;
+                p.damage(if c.kind == "beetle" { 2.0 } else { 1.0 });
+            }
+        } else if matches!(c.kind, "manta" | "blob") && player_dist < 4.0 {
+            // Timid fauna flees rather than sharing the same passive wander AI.
+            c.walking = true;
+            let away = pos - player_pos;
+            c.dir = Vec3::new(away.x, 0.0, away.z).normalize_or_zero();
+            c.vel.x = c.dir.x * c.speed * 1.5;
+            c.vel.z = c.dir.z * c.speed * 1.5;
+        }
         // home 领地（JS 野生生物 26 格外折返）
         if (pos - c.home).xz().length() > 26.0 {
             c.dir = (c.home - pos).normalize_or_zero();
@@ -1227,7 +1258,7 @@ pub fn creature_system(
             c.grounded = false;
         }
         // avoid walking into player
-        if (pos - p.pos).xz().length() < 1.0 && (pos.y - p.pos.y).abs() < 2.0 {
+        if (pos - player_pos).xz().length() < 1.0 && (pos.y - player_pos.y).abs() < 2.0 {
             pos -= c.dir * dt * 2.0;
         }
         tf.translation = pos;
@@ -1374,6 +1405,27 @@ pub fn creature_despawn_system(
                 n,
                 0.4,
             );
+            let biome_loot = match c.kind {
+                "hopper" => Some(("spores", 1 + (rng.next() * 2.0) as i32)),
+                "crab" => Some(("chitin", 1 + (rng.next() * 2.0) as i32)),
+                "beetle" => Some(("chitin", 2 + (rng.next() * 2.0) as i32)),
+                "manta" => Some(("cryocrystal", 1)),
+                "blob" => Some(("enzyme", 1)),
+                "strider" if rng.next() < 0.45 => Some(("resin", 1)),
+                _ => None,
+            };
+            if let Some((item, amount)) = biome_loot {
+                spawn_drop(
+                    &mut commands,
+                    &world,
+                    &icons,
+                    tf.translation + Vec3::new(0.25, 0.8, 0.0),
+                    Vec3::new(0.5, 2.4, 0.0),
+                    item.into(),
+                    amount,
+                    0.4,
+                );
+            }
             crate::audio::play_spatial(
                 &mut commands,
                 sfx.creature_die.clone(),
@@ -1493,6 +1545,8 @@ pub fn sentinel_system(
                             fading: false,
                             fade_t: 0.0,
                             hit_t: 0.0,
+                            aggro_t: 0.0,
+                            attack_cd: 0.0,
                         },
                         crate::InGame,
                     ))

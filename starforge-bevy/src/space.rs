@@ -14,7 +14,6 @@ use crate::creatures::Creature;
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
 use crate::daynight::DIRECT_SUNLIGHT_BOOST;
 use crate::factory::MachineSave;
-use crate::inventory::Slot;
 use crate::player::Player;
 use crate::quests::{BigMessageEvent, FlagEvent};
 use crate::save;
@@ -441,6 +440,10 @@ pub struct Mark {
 pub struct GalaxyArchive {
     pub planets: HashMap<usize, PlanetArchive>,
     pub marks: HashMap<usize, Vec<Mark>>,
+    #[serde(default)]
+    pub market: HashMap<String, f32>,
+    #[serde(default)]
+    pub stock: HashMap<String, i32>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -462,14 +465,14 @@ pub struct SpaceGame {
     pub ship_pos: Vec3,
     pub landed_planet: i32,
     pub play_time: f32,
-    /// 飞船舱货物（当前座驾）
-    pub ship_inv: Vec<Option<Slot>>,
     /// 机库飞船
     pub garage: Vec<save::ShipSave>,
     /// 当前星球地图标记（JS mapMarks[pid]）
     pub marks: Vec<Mark>,
     /// 离站后禁止立即重新泊入的倒计时（秒）。
     pub dock_cd: f32,
+    /// Accumulator for station restocking and market normalization.
+    pub economy_t: f32,
 }
 
 impl SpaceGame {
@@ -493,10 +496,10 @@ impl SpaceGame {
             ship_pos: Vec3::ZERO,
             landed_planet: -1,
             play_time: 0.0,
-            ship_inv: Vec::new(),
             garage: Vec::new(),
             marks: Vec::new(),
             dock_cd: 0.0,
+            economy_t: 0.0,
         }
     }
 
@@ -606,6 +609,8 @@ pub struct VisitorShip {
     pub path_index: usize,
     pub pad: Option<usize>,
     pub timer: f32,
+    pub hostile: bool,
+    pub fire_cd: f32,
 }
 
 /// 太空掉落物（击碎小行星 / 击毁访客船）。
@@ -683,6 +688,7 @@ pub struct BoltAux<'w, 's> {
     traffic: ResMut<'w, VisitorTraffic>,
     player: Query<'w, 's, &'static mut Player>,
     big_ev: MessageWriter<'w, BigMessageEvent>,
+    flag_ev: MessageWriter<'w, FlagEvent>,
     sfx: Res<'w, crate::audio::Sfx>,
     creatures: Query<
         'w,
@@ -705,6 +711,7 @@ pub fn bolt_system(
     mouse: Res<ButtonInput<MouseButton>>,
     mut ship: ResMut<ShipState>,
     ship_asset: Res<ShipAsset>,
+    research: Res<crate::ui::Research>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -768,7 +775,13 @@ pub fn bolt_system(
             _ => (0.22, &[-0.9, 0.9]),
         };
         ship.fire_cd = cooldown;
-        let (dmg, smul) = weapon_spec(&ship_asset.data.cls);
+        let (base_damage, smul) = weapon_spec(&ship_asset.data.cls);
+        let dmg = base_damage
+            * if data::tech_unlocked(&research.techs, "combat") {
+                1.35
+            } else {
+                1.0
+            };
         let q = ship_quat(ship.yaw, ship.pitch, ship.roll);
         let fwd = ship_forward(ship.yaw, ship.pitch);
         let right = q * Vec3::X;
@@ -818,11 +831,11 @@ pub fn bolt_system(
             }
         }
         if let Some(ve) = hit_vis {
-            let (cls, pos, pad) = {
+            let (cls, pos, pad, was_hostile) = {
                 let Ok((_, v, vt)) = visitors.get(ve) else {
                     continue;
                 };
-                (v.cls, vt.translation, v.pad)
+                (v.cls, vt.translation, v.pad, v.hostile)
             };
             let dead = {
                 let Ok((_, mut v, _)) = visitors.get_mut(ve) else {
@@ -862,10 +875,23 @@ pub fn bolt_system(
                     }
                 }
                 aux.big_ev.write(BigMessageEvent {
-                    title: format!("☠ 击毁 {} 级访客船", cls),
+                    title: format!(
+                        "☠ 击毁 {} 级{}",
+                        cls,
+                        if was_hostile {
+                            "掠夺者"
+                        } else {
+                            "访客船"
+                        }
+                    ),
                     sub: format!("战利品入舱 · 信用点 +{}", cr),
                     dur: 3.5,
                 });
+                if was_hostile {
+                    aux.flag_ev.write(FlagEvent {
+                        flag: "pirateDefeated".into(),
+                    });
+                }
                 crate::audio::play_spatial(
                     &mut commands,
                     aux.sfx.explosion.clone(),
@@ -875,6 +901,13 @@ pub fn bolt_system(
                 );
                 commands.entity(ve).despawn();
             } else {
+                if let Ok((_, mut visitor, _)) = visitors.get_mut(ve) {
+                    visitor.hostile = true;
+                    visitor.phase = VisitorPhase::Cruise;
+                    if let Some(pad) = visitor.pad.take() {
+                        aux.traffic.pads[pad] = None;
+                    }
+                }
                 crate::audio::play_spatial(
                     &mut commands,
                     aux.sfx.laser_hit.clone(),
@@ -958,6 +991,26 @@ pub fn bolt_system(
             );
             let trit = 4 + (rng.next() * 5.0) as i32;
             spawn_space_drop(&mut commands, &bolt_mesh, &drop_mat, apos, "tritium", trit);
+            let nickel = 2 + (rng.next() * 4.0) as i32;
+            spawn_space_drop(
+                &mut commands,
+                &bolt_mesh,
+                &drop_mat,
+                apos + Vec3::X * 1.5,
+                "nickel",
+                nickel,
+            );
+            if rng.next() < 0.35 {
+                let cobalt = 1 + (rng.next() * 3.0) as i32;
+                spawn_space_drop(
+                    &mut commands,
+                    &bolt_mesh,
+                    &drop_mat,
+                    apos - Vec3::X * 1.5,
+                    "cobalt",
+                    cobalt,
+                );
+            }
             if rng.next() < 0.25 {
                 let gold = 1 + (rng.next() * 2.0) as i32;
                 spawn_space_drop(
@@ -1223,6 +1276,10 @@ pub fn visitor_system(
     asset_server: Res<AssetServer>,
     game: Res<SpaceGame>,
     defense: Res<crate::station::StationDefense>,
+    ship: Res<ShipState>,
+    mut player: Query<&mut Player>,
+    sfx: Res<crate::audio::Sfx>,
+    mut big_ev: MessageWriter<BigMessageEvent>,
     mut respawn: ResMut<VisitorRespawn>,
     mut traffic: ResMut<VisitorTraffic>,
     mut visitors: Query<(Entity, &mut VisitorShip, &mut Transform)>,
@@ -1268,6 +1325,7 @@ pub fn visitor_system(
                 None,
             );
             let target = random_cruise_target(&game, &mut rng);
+            let hostile = game.galaxy.seed != data::HOME_GALAXY_SEED && rng.next() < 0.32;
             commands.entity(entity).insert(VisitorShip {
                 cls: cls.key,
                 hp: vis_hp(cls.key),
@@ -1279,7 +1337,16 @@ pub fn visitor_system(
                 path_index: 0,
                 pad: None,
                 timer: 8.0 + rng.next() * 20.0,
+                hostile,
+                fire_cd: 1.0 + rng.next() * 2.0,
             });
+            if hostile {
+                big_ev.write(BigMessageEvent {
+                    title: "⚠ 敌对信号".into(),
+                    sub: format!("{} 级掠夺者进入当前行星轨道", cls.key),
+                    dur: 3.0,
+                });
+            }
             if count + 1 >= 5 {
                 respawn.initial_fill_done = true;
             }
@@ -1294,6 +1361,39 @@ pub fn visitor_system(
     let station = Vec3::from(game.galaxy.station);
     let seed = game.galaxy.seed;
     for (entity, mut visitor, mut transform) in &mut visitors {
+        if visitor.hostile && *mode == FlightMode::Space && !defense.active() {
+            if let Some(pad) = visitor.pad.take() {
+                traffic.pads[pad] = None;
+            }
+            visitor.phase = VisitorPhase::Cruise;
+            visitor.path.clear();
+            visitor.target = ship.pos;
+            visitor.fire_cd -= dt;
+            let distance = transform.translation.distance(ship.pos);
+            if distance < 260.0 && visitor.fire_cd <= 0.0 {
+                visitor.fire_cd = match visitor.cls {
+                    "S" => 0.9,
+                    "A" => 1.15,
+                    _ => 1.4,
+                };
+                if let Ok(mut p) = player.single_mut() {
+                    let damage = match visitor.cls {
+                        "S" => 2.0,
+                        "A" => 1.25,
+                        _ => 0.75,
+                    };
+                    p.damage(damage);
+                    p.toast(format!("遭到 {} 级掠夺者攻击", visitor.cls));
+                }
+                crate::audio::play_spatial(
+                    &mut commands,
+                    sfx.laser_hit.clone(),
+                    ship.pos,
+                    0.35,
+                    None,
+                );
+            }
+        }
         match visitor.phase {
             VisitorPhase::Cruise => {
                 visitor.timer -= dt;
@@ -1306,7 +1406,7 @@ pub fn visitor_system(
                     );
                     visitor.target = random_cruise_target(&game, &mut rng);
                 }
-                if visitor.timer <= 0.0 && !defense.active() {
+                if visitor.timer <= 0.0 && !defense.active() && !visitor.hostile {
                     let free = traffic.pads.iter().position(Option::is_none);
                     let mut rng = crate::rng::Rng::new(
                         entity.index().index().wrapping_mul(97)
@@ -3503,6 +3603,8 @@ fn finish_warp(
     let mut prev_archive = GalaxyArchive {
         planets: game.visited.clone(),
         marks: HashMap::new(),
+        market: game.galaxy.market.clone(),
+        stock: game.galaxy.stock.clone(),
     };
     prev_archive
         .marks
@@ -3515,6 +3617,12 @@ fn finish_warp(
     };
     let restored = game.archives.remove(&target_seed).unwrap_or_default();
     game.galaxy = gal;
+    if !restored.market.is_empty() {
+        game.galaxy.market = restored.market.clone();
+    }
+    if !restored.stock.is_empty() {
+        game.galaxy.stock = restored.stock.clone();
+    }
     game.visited = restored.planets;
     game.marks = restored.marks.get(&0).cloned().unwrap_or_default();
     game.current_planet = 0;

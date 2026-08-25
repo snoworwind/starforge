@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 
 /// 外观（捏人）— 与原始 char record appearance 字段一致。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -161,6 +161,8 @@ pub struct CharData {
     pub pitch: f32,
     pub stats: [f32; 6], // hp, shield, o2, haz, jet, laser
     pub inv: Vec<Option<Slot>>,
+    #[serde(default)]
+    pub equipment: crate::player::Equipment,
     pub hot_idx: i32,
     pub credits: i32,
     pub difficulty: u8, // 0 easy, 1 normal, 2 hard, 3 creative
@@ -203,6 +205,8 @@ pub struct WorldData {
     pub galaxy_count: u32,
     #[serde(default)]
     pub market: HashMap<String, f32>,
+    #[serde(default)]
+    pub stock: HashMap<String, i32>,
     #[serde(default)]
     pub flags: HashMap<String, bool>,
     /// 地面飞船停泊点
@@ -352,6 +356,7 @@ pub fn save_char(
             p.stats.laser,
         ],
         inv: p.inv.slots.clone(),
+        equipment: p.equipment.clone(),
         hot_idx: p.hot_idx,
         credits: p.credits,
         difficulty: match p.difficulty {
@@ -376,9 +381,26 @@ pub fn save_char(
 pub fn load_char(name: &str) -> Option<CharData> {
     let mut data: CharData = read_json(&char_path(name))?;
     data.hot_idx = data.hot_idx.clamp(-1, 8);
-    data.inv.truncate(crate::inventory::INV_SLOTS);
-    data.player_ship.inv.truncate(12);
+    data.inv = crate::inventory::Inventory::from_slots(data.inv).slots;
+    data.equipment.sanitize();
+    data.quest_idx = data.quest_idx.min(crate::data::QUESTS.len());
+    let mut seen_techs = std::collections::HashSet::new();
+    data.techs.retain(|tech| {
+        crate::data::TECHS.iter().any(|known| known.id == tech) && seen_techs.insert(tech.clone())
+    });
+    let cargo_slots = crate::data::ship_class_by_key(&data.player_ship.cls).slots;
+    data.player_ship.inv =
+        crate::inventory::Inventory::from_slots_with_capacity(data.player_ship.inv, cargo_slots)
+            .slots;
     data.ship_garage.truncate(64);
+    for ship in &mut data.ship_garage {
+        let slots = crate::data::ship_class_by_key(&ship.cls).slots;
+        ship.inv = crate::inventory::Inventory::from_slots_with_capacity(
+            std::mem::take(&mut ship.inv),
+            slots,
+        )
+        .slots;
+    }
     if let Some((_, progress)) = &mut data.researching {
         if !progress.is_finite() {
             *progress = 0.0;
@@ -403,6 +425,7 @@ pub fn save_world_full(
     galaxy_seed: u32,
     galaxy_count: u32,
     market: &HashMap<String, f32>,
+    stock: &HashMap<String, i32>,
     flags: &HashMap<String, bool>,
     ship_pos: Option<[f32; 3]>,
     ship_state: Option<&ShipStateSave>,
@@ -426,6 +449,7 @@ pub fn save_world_full(
         galaxy_seed,
         galaxy_count,
         market: market.clone(),
+        stock: stock.clone(),
         flags: flags.clone(),
         ship_pos,
         ship_state: ship_state.cloned(),
@@ -448,6 +472,7 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         0,
         crate::data::HOME_GALAXY_SEED,
         1,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         None,
@@ -495,6 +520,14 @@ pub fn load_world(name: &str) -> Option<WorldData> {
         .market
         .into_iter()
         .filter(|(_, value)| value.is_finite() && *value >= 0.0 && *value <= 1_000_000.0)
+        .take(4096)
+        .collect();
+    data.stock = data
+        .stock
+        .into_iter()
+        .filter(|(item, amount)| {
+            crate::data::item_by_key(item).is_some() && (0..=100_000).contains(amount)
+        })
         .take(4096)
         .collect();
     data.placed = data.placed.into_iter().take(4096).collect();

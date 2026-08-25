@@ -1,4 +1,4 @@
-//! 任务线（21 步主线 + 村庄支线）— port of main.js QUESTS / checkQuest / announceQuest.
+//! 两章主线 + 村庄支线 — port of main.js QUESTS / checkQuest / announceQuest.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -137,7 +137,7 @@ impl Quests {
             }
             QuestType::Tech => q
                 .tech
-                .map(|t| techs.iter().any(|x| x == t))
+                .map(|t| data::tech_unlocked(techs, t))
                 .unwrap_or(false),
             QuestType::Event => q
                 .flag
@@ -151,6 +151,16 @@ impl Quests {
                 && nq.id == "q_explore"
             {
                 self.flags.insert("newPlanet".into(), false);
+            }
+            if let Some(nq) = data::QUESTS.get(self.idx)
+                && nq.id == "q_pirate"
+            {
+                self.flags.insert("pirateDefeated".into(), false);
+            }
+            if let Some(nq) = data::QUESTS.get(self.idx)
+                && nq.id == "q_colony_online"
+            {
+                self.flags.insert("colonyOnline".into(), false);
             }
             self.announce = Some((
                 format!("任务完成：{}", q.title),
@@ -181,8 +191,8 @@ impl Quests {
                     }
                 } else if !p.creative() {
                     self.announce = Some((
-                        "◈ 第一章 完结".into(),
-                        "宇宙没有边界。旅行者，继续前进吧。".into(),
+                        "◈ 第二章 完结".into(),
+                        "边疆基地已经点亮。宇宙仍会持续生成新的星系、市场与威胁。".into(),
                         5.0,
                     ));
                 }
@@ -572,6 +582,30 @@ mod tests {
         let p = test_player(false);
         assert!(q.check(&p, &[]).is_none());
         q.placed.insert("furnace".into(), 1);
+        assert!(q.check(&p, &[]).is_some());
+    }
+
+    #[test]
+    fn colony_cycle_must_happen_after_core_quest_activates() {
+        let core_idx = data::QUESTS
+            .iter()
+            .position(|quest| quest.id == "q_colony_core")
+            .unwrap();
+        let mut q = Quests {
+            idx: core_idx,
+            ..Default::default()
+        };
+        let p = test_player(false);
+        q.placed.insert("colony_core".into(), 1);
+        q.flags.insert("colonyOnline".into(), true);
+        assert!(q.check(&p, &[]).is_some());
+        assert_eq!(
+            q.current_quest().map(|quest| quest.id),
+            Some("q_colony_online")
+        );
+        assert_eq!(q.flags.get("colonyOnline"), Some(&false));
+        assert!(q.check(&p, &[]).is_none());
+        q.flags.insert("colonyOnline".into(), true);
         assert!(q.check(&p, &[]).is_some());
     }
 

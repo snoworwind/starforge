@@ -36,8 +36,15 @@ impl Inventory {
 
     /// Normalize data loaded from disk to the fixed-size inventory shape.
     pub fn from_slots(slots: Vec<Option<Slot>>) -> Self {
-        let mut inventory = Self::default();
-        for slot in slots.into_iter().take(INV_SLOTS).flatten() {
+        Self::from_slots_with_capacity(slots, INV_SLOTS)
+    }
+
+    /// Normalize a variable-size container such as a ship cargo hold.
+    pub fn from_slots_with_capacity(slots: Vec<Option<Slot>>, capacity: usize) -> Self {
+        let mut inventory = Self {
+            slots: vec![None; capacity],
+        };
+        for slot in slots.into_iter().take(capacity).flatten() {
             if slot.n > 0 && data::item_by_key(&slot.item).is_some() {
                 inventory.add_item(&slot.item, slot.n.min(1_000_000));
             }
@@ -114,6 +121,25 @@ impl Inventory {
         true
     }
 
+    /// Remove up to `n` from one exact slot and return what was removed.
+    pub fn take_from_slot(&mut self, index: usize, n: i32) -> Option<Slot> {
+        if n <= 0 {
+            return None;
+        }
+        let slot = self.slots.get_mut(index)?;
+        let current = slot.as_mut()?;
+        let take = current.n.max(0).min(n);
+        if take <= 0 {
+            return None;
+        }
+        let item = current.item.clone();
+        current.n -= take;
+        if current.n <= 0 {
+            *slot = None;
+        }
+        Some(Slot { item, n: take })
+    }
+
     pub fn has_items(&self, costs: &[(&str, i32)]) -> bool {
         costs
             .iter()
@@ -188,4 +214,42 @@ pub struct InventoryPlugin;
 
 impl bevy::prelude::Plugin for InventoryPlugin {
     fn build(&self, _app: &mut bevy::prelude::App) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variable_container_preserves_requested_capacity() {
+        let inventory = Inventory::from_slots_with_capacity(
+            vec![Some(Slot {
+                item: "iron".into(),
+                n: 3,
+            })],
+            48,
+        );
+        assert_eq!(inventory.slots.len(), 48);
+        assert_eq!(inventory.count_item("iron"), 3);
+    }
+
+    #[test]
+    fn exact_slot_take_does_not_consume_other_stacks() {
+        let mut inventory = Inventory {
+            slots: vec![
+                Some(Slot {
+                    item: "iron".into(),
+                    n: 2,
+                }),
+                Some(Slot {
+                    item: "iron".into(),
+                    n: 5,
+                }),
+            ],
+        };
+        let taken = inventory.take_from_slot(0, 1).unwrap();
+        assert_eq!(taken.n, 1);
+        assert_eq!(inventory.slots[0].as_ref().map(|slot| slot.n), Some(1));
+        assert_eq!(inventory.slots[1].as_ref().map(|slot| slot.n), Some(5));
+    }
 }

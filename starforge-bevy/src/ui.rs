@@ -1276,6 +1276,9 @@ enum InvAction {
     Shift(usize),
     Trash,
     Charge(&'static str),
+    EquipHot(usize),
+    Unequip(&'static str),
+    ConsumeHot(usize),
 }
 
 /// 带左右键与 Shift 检测的槽位按钮响应。
@@ -1347,7 +1350,9 @@ fn slot_button_ex(
                 "res" => "资源",
                 "mat" => "材料",
                 "blk" => "方块",
-                _ => "机器",
+                "mach" => "机器",
+                "equip" => "装备",
+                _ => "物品",
             };
             resp.clone().on_hover_text(format!(
                 "{}\n{} · 基准价 ₪{}\n{}",
@@ -1397,6 +1402,14 @@ pub fn inventory_panel_system(
         .single()
         .map(|p| p.stats.clone())
         .unwrap_or_else(|_| crate::player::Stats::full());
+    let equipment_snap = player
+        .single()
+        .map(|p| p.equipment.clone())
+        .unwrap_or_default();
+    let hot_selection = player.single().ok().and_then(|p| {
+        p.hot_slot()
+            .and_then(|index| p.inv.slots[index].clone().map(|slot| (index, slot)))
+    });
     let cursor_snap = ui_state.cursor.clone();
     let drop_mult = player
         .single()
@@ -1404,7 +1417,7 @@ pub fn inventory_panel_system(
         .unwrap_or(1.0);
 
     egui::Window::new("◈ 外骨骼背包")
-        .default_size([760.0, 500.0])
+        .default_size([820.0, 640.0])
         .resizable(false)
         .collapsible(false)
         .open(&mut !close)
@@ -1507,6 +1520,42 @@ pub fn inventory_panel_system(
                     }
                 }
                 cols[0].add_space(6.0);
+                cols[0].label("外骨骼装备");
+                for (slot, label, equipped) in [
+                    ("suit", "防护", equipment_snap.suit.as_deref()),
+                    (
+                        "life_support",
+                        "生命维持",
+                        equipment_snap.life_support.as_deref(),
+                    ),
+                    ("tool", "工具", equipment_snap.tool.as_deref()),
+                    ("defense", "防御", equipment_snap.defense.as_deref()),
+                ] {
+                    cols[0].horizontal(|ui| {
+                        ui.label(format!(
+                            "{label}：{}",
+                            equipped.map(item_name).unwrap_or("未装备")
+                        ));
+                        if equipped.is_some() && ui.small_button("卸下").clicked() {
+                            actions.push(InvAction::Unequip(slot));
+                        }
+                    });
+                }
+                if let Some((index, selected)) = &hot_selection
+                    && let Some(item) = data::item_by_key(&selected.item)
+                {
+                    if item.equipment.is_some()
+                        && cols[0].button(format!("装备：{}", item.name)).clicked()
+                    {
+                        actions.push(InvAction::EquipHot(*index));
+                    }
+                    if matches!(selected.item.as_str(), "medkit" | "oxygen_cell" | "hazard_cell")
+                        && cols[0].button(format!("使用：{}", item.name)).clicked()
+                    {
+                        actions.push(InvAction::ConsumeHot(*index));
+                    }
+                }
+                cols[0].add_space(6.0);
                 // 垃圾桶 + 操作提示
                 cols[0].horizontal(|ui| {
                     let has_cursor = cursor_snap.is_some();
@@ -1566,10 +1615,7 @@ pub fn inventory_panel_system(
                             if !show {
                                 continue;
                             }
-                            let tech_locked = r
-                                .tech
-                                .map(|t| !research.techs.iter().any(|x| x == t))
-                                .unwrap_or(false);
+                            let tech_locked = !data::recipe_unlocked(&research.techs, r);
                             if tech_locked {
                                 continue;
                             }
@@ -1806,6 +1852,86 @@ pub fn inventory_panel_system(
                     audio::play(&mut commands, sfx.error.clone(), 0.5, None);
                 }
             }
+            InvAction::EquipHot(index) => {
+                let Some(slot) = p.inv.slots.get(index).cloned().flatten() else {
+                    continue;
+                };
+                match p.equipment.equip(&slot.item) {
+                    Ok(previous) => {
+                        p.inv.take_from_slot(index, 1);
+                        if let Some(previous) = previous {
+                            let added = p.inv.add_item(&previous, 1);
+                            if added == 0 {
+                                crate::creatures::spawn_drop(
+                                    &mut commands,
+                                    &world,
+                                    &icons,
+                                    p.pos + Vec3::Y * 0.5,
+                                    Vec3::ZERO,
+                                    previous,
+                                    1,
+                                    0.4,
+                                );
+                            }
+                        }
+                        let max_o2 = p.stat_max("o2");
+                        let max_shield = p.stat_max("shield");
+                        p.stats.o2 = p.stats.o2.min(max_o2);
+                        p.stats.shield = p.stats.shield.min(max_shield);
+                        audio::play(&mut commands, sfx.click.clone(), 0.5, None);
+                    }
+                    Err(message) => p.toast(message),
+                }
+            }
+            InvAction::Unequip(slot_name) => {
+                if let Some(item) = p.equipment.take_slot(slot_name) {
+                    let added = p.inv.add_item(&item, 1);
+                    if added == 0 {
+                        crate::creatures::spawn_drop(
+                            &mut commands,
+                            &world,
+                            &icons,
+                            p.pos + Vec3::Y * 0.5,
+                            Vec3::ZERO,
+                            item,
+                            1,
+                            0.4,
+                        );
+                    }
+                    let max_o2 = p.stat_max("o2");
+                    let max_shield = p.stat_max("shield");
+                    p.stats.o2 = p.stats.o2.min(max_o2);
+                    p.stats.shield = p.stats.shield.min(max_shield);
+                }
+            }
+            InvAction::ConsumeHot(index) => {
+                let Some(slot) = p.inv.slots.get(index).cloned().flatten() else {
+                    continue;
+                };
+                let used = match slot.item.as_str() {
+                    "medkit" if p.stats.hp < p.stat_max("hp") => {
+                        let max_hp = p.stat_max("hp");
+                        p.stats.hp = (p.stats.hp + 6.0).min(max_hp);
+                        true
+                    }
+                    "oxygen_cell" if p.stats.o2 < p.stat_max("o2") => {
+                        let max_o2 = p.stat_max("o2");
+                        p.stats.o2 = (p.stats.o2 + 80.0).min(max_o2);
+                        true
+                    }
+                    "hazard_cell" if p.stats.haz < 100.0 => {
+                        p.stats.haz = (p.stats.haz + 70.0).min(100.0);
+                        true
+                    }
+                    _ => false,
+                };
+                if used {
+                    p.inv.take_from_slot(index, 1);
+                    audio::play(&mut commands, sfx.pickup.clone(), 0.6, None);
+                } else {
+                    p.toast("当前无需使用该消耗品");
+                }
+            }
         }
     }
     if sort_request {
@@ -1909,15 +2035,20 @@ pub fn tech_panel_system(
             );
             let (resp, painter) =
                 ui.allocate_painter(egui::vec2(990.0, 440.0), egui::Sense::hover());
-            let origin = resp.rect.min + egui::vec2(30.0, 170.0);
+            // Project the full technology coordinate space into the visible
+            // canvas. The old unscaled positions placed late-game nodes well
+            // outside the fixed-size window.
+            let project = |pos: (f32, f32)| {
+                resp.rect.min + egui::vec2(55.0 + pos.0 * 0.62, 20.0 + pos.1 * 0.58)
+            };
             // 连线三态配色（JS: done #7dff8a66 / req 完成 #ffb34766 / 锁定 #24405a，非 done 虚线 6 4）
             for t in data::TECHS {
                 for req in t.req {
                     if let Some(rt) = data::TECHS.iter().find(|x| x.id == *req) {
-                        let a = origin + egui::vec2(rt.pos.0, rt.pos.1);
-                        let b = origin + egui::vec2(t.pos.0, t.pos.1);
+                        let a = project(rt.pos);
+                        let b = project(t.pos);
                         let t_done = research.techs.iter().any(|x| x == t.id) || t.unlocked;
-                        let req_done = research.techs.iter().any(|x| x == *req);
+                        let req_done = data::tech_unlocked(&research.techs, req);
                         let (color, dash) = if t_done {
                             (
                                 egui::Color32::from_rgba_unmultiplied(0x7d, 0xff, 0x8a, 0x40),
@@ -1945,11 +2076,11 @@ pub fn tech_panel_system(
                 }
             }
             for t in data::TECHS {
-                let center = origin + egui::vec2(t.pos.0, t.pos.1);
+                let center = project(t.pos);
                 let rect = egui::Rect::from_center_size(center, egui::vec2(130.0, 66.0));
                 let researched = research.techs.iter().any(|x| x == t.id) || t.unlocked;
                 let affordable = has_items(&inv_snapshot, t.cost);
-                let req_met = t.req.iter().all(|r| research.techs.iter().any(|x| x == r));
+                let req_met = data::tech_requirements_met(&research.techs, t);
                 let fill = if researched {
                     egui::Color32::from_rgb(0x1d, 0x4a, 0x2e)
                 } else if req_met && affordable {
@@ -2079,6 +2210,7 @@ pub fn machine_panel_system(
     mut contexts: EguiContexts,
     cache: Res<EguiIcons>,
     mut player: Query<&mut Player>,
+    research: Res<Research>,
     mut ui_state: ResMut<UiState>,
     mut q: Query<(&Machine, &mut MachineState)>,
     power: Res<crate::factory::Power>,
@@ -2197,6 +2329,17 @@ pub fn machine_panel_system(
                         }
                     }
                 }
+                Some(MachineState::Tank(c)) => {
+                    ui.label("仅接受酸液、冷却剂、氧气电池和环境净化电池。");
+                    let slots = c.slots.clone();
+                    chest_grid(ui, &cache, &slots, &mut actions);
+                    if let Some(sel) = &sel_info {
+                        ui.label(format!("选中：{} ×{}", item_name(&sel.item), sel.n));
+                        if ui.button("📥 注入选中流体").clicked() {
+                            actions.push(MachinePanelAction::ChestPut);
+                        }
+                    }
+                }
                 Some(MachineState::Collector(c)) => {
                     let slots = c.slots.clone();
                     chest_grid(ui, &cache, &slots, &mut actions);
@@ -2236,9 +2379,10 @@ pub fn machine_panel_system(
                     let avail: Vec<&'static data::Recipe> = data::RECIPES
                         .iter()
                         .filter(|r| {
-                            r.station == where_
-                                || r.station == "both"
-                                || (where_ == "assembler" && r.station == "hand")
+                            data::recipe_unlocked(&research.techs, r)
+                                && (r.station == where_
+                                    || r.station == "both"
+                                    || (where_ == "assembler" && r.station == "hand"))
                         })
                         .collect();
                     egui::ComboBox::from_id_salt("recipe_pick")
@@ -2334,7 +2478,98 @@ pub fn machine_panel_system(
                 }
                 Some(MachineState::Belt(b)) => {
                     ui.label(format!("{} 个物品在运输", b.items.len()));
-                    ui.label("物品从朝向方向输出到下一台机器/传送带。");
+                    if matches!(kind, MachineKind::Pipe | MachineKind::Pump) {
+                        ui.label("流体从朝向方向输出，只接受密封流体物品。");
+                    } else {
+                        ui.label("物品从朝向方向输出到下一台机器/传送带。");
+                    }
+                }
+                Some(MachineState::Router(router)) => {
+                    ui.label(format!("{} 个物品在分流", router.items.len()));
+                    if kind == MachineKind::Filter {
+                        ui.label(format!(
+                            "当前筛选：{}",
+                            router.filter.as_deref().map(item_name).unwrap_or("未设置")
+                        ));
+                        if let Some(sel) = &sel_info
+                            && ui
+                                .button(format!("设为 {}", item_name(&sel.item)))
+                                .clicked()
+                        {
+                            actions.push(MachinePanelAction::SetFilter(Some(sel.item.clone())));
+                        }
+                        if ui.button("清除筛选").clicked() {
+                            actions.push(MachinePanelAction::SetFilter(None));
+                        }
+                        ui.label("匹配物走正面，其他物走右侧。配置不消耗物品。");
+                    } else {
+                        ui.label("物品按左、前、右顺序轮流分配；堵塞时尝试其他出口。");
+                    }
+                }
+                Some(MachineState::Battery(battery)) => {
+                    ui.label(format!(
+                        "储能：{:.1} / {:.0} kWs ({:.0}%)",
+                        battery.charge,
+                        crate::factory::BATTERY_CAPACITY,
+                        battery.charge / crate::factory::BATTERY_CAPACITY * 100.0
+                    ));
+                    ui.label("与电缆相邻后，只为所在局部电网充放电。");
+                }
+                Some(MachineState::Colony(colony)) => {
+                    let oxygen = colony.input.get("oxygen_cell").copied().unwrap_or(0);
+                    let medkits = colony.input.get("medkit").copied().unwrap_or(0);
+                    let biofiber = colony.input.get("biofiber").copied().unwrap_or(0);
+                    ui.label(format!(
+                        "舱室规模：{} / 12 · 居民：{} / 8",
+                        colony.habitat, colony.residents
+                    ));
+                    ui.label(format!(
+                        "补给：压缩氧气瓶 {oxygen} · 医疗包 {medkits} · 生物纤维 {biofiber}"
+                    ));
+                    ui.add(
+                        egui::ProgressBar::new(colony.prog.clamp(0.0, 1.0))
+                            .show_percentage()
+                            .text(if m.active {
+                                "殖民周期运行中"
+                            } else if colony.residents == 0 {
+                                "需要至少 12 块舱室材料"
+                            } else {
+                                "等待补给、电力或输出空间"
+                            }),
+                    );
+                    ui.label(format!(
+                        "已完成 {} 个周期 · 每周期产出研究数据 ×2 与 ₪{}",
+                        colony.cycles,
+                        200 + colony.residents * 25
+                    ));
+                    if let Some(output) = &colony.output {
+                        ui.label(format!("待取：{} ×{}", item_name(&output.item), output.n));
+                    }
+                    if let Some(sel) = &sel_info {
+                        if crate::factory::colony_supply(&sel.item) {
+                            if ui.button("📥 投入殖民补给").clicked() {
+                                actions.push(MachinePanelAction::InsertInput);
+                            }
+                        } else {
+                            ui.label("殖民核心仅接受压缩氧气瓶、医疗包和生物纤维。");
+                        }
+                    }
+                    if ui.button("📤 取出研究数据").clicked() {
+                        actions.push(MachinePanelAction::TakeOutput);
+                    }
+                }
+                Some(MachineState::Turret(turret)) => {
+                    ui.label(if !m.active {
+                        "⚠ 电力不足"
+                    } else if turret.engaged {
+                        "⌖ 锁定敌对目标"
+                    } else {
+                        "✓ 自动警戒中"
+                    });
+                    ui.label("射程 24 格 · 单发伤害 3.5 · 射击间隔 0.65 秒");
+                    ui.label("待机耗电 1 kW · 交战耗电 10 kW");
+                    ui.label(format!("累计击杀：{}", turret.kills));
+                    ui.label("遗迹守卫会被主动攻击；本地生物只在进入敌对状态后成为目标。");
                 }
                 Some(MachineState::Beacon(bc)) => {
                     let mut label = bc.label.clone();
@@ -2371,7 +2606,11 @@ pub fn machine_panel_system(
                 _ => {
                     if matches!(
                         kind,
-                        MachineKind::Solar | MachineKind::Wind | MachineKind::Launchpad
+                        MachineKind::Solar
+                            | MachineKind::Wind
+                            | MachineKind::Launchpad
+                            | MachineKind::Cable
+                            | MachineKind::Geothermal
                     ) {
                         ui.label("该机器自动运行，无需操作。");
                     } else {
@@ -2518,6 +2757,7 @@ pub fn machine_panel_system(
                     MachineState::Furnace(f) => f.output.take(),
                     MachineState::Miner(mn) => mn.output.take(),
                     MachineState::Crafter(cr) => cr.output.take(),
+                    MachineState::Colony(colony) => colony.output.take(),
                     _ => None,
                 };
                 if let Some(o) = out {
@@ -2545,6 +2785,7 @@ pub fn machine_panel_system(
             MachinePanelAction::ChestTake(i) => {
                 let taken = match &mut *st {
                     MachineState::Chest(c) => c.slots.get_mut(i).and_then(|s| s.take()),
+                    MachineState::Tank(c) => c.slots.get_mut(i).and_then(|s| s.take()),
                     MachineState::Collector(c) => c.slots.get_mut(i).and_then(|s| s.take()),
                     _ => None,
                 };
@@ -2580,8 +2821,22 @@ pub fn machine_panel_system(
                 }
             }
             MachinePanelAction::SetRecipe(id) => {
-                let id_str: &'static str = Box::leak(id.clone().into_boxed_str());
                 if let MachineState::Crafter(cr) = &mut *st {
+                    let where_ = if mclone.kind == MachineKind::Refinery {
+                        "refinery"
+                    } else {
+                        "assembler"
+                    };
+                    let Some(recipe) = data::RECIPES.iter().find(|recipe| {
+                        recipe.id == id
+                            && data::recipe_unlocked(&research.techs, recipe)
+                            && (recipe.station == where_
+                                || recipe.station == "both"
+                                || (where_ == "assembler" && recipe.station == "hand"))
+                    }) else {
+                        p.toast("该配方尚未解锁或不适用于此机器");
+                        continue;
+                    };
                     // 切换配方：退还全部原料 + 进行中配方一组 + 旧产出（JS refund，溢出掉落机旁）
                     let drop_pos = Vec3::new(
                         mclone.pos[0] as f32 + 0.5,
@@ -2619,7 +2874,7 @@ pub fn machine_panel_system(
                     if let Some(o) = cr.output.take() {
                         refund_one(&mut p, &mut commands, o.item, o.n);
                     }
-                    cr.recipe = Some(id_str);
+                    cr.recipe = Some(recipe.id);
                     cr.prog = 0.0;
                     audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                 }
@@ -2641,6 +2896,13 @@ pub fn machine_panel_system(
                     bc.gal = gal;
                 }
             }
+            MachinePanelAction::SetFilter(filter) => {
+                if let MachineState::Router(router) = &mut *st
+                    && mclone.kind == MachineKind::Filter
+                {
+                    router.filter = filter;
+                }
+            }
         }
     }
 }
@@ -2653,6 +2915,7 @@ enum MachinePanelAction {
     ChestPut,
     SetRecipe(String),
     BeaconLabel(String, bool),
+    SetFilter(Option<String>),
     InsertItem(usize),
 }
 
@@ -3340,6 +3603,25 @@ pub fn scan_system(
 
 // ---------- 空间站贸易终端 ----------
 
+pub fn economy_system(time: Res<Time>, mut game: ResMut<crate::space::SpaceGame>) {
+    game.economy_t += time.delta_secs();
+    if game.economy_t < 180.0 {
+        return;
+    }
+    game.economy_t -= 180.0;
+    for item in data::TRADE_GOODS {
+        let rare = matches!(
+            *item,
+            "warpcell" | "antimatter" | "advanced_circuit" | "ship_alloy" | "cobalt"
+        );
+        let restock = if rare { 1 } else { 4 };
+        let stock = game.galaxy.stock.entry((*item).to_string()).or_default();
+        *stock = (*stock + restock).min(if rare { 12 } else { 120 });
+        let price = game.galaxy.market.entry((*item).to_string()).or_insert(1.0);
+        *price += (1.0 - *price) * 0.08;
+    }
+}
+
 pub fn trade_panel_system(
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UiState>,
@@ -3387,13 +3669,15 @@ pub fn trade_panel_system(
                             for item in data::TRADE_GOODS {
                                 let buy = data::trade_buy_price(item, game.market(), has_trade_ai);
                                 let sell = data::trade_sell_price(item, game.market());
+                                let stock = game.galaxy.stock.get(*item).copied().unwrap_or(0);
                                 let have =
                                     player.single().map(|p| p.inv.count_item(item)).unwrap_or(0);
                                 ui.label(item_name(item));
                                 ui.label(format!("买 ₪{buy} / 卖 ₪{sell}"));
-                                ui.label(format!("持有 {have}"));
+                                ui.label(format!("库存 {stock} · 持有 {have}"));
                                 ui.horizontal(|ui| {
-                                    if ui.button("买").clicked() {
+                                    if ui.add_enabled(stock > 0, egui::Button::new("买")).clicked()
+                                    {
                                         buy_req.push((item.to_string(), buy, 1));
                                     }
                                     if ui.button("卖").clicked() {
@@ -3433,16 +3717,25 @@ pub fn trade_panel_system(
     };
     let mut traded = false;
     for (item, price, n) in buy_req {
-        if p.credits >= price * n {
+        let stock = game.galaxy.stock.get(&item).copied().unwrap_or(0);
+        if stock >= n && p.credits >= price * n && p.inv.room_for(&item) >= n {
             p.credits -= price * n;
-            p.inv.add_item(&item, n);
+            let added = p.inv.add_item(&item, n);
+            debug_assert_eq!(added, n);
             // 市场漂移（JS: mod = min(1.6, mod + 0.01*n)）
             let m = game.galaxy.market.entry(item.clone()).or_insert(1.0);
             *m = (*m + 0.01 * n as f32).min(1.6);
+            *game.galaxy.stock.entry(item.clone()).or_default() -= n;
             traded = true;
             audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
-        } else {
+        } else if stock < n {
+            p.toast("空间站库存不足");
+            audio::play(&mut commands, sfx.error.clone(), 0.4, None);
+        } else if p.credits < price * n {
             p.toast("信用点不足");
+            audio::play(&mut commands, sfx.error.clone(), 0.4, None);
+        } else {
+            p.toast("背包空间不足");
             audio::play(&mut commands, sfx.error.clone(), 0.4, None);
         }
     }
@@ -3453,6 +3746,8 @@ pub fn trade_panel_system(
             // 市场漂移（JS: mod = max(0.5, mod - 0.012*n)）
             let m = game.galaxy.market.entry(item.clone()).or_insert(1.0);
             *m = (*m - 0.012 * n as f32).max(0.5);
+            let stock = game.galaxy.stock.entry(item.clone()).or_default();
+            *stock = (*stock + n).min(100_000);
             traded = true;
             audio::play(&mut commands, sfx.click.clone(), 0.5, None);
         } else {
@@ -3505,8 +3800,8 @@ pub fn garage_panel_system(
     cache: Res<EguiIcons>,
     mut ui_state: ResMut<UiState>,
     mut player: Query<&mut Player>,
-    mut game: ResMut<crate::space::SpaceGame>,
-    ship_asset: Res<crate::space::ShipAsset>,
+    game: Res<crate::space::SpaceGame>,
+    mut ship_asset: ResMut<crate::space::ShipAsset>,
     mut switch_ev: MessageWriter<crate::station::ShipSwitchEvent>,
 ) {
     if ui_state.panel != Panel::Garage {
@@ -3519,6 +3814,11 @@ pub fn garage_panel_system(
     let mut close = false;
     let mut switch_req: Option<usize> = None;
     let mut cargo_take: Option<usize> = None;
+    let mut cargo_put = false;
+    let selected_cargo = player
+        .single()
+        .ok()
+        .and_then(|p| p.selected_item().cloned());
     egui::Window::new("◈ 舰船调度终端")
         .default_size([420.0, 420.0])
         .resizable(false)
@@ -3542,7 +3842,7 @@ pub fn garage_panel_system(
                 .spacing([4.0, 4.0])
                 .show(ui, |ui| {
                     for i in 0..n {
-                        let s = game.ship_inv.get(i).cloned().flatten();
+                        let s = ship_asset.data.inv.get(i).cloned().flatten();
                         if slot_button(
                             ui,
                             &cache,
@@ -3559,6 +3859,16 @@ pub fn garage_panel_system(
                     }
                 });
             ui.label("（点击舱内物品取出到背包）");
+            let put_label = selected_cargo
+                .as_ref()
+                .map(|slot| format!("存入当前快捷栏：{} ×{}", item_name(&slot.item), slot.n))
+                .unwrap_or_else(|| "当前快捷栏没有可存入物品".to_string());
+            if ui
+                .add_enabled(selected_cargo.is_some(), egui::Button::new(put_label))
+                .clicked()
+            {
+                cargo_put = true;
+            }
             ui.separator();
             ui.label(
                 egui::RichText::new("◈ 机库飞船")
@@ -3596,8 +3906,39 @@ pub fn garage_panel_system(
         let Ok(mut p) = player.single_mut() else {
             return;
         };
-        if let Some(s) = game.ship_inv.get_mut(i).and_then(|s| s.take()) {
-            p.inv.add_item(&s.item, s.n);
+        if let Some(slot) = ship_asset.data.inv.get_mut(i)
+            && let Some(s) = slot.as_mut()
+        {
+            let take = s.n.min(p.inv.room_for(&s.item));
+            if take > 0 {
+                let added = p.inv.add_item(&s.item, take);
+                s.n -= added;
+                if s.n <= 0 {
+                    *slot = None;
+                }
+            } else {
+                p.toast("背包空间不足");
+            }
+        }
+    }
+    if cargo_put {
+        let Ok(mut p) = player.single_mut() else {
+            return;
+        };
+        if let Some(selected) = selected_cargo {
+            let capacity = data::ship_class_by_key(&ship_asset.data.cls).slots;
+            let mut cargo = crate::inventory::Inventory::from_slots_with_capacity(
+                std::mem::take(&mut ship_asset.data.inv),
+                capacity,
+            );
+            let added = cargo.add_item(&selected.item, selected.n);
+            ship_asset.data.inv = cargo.slots;
+            if added > 0 {
+                p.inv.remove_item(&selected.item, added);
+            }
+            if added < selected.n {
+                p.toast("飞船货仓空间不足");
+            }
         }
     }
 }
@@ -4432,6 +4773,7 @@ impl Plugin for UiPlugin {
                         quicksave_system,
                         clear_input_on_focus_lost,
                         big_message_system,
+                        economy_system,
                     )
                         .chain()
                         .in_set(GameSet::CommonUi),

@@ -894,8 +894,9 @@ pub fn placement_system(
             p.toast(format!("朝向：{}", ["东", "南", "西", "北"][next as usize]));
         }
         // snapshot selected slot (owned clone so we can mutate the player later)
-        let sel_slot = p.selected_item().cloned();
-        let Some(slot) = sel_slot else {
+        let selected_index = p.hot_slot();
+        let sel_slot = selected_index.and_then(|index| p.inv.slots[index].clone());
+        let Some((selected_index, slot)) = selected_index.zip(sel_slot) else {
             continue;
         };
         let Some(item_def) = data::item_by_key(&slot.item) else {
@@ -942,6 +943,11 @@ pub fn placement_system(
         {
             let ok = p.inv.count_item(&slot.item) > 0 || p.creative();
             if ok {
+                if !p.creative() && p.inv.take_from_slot(selected_index, 1).is_none() {
+                    audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+                    p.toast("物品状态已变化，请重试");
+                    continue;
+                }
                 world.set(t[0], t[1], t[2], b_def.id);
                 net_ev.write(crate::network::BlockChanged {
                     x: t[0],
@@ -961,9 +967,6 @@ pub fn placement_system(
                             p.effective_dir(),
                         );
                     }
-                }
-                if !p.creative() {
-                    p.inv.remove_item(&slot.item, 1);
                 }
                 placed_ev.write(crate::quests::PlacedEvent {
                     block: block_key.to_string(),
@@ -1065,17 +1068,19 @@ pub fn hotbar_system(
                 let dir = p.look_dir();
                 let drop_pos = p.pos + Vec3::new(dir.x * 0.7, -0.15 + dir.y * 0.5, dir.z * 0.7);
                 let vel = Vec3::new(dir.x * 6.0, dir.y * 6.0 + 2.2, dir.z * 6.0);
+                let Some(taken) = p.inv.take_from_slot(i, n) else {
+                    continue;
+                };
                 spawn_drop(
                     &mut commands,
                     &world,
                     &icons,
                     drop_pos,
                     vel,
-                    s.item.clone(),
-                    n,
+                    taken.item,
+                    taken.n,
                     1.2,
                 );
-                p.inv.remove_item(&s.item, n);
                 audio::play(&mut commands, sfx.click.clone(), 0.4, None);
             }
         }

@@ -861,7 +861,14 @@ impl MachineState {
                 burn_max: finite(d.burn_max, 0.0, 86_400.0),
             }),
             MachineKind::Beacon => Self::Beacon(BeaconState {
-                label: d.label.clone().unwrap_or_else(|| "标记点".into()),
+                label: d
+                    .label
+                    .as_deref()
+                    .unwrap_or("标记点")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(128)
+                    .collect(),
                 gal: d.gal,
             }),
             MachineKind::Lumberbot => Self::Lumberbot(LumberbotState {
@@ -2350,7 +2357,7 @@ pub fn factory_system(
             if let Some(pq) = player.as_mut()
                 && let Ok(mut p) = pq.single_mut()
             {
-                p.credits += credits;
+                p.credits = p.credits.saturating_add(credits);
                 p.toast(format!("殖民收益 +₪{credits} · 研究数据 ×2"));
             }
             flag_ev.write(crate::quests::FlagEvent {

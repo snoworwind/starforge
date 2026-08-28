@@ -175,7 +175,7 @@ fn smoke_exit(
         }
         // 存档路径验证：地面存档 + 太空存档
         if f.frames == 60 || f.frames == 300 {
-            save_ev.write(ui::SaveEvent);
+            save_ev.write(ui::SaveEvent { quit_after: false });
             println!("SMOKE_STAGE save@{}", f.frames);
         }
         if f.frames > 480 {
@@ -1019,7 +1019,9 @@ fn on_enter_loading(
         .unwrap_or_default();
     // Generate an anchor area before searching for a spawn. Without this the
     // initial search saw only AIR and low-view-distance worlds started at y=2.
-    let in_space = world_data.as_ref().is_some_and(|w| w.state == "space");
+    let in_space = world_data
+        .as_ref()
+        .is_some_and(|w| matches!(w.state.as_str(), "space" | "warping"));
     let saved_position = char_data
         .as_ref()
         .filter(|_| !in_space)
@@ -1242,7 +1244,7 @@ fn spawn_scene(
         let key = data::block_by_id(id).key;
         factory::spawn_machine(commands, cell, key, 0);
     }
-    let day_t = 0.30;
+    let day_t = world_data.as_ref().map(|saved| saved.day_t).unwrap_or(0.30);
     commands.insert_resource(daynight::DayTime(day_t));
     commands.insert_resource(daynight::SpaceFactor::default());
     let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
@@ -1274,6 +1276,8 @@ fn spawn_scene(
     let mut game: SpaceGame;
     let mut start_mode = FlightMode::Planet;
     let mut ship_state = ShipState::default();
+    let mut warp_anim = space::WarpAnim::default();
+    let mut saved_ship_hp = None;
     let mut research_active: Option<(String, f32)> = None;
 
     if let Some(cd) = char_data.as_ref() {
@@ -1351,19 +1355,62 @@ fn spawn_scene(
         game.visited = wd.visited.clone();
         game.archives = wd.archives.clone();
         quests.placed = wd.placed.clone();
-        if wd.state == "space" {
-            start_mode = FlightMode::Space;
+        quests.side = wd.side_quest.clone();
+        saved_ship_hp = wd
+            .ship_state
+            .as_ref()
+            .and_then(|state| state.hp)
+            .filter(|hp| hp.is_finite());
+        start_mode = match wd.state.as_str() {
+            "atmo" => FlightMode::Atmo,
+            "space" => FlightMode::Space,
+            "warping" => FlightMode::Warping,
+            _ => FlightMode::Planet,
+        };
+        if matches!(
+            start_mode,
+            FlightMode::Atmo | FlightMode::Space | FlightMode::Warping
+        ) {
             if let Some(ss) = &wd.ship_state {
                 if ss.pos.iter().all(|v| v.is_finite()) {
-                    ship_state.pos = Vec3::new(ss.pos[0], ss.pos[1], ss.pos[2]);
+                    ship_state.pos = if start_mode == FlightMode::Atmo {
+                        safe_player_position(ss.pos).unwrap_or_default()
+                    } else {
+                        Vec3::new(ss.pos[0], ss.pos[1], ss.pos[2])
+                            .clamp(Vec3::splat(-10_000_000.0), Vec3::splat(10_000_000.0))
+                    };
                 }
-                ship_state.yaw = if ss.yaw.is_finite() { ss.yaw } else { 0.0 };
-                ship_state.pitch = if ss.pitch.is_finite() { ss.pitch } else { 0.0 };
-                ship_state.roll = if ss.roll.is_finite() { ss.roll } else { 0.0 };
-                ship_state.speed = if ss.speed.is_finite() {
-                    ss.speed.max(0.0)
+                ship_state.yaw = if ss.yaw.is_finite() {
+                    ss.yaw.rem_euclid(std::f32::consts::TAU)
                 } else {
                     0.0
+                };
+                ship_state.pitch = if ss.pitch.is_finite() {
+                    ss.pitch.clamp(-1.55, 1.55)
+                } else {
+                    0.0
+                };
+                ship_state.roll = if ss.roll.is_finite() {
+                    ss.roll.rem_euclid(std::f32::consts::TAU)
+                } else {
+                    0.0
+                };
+                ship_state.speed = if ss.speed.is_finite() {
+                    ss.speed.clamp(0.0, 4_800.0)
+                } else {
+                    0.0
+                };
+            }
+            if start_mode == FlightMode::Warping
+                && let Some(saved) = &wd.warp_anim
+            {
+                warp_anim = space::WarpAnim {
+                    active: true,
+                    t: saved.t,
+                    seed: saved.seed,
+                    yaw: saved.yaw,
+                    pitch: saved.pitch,
+                    v0: saved.v0,
                 };
             }
         }
@@ -1374,7 +1421,7 @@ fn spawn_scene(
     // owner field) be identified safely. The next landing must rebuild rather
     // than treating it as planet 0 of the destination galaxy.
     let loaded_world_is_archived = world_data.as_ref().is_some_and(|saved| {
-        saved.state == "space"
+        matches!(saved.state.as_str(), "space" | "warping")
             && saved.archives.values().any(|galaxy| {
                 galaxy.planets.values().any(|planet| {
                     planet.seed == world.seed && planet.biome == world.biome().key
@@ -1388,7 +1435,11 @@ fn spawn_scene(
     };
 
     // 初始飞船
-    if start_mode == FlightMode::Space
+    let active_flight = matches!(
+        start_mode,
+        FlightMode::Atmo | FlightMode::Space | FlightMode::Warping
+    );
+    if active_flight
         && ship_state.pos.is_finite()
         && ship_state.pos.length_squared() >= 1e-6
     {
@@ -1412,7 +1463,7 @@ fn spawn_scene(
         crate::inventory::Inventory::from_slots_with_capacity(ship_data.inv.clone(), cargo_slots)
             .slots;
     // 船放在玩家出生点旁边（太空开局用占位点，船随即被同步到存档太空位置）
-    let ship_anchor = if start_mode == FlightMode::Space {
+    let ship_anchor = if active_flight {
         Vec3::new(96.0, 40.0, 96.0)
     } else {
         p.pos
@@ -1432,15 +1483,17 @@ fn spawn_scene(
     // A space save stores the active ship in ship_state, not in the
     // planetary parking position. Keep that position so loading in space
     // does not teleport the ship back to the planet-side spawn pad.
-    if start_mode != FlightMode::Space
+    if !active_flight
         || !ship_state.pos.is_finite()
         || ship_state.pos.length_squared() < 1e-6
     {
         ship_state.pos = game.ship_pos;
     }
     ship_state.board_yaw = 0.0;
-    ship_state.hp = 20.0;
-    ship_state.hp_max = 20.0;
+    ship_state.hp_max = space::vis_hp(&ship_data.cls);
+    ship_state.hp = saved_ship_hp
+        .unwrap_or(ship_state.hp_max)
+        .clamp(0.1, ship_state.hp_max);
     commands.insert_resource(world);
     commands.insert_resource(ShipAsset {
         entity: Some(ship_ent),
@@ -1494,6 +1547,7 @@ fn spawn_scene(
     ));
     // state resources
     commands.insert_resource(UiState::default());
+    commands.insert_resource(ui::MapState::default());
     commands.insert_resource(player::BreakQueue::default());
     // 兽群恢复（MC 风格：位置/血量/领地/被杀记录随存档还原）
     {
@@ -1515,6 +1569,8 @@ fn spawn_scene(
     commands.insert_resource(game);
     commands.insert_resource(quests);
     commands.insert_resource(ship_state);
+    commands.insert_resource(space::ShipRecall::default());
+    commands.insert_resource(warp_anim);
     commands.insert_resource(SpaceInput::default());
     commands.insert_resource(FlightCamera::default());
     commands.insert_resource(station::StationState::default());
@@ -1742,6 +1798,7 @@ fn ground_scene_visibility_system(
             With<ui::Ghost>,
             With<ui::ScanMarker>,
             With<Beam>,
+            With<factory::BotVis>,
         )>,
     >,
 ) {
@@ -1785,13 +1842,14 @@ fn save_settings_system(mut ev: MessageReader<ui::SaveEvent>, settings: Res<save
 #[allow(clippy::too_many_arguments)]
 fn save_system(
     mut ev: MessageReader<ui::SaveEvent>,
-    player: Query<&Player>,
+    mut player: Query<&mut Player>,
     world: Res<World>,
     research: Res<Research>,
     day: Res<daynight::DayTime>,
     names: Res<SaveNames>,
     game: ResMut<SpaceGame>,
     ship: Res<ShipState>,
+    warp_anim: Res<space::WarpAnim>,
     mode: Res<FlightMode>,
     ship_asset: Res<ShipAsset>,
     quests: Res<quests::Quests>,
@@ -1801,19 +1859,25 @@ fn save_system(
     creatures_q: Query<(Entity, &mut creatures::Creature, &Transform)>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
+    mut quit_ev: MessageWriter<ui::QuitToMenuEvent>,
 ) {
-    for _ in ev.read() {
-        let Ok(p) = player.single() else { continue };
-        let state_str = if matches!(
-            *mode,
-            FlightMode::Space | FlightMode::Warping | FlightMode::Station
-        ) {
-            "space"
-        } else {
-            "planet"
+    for request in ev.read() {
+        let Ok(mut p) = player.single_mut() else {
+            continue;
+        };
+        let state_str = match *mode {
+            FlightMode::Atmo | FlightMode::AtmoLand => "atmo",
+            FlightMode::Space | FlightMode::Station => "space",
+            FlightMode::Warping => "warping",
+            FlightMode::Planet | FlightMode::Seated => "planet",
+        };
+        let Some(char_snapshot) = save::snapshot_char_file(&names.char) else {
+            p.toast("保存失败：无法读取原角色档，已取消本次写入");
+            audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+            continue;
         };
         let ok_char = save::save_char(
-            p,
+            &p,
             &names.char,
             Some(&names.world),
             &research.techs,
@@ -1824,53 +1888,77 @@ fn save_system(
             quests.idx,
             research.active.as_ref(),
         );
-        let ship_pos = if *mode == FlightMode::Planet || *mode == FlightMode::Seated {
+        let ship_pos = if matches!(
+            *mode,
+            FlightMode::Planet | FlightMode::Seated | FlightMode::Atmo | FlightMode::AtmoLand
+        ) {
             Some([game.ship_pos.x, game.ship_pos.y, game.ship_pos.z])
         } else {
             None
         };
-        let ship_state = if matches!(
-            *mode,
-            FlightMode::Space | FlightMode::Warping | FlightMode::Station
-        ) {
-            let mut ss = space::serialize_ship_state(&ship);
-            // 站内存档存机库出口（JS main.js:2770-2775），读档不会重新泊入
-            if *mode == FlightMode::Station
-                && let Some(st) = station.as_ref()
-            {
-                let exit = station::station_exit_pos(st.station_pos, st.seed);
-                ss.pos = [exit.x, exit.y, exit.z];
-            }
-            Some(ss)
+        let mut ship_state = space::serialize_ship_state(&ship);
+        if matches!(*mode, FlightMode::Planet | FlightMode::Seated) {
+            ship_state.pos = [game.ship_pos.x, game.ship_pos.y, game.ship_pos.z];
+        }
+        // 站内存档存机库出口（JS main.js:2770-2775），读档不会重新泊入
+        if *mode == FlightMode::Station
+            && let Some(st) = station.as_ref()
+        {
+            let exit = station::station_exit_pos(st.station_pos, st.seed);
+            ship_state.pos = [exit.x, exit.y, exit.z];
+        }
+        let warp_anim = if *mode == FlightMode::Warping && warp_anim.active {
+            Some(save::WarpAnimSave {
+                t: warp_anim.t,
+                seed: warp_anim.seed,
+                yaw: warp_anim.yaw,
+                pitch: warp_anim.pitch,
+                v0: warp_anim.v0,
+            })
         } else {
             None
         };
         let (creatures_save, creature_cells_save) = spawner.serialize(&creatures_q);
         let machines_save = factory::serialize_machines(&machines);
-        let ok_world = save::save_world_full(
-            &world,
-            &names.world,
-            day.0,
-            state_str,
-            game.current_planet,
-            game.galaxy.seed,
-            game.galaxy_count,
-            &game.galaxy.market,
-            &game.galaxy.stock,
-            &quests.flags,
-            ship_pos,
-            ship_state.as_ref(),
-            &game.marks,
-            game.warp_lock.as_ref(),
-            &quests.placed,
-            &machines_save,
-            &game.visited,
-            &game.archives,
-            &creatures_save,
-            &creature_cells_save,
-        );
+        let ok_world = ok_char
+            && save::save_world_full(
+                &world,
+                &names.world,
+                day.0,
+                state_str,
+                game.current_planet,
+                game.galaxy.seed,
+                game.galaxy_count,
+                &game.galaxy.market,
+                &game.galaxy.stock,
+                &quests.flags,
+                ship_pos,
+                Some(&ship_state),
+                warp_anim.as_ref(),
+                &game.marks,
+                game.warp_lock.as_ref(),
+                &quests.placed,
+                quests.side.as_ref(),
+                &machines_save,
+                &game.visited,
+                &game.archives,
+                &creatures_save,
+                &creature_cells_save,
+            );
+        let rollback_ok = !ok_char
+            || ok_world
+            || save::restore_char_file(&names.char, &char_snapshot);
         if ok_char && ok_world {
             audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
+            if request.quit_after {
+                quit_ev.write(ui::QuitToMenuEvent);
+            }
+        } else if rollback_ok {
+            p.toast("保存失败：已留在游戏中，请检查磁盘空间或存档目录权限");
+            audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+        } else {
+            p.toast("保存失败且角色档回滚失败：请勿退出，并先备份存档目录");
+            audio::play(&mut commands, sfx.error.clone(), 0.8, None);
         }
     }
 }

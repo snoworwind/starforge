@@ -851,7 +851,7 @@ pub fn bolt_system(
                 // 击毁：战利品直入货仓 + 信用点（JS destroyVisitor）
                 let (cr, items) = pirate_loot(cls);
                 if let Ok(mut p) = aux.player.single_mut() {
-                    p.credits += cr;
+                    p.credits = p.credits.saturating_add(cr);
                     for (item, a, bx) in items {
                         let n = a
                             + (crate::rng::Rng::new(
@@ -3306,7 +3306,7 @@ pub fn space_system(mut p: SpaceSysParams) {
             let center = Vec3::from(pv.def.pos);
             let handoff_radius = pv.def.radius + handoff_dist(&pv.def);
             if segment_intersects_sphere(previous_pos, p.ship.pos, center, handoff_radius) {
-                let to_center = (center - p.ship.pos).normalize();
+                let to_center = (center - p.ship.pos).normalize_or_zero();
                 if fwd.dot(to_center) > -0.5 {
                     entering = Some(pv.def.id);
                 }
@@ -3716,7 +3716,15 @@ fn enter_planet(
     let s = voxel_scale(&pd);
     // 太空→体素换系
     let center = Vec3::from(pd.pos);
-    let dir = (ship.pos - center).normalize();
+    let offset = ship.pos - center;
+    let dir = if offset.length_squared() > 1e-8 {
+        offset.normalize()
+    } else {
+        // Corrupt/legacy coordinates can put the ship exactly at a planet's
+        // center. A stable radial fallback prevents NaNs from poisoning the
+        // local landing coordinates and every later transform.
+        Vec3::Y
+    };
     let local = crate::planet_scale::planet_direction_to_local(dir);
     let ex = local.x;
     let ez = local.y;
@@ -4094,6 +4102,7 @@ pub fn serialize_ship_state(ship: &ShipState) -> save::ShipStateSave {
         pitch: ship.pitch,
         roll: ship.roll,
         speed: ship.speed,
+        hp: Some(ship.hp),
     }
 }
 
@@ -4123,6 +4132,7 @@ impl Plugin for SpacePlugin {
                 Update,
                 (
                     space_input_system,
+                    ship_cam_input_system,
                     ship_interact_system,
                     ship_recall_system,
                     seated_system,
@@ -4132,82 +4142,52 @@ impl Plugin for SpacePlugin {
                     .in_set(crate::schedule::GameSet::LateSpaceInput)
                     .run_if(in_state(crate::schedule::GameState::Playing)),
             )
-            // 飞行系统（模式互斥，无需严格顺序；逐一注册规避 tuple 配置组合问题）
             .add_systems(
                 Update,
-                atmo_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (
+                    atmo_system,
+                    atmoland_system,
+                    seated_camera_system,
+                    space_system,
+                    warp_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceFlight)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
-                atmoland_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (warp_arrive_system, space_scene_sync_system)
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceScene)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
-                seated_camera_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (
+                    visitor_system,
+                    asteroid_spin_system,
+                    bolt_system,
+                    space_drop_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceActors)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
-                space_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                warp_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                warp_visual_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                space_scene_sync_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                sphere_fade_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                warp_arrive_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                flight_camera_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                ship_sync_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                ship_parked_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                bolt_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                space_drop_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                visitor_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                asteroid_spin_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                engine_loop_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                ship_cam_input_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                space_stars_follow_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (
+                    ship_parked_system,
+                    warp_visual_system,
+                    sphere_fade_system,
+                    engine_loop_system,
+                    ship_sync_system,
+                    flight_camera_system,
+                    space_stars_follow_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpacePresentation)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             );
     }
 }

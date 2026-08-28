@@ -2732,7 +2732,8 @@ pub fn machine_panel_system(
                 {
                     if data::fuel_value(&s.item) > 0.0 {
                         if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
-                            p.inv.remove_item(&s.item, 1);
+                            let removed = p.inv.take_from_slot(i, 1);
+                            debug_assert_eq!(removed.as_ref().map(|taken| taken.n), Some(1));
                             audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                         }
                     } else {
@@ -2745,7 +2746,8 @@ pub fn machine_panel_system(
                     && let Some(s) = p.inv.slots.get(i).cloned().flatten()
                 {
                     if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
-                        p.inv.remove_item(&s.item, 1);
+                        let removed = p.inv.take_from_slot(i, 1);
+                        debug_assert_eq!(removed.as_ref().map(|taken| taken.n), Some(1));
                         audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                     } else {
                         p.toast("机器不接受该物品");
@@ -2816,7 +2818,8 @@ pub fn machine_panel_system(
                     && let Some(s) = p.inv.slots.get(i).cloned().flatten()
                     && crate::factory::machine_insert(&mclone, &mut st, &s.item)
                 {
-                    p.inv.remove_item(&s.item, 1);
+                    let removed = p.inv.take_from_slot(i, 1);
+                    debug_assert_eq!(removed.as_ref().map(|taken| taken.n), Some(1));
                     audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                 }
             }
@@ -2882,7 +2885,8 @@ pub fn machine_panel_system(
             MachinePanelAction::InsertItem(i) => {
                 if let Some(s) = p.inv.slots.get(i).cloned().flatten() {
                     if crate::factory::machine_insert(&mclone, &mut st, &s.item) {
-                        p.inv.remove_item(&s.item, 1);
+                        let removed = p.inv.take_from_slot(i, 1);
+                        debug_assert_eq!(removed.as_ref().map(|taken| taken.n), Some(1));
                         audio::play(&mut commands, sfx.click.clone(), 0.4, None);
                     } else {
                         p.toast("机器不接受该物品");
@@ -3045,7 +3049,6 @@ pub fn pause_panel_system(
     player: Query<&Player>,
     research: Res<Research>,
     mut save_ev: MessageWriter<SaveEvent>,
-    mut quit_ev: MessageWriter<QuitToMenuEvent>,
     day: Res<crate::daynight::DayTime>,
 ) {
     if ui_state.panel != Panel::Pause {
@@ -3200,15 +3203,17 @@ pub fn pause_panel_system(
         ui_state.panel = Panel::None;
     }
     if do_save {
-        save_ev.write(SaveEvent);
-    }
-    if do_quit {
-        quit_ev.write(QuitToMenuEvent);
+        save_ev.write(SaveEvent {
+            quit_after: do_quit,
+        });
     }
 }
 
 #[derive(Message)]
-pub struct SaveEvent;
+pub struct SaveEvent {
+    /// Return to the menu only after both character and world files succeed.
+    pub quit_after: bool,
+}
 
 #[derive(Message)]
 pub struct QuitToMenuEvent;
@@ -3216,7 +3221,7 @@ pub struct QuitToMenuEvent;
 /// Handle F5 quicksave（JS：任意时刻可存档）。
 pub fn quicksave_system(keys: Res<ButtonInput<KeyCode>>, mut save_ev: MessageWriter<SaveEvent>) {
     if keys.just_pressed(KeyCode::F5) {
-        save_ev.write(SaveEvent);
+        save_ev.write(SaveEvent { quit_after: false });
     }
 }
 
@@ -3742,7 +3747,7 @@ pub fn trade_panel_system(
     for (item, price, n) in sell_req {
         if p.inv.count_item(&item) >= n {
             p.inv.remove_item(&item, n);
-            p.credits += price * n;
+            p.credits = p.credits.saturating_add(price.saturating_mul(n));
             // 市场漂移（JS: mod = max(0.5, mod - 0.012*n)）
             let m = game.galaxy.market.entry(item.clone()).or_insert(1.0);
             *m = (*m - 0.012 * n as f32).max(0.5);

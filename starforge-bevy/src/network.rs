@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:17889";
-const PROTOCOL_VERSION: u16 = 2;
+const PROTOCOL_VERSION: u16 = 3;
 const MAX_PACKET: usize = 60_000;
 const MAX_PLAYERS: usize = 32;
 const MAX_BLOCK_LOG: usize = 100_000;
@@ -44,6 +44,9 @@ pub struct NetPlayer {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockUpdate {
+    /// Monotonic server-assigned revision. Client submissions use zero.
+    #[serde(default)]
+    pub seq: u64,
     pub galaxy: u32,
     pub planet: usize,
     pub x: i32,
@@ -79,7 +82,7 @@ enum ClientPacket {
 enum ServerPacket {
     Welcome { id: u64, host_name: String },
     Reject { reason: String },
-    Snapshot { players: Vec<NetPlayer> },
+    Snapshot { seq: u64, players: Vec<NetPlayer> },
     Chat { name: String, text: String },
     Notice { text: String },
     Block { update: BlockUpdate },
@@ -151,6 +154,8 @@ pub struct NetworkState {
     server_stop: Option<Sender<()>>,
     remote_entities: HashMap<u64, Entity>,
     pending_blocks: HashMap<(u32, usize), Vec<BlockUpdate>>,
+    block_versions: HashMap<(u32, usize, i32, i32, i32), u64>,
+    snapshot_seq: u64,
     send_acc: f32,
     seq: u32,
 }
@@ -172,6 +177,8 @@ impl Default for NetworkState {
             server_stop: None,
             remote_entities: HashMap::new(),
             pending_blocks: HashMap::new(),
+            block_versions: HashMap::new(),
+            snapshot_seq: 0,
             send_acc: 0.0,
             seq: 0,
         }
@@ -199,6 +206,8 @@ impl NetworkState {
         self.role = ConnectionRole::Offline;
         self.players.clear();
         self.pending_blocks.clear();
+        self.block_versions.clear();
+        self.snapshot_seq = 0;
         self.status = "未连接".to_string();
     }
 
@@ -216,6 +225,8 @@ struct ServerClient {
     name: String,
     last_seen: Instant,
     state: Option<NetPlayer>,
+    block_window: Instant,
+    block_count: usize,
 }
 
 fn clean_name(name: &str) -> String {
@@ -316,9 +327,9 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
             let mut world_id: Option<u64> = None;
             let mut block_log: HashMap<(u32, usize, i32, i32, i32), BlockUpdate> = HashMap::new();
             let mut next_id = 1u64;
+            let mut block_seq = 0u64;
+            let mut snapshot_seq = 0u64;
             let mut last_snapshot = Instant::now();
-            let mut block_window = Instant::now();
-            let mut block_count = 0usize;
             let mut buf = [0u8; MAX_PACKET];
             loop {
                 if stop_rx.try_recv().is_ok() {
@@ -387,6 +398,8 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                                     name: final_name.clone(),
                                     last_seen: Instant::now(),
                                     state: None,
+                                    block_window: Instant::now(),
+                                    block_count: 0,
                                 },
                             );
                             send_to(
@@ -453,7 +466,7 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                                 broadcast(&socket, &clients, &ServerPacket::Chat { name, text });
                             }
                         }
-                        ClientPacket::Block { update } => {
+                        ClientPacket::Block { mut update } => {
                             let Some(client) = clients.get_mut(&addr) else {
                                 continue;
                             };
@@ -461,14 +474,14 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                             if !valid_block(&update) {
                                 continue;
                             }
-                            if block_window.elapsed() >= Duration::from_secs(1) {
-                                block_window = Instant::now();
-                                block_count = 0;
+                            if client.block_window.elapsed() >= Duration::from_secs(1) {
+                                client.block_window = Instant::now();
+                                client.block_count = 0;
                             }
-                            if block_count >= MAX_BLOCKS_PER_SECOND {
+                            if client.block_count >= MAX_BLOCKS_PER_SECOND {
                                 continue;
                             }
-                            block_count += 1;
+                            client.block_count += 1;
                             let key = (
                                 update.galaxy,
                                 update.planet,
@@ -479,6 +492,8 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                             if !block_log.contains_key(&key) && block_log.len() >= MAX_BLOCK_LOG {
                                 continue;
                             }
+                            block_seq = block_seq.wrapping_add(1).max(1);
+                            update.seq = block_seq;
                             block_log.insert(key, update.clone());
                             broadcast(&socket, &clients, &ServerPacket::Block { update });
                         }
@@ -508,8 +523,16 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                 }
                 if now.duration_since(last_snapshot) >= Duration::from_millis(100) {
                     last_snapshot = now;
+                    snapshot_seq = snapshot_seq.wrapping_add(1).max(1);
                     let players = clients.values().filter_map(|c| c.state.clone()).collect();
-                    broadcast(&socket, &clients, &ServerPacket::Snapshot { players });
+                    broadcast(
+                        &socket,
+                        &clients,
+                        &ServerPacket::Snapshot {
+                            seq: snapshot_seq,
+                            players,
+                        },
+                    );
                 }
                 thread::sleep(Duration::from_millis(4));
             }
@@ -685,6 +708,27 @@ fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
     if !valid_block(&update) {
         return;
     }
+    let version_key = (
+        update.galaxy,
+        update.planet,
+        update.x,
+        update.y,
+        update.z,
+    );
+    if update.seq == 0
+        || net
+            .block_versions
+            .get(&version_key)
+            .is_some_and(|known| update.seq <= *known)
+    {
+        return;
+    }
+    if !net.block_versions.contains_key(&version_key)
+        && net.block_versions.len() >= MAX_BLOCK_LOG
+    {
+        return;
+    }
+    net.block_versions.insert(version_key, update.seq);
     if let Some(existing) = net
         .pending_blocks
         .entry((update.galaxy, update.planet))
@@ -770,7 +814,11 @@ pub fn network_system(
                     net.chat.push(status);
                     net.connected = false;
                 }
-                ServerPacket::Snapshot { players } => {
+                ServerPacket::Snapshot { seq, players } => {
+                    if seq == 0 || seq <= net.snapshot_seq {
+                        continue;
+                    }
+                    net.snapshot_seq = seq;
                     let mut ids = HashSet::new();
                     latest_players = Some(
                         players
@@ -892,6 +940,7 @@ pub fn network_system(
         if net.connected {
             net.send(ClientPacket::Block {
                 update: BlockUpdate {
+                    seq: 0,
                     galaxy: game.galaxy.seed,
                     planet: current_planet,
                     x: changed.x,
@@ -1084,7 +1133,9 @@ impl Plugin for NetworkPlugin {
             .init_resource::<NetworkState>()
             .add_systems(
                 Update,
-                network_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                network_system
+                    .in_set(crate::schedule::GameSet::CommonNetwork)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
@@ -1107,6 +1158,7 @@ mod tests {
     fn protocol_round_trip() {
         let packet = ClientPacket::Block {
             update: BlockUpdate {
+                seq: 0,
                 galaxy: 77,
                 planet: 2,
                 x: -4,
@@ -1132,6 +1184,7 @@ mod tests {
         assert_eq!(clean_name("  A\0B  "), "AB");
         assert_eq!(clean_chat(" hi\r\nthere "), "hithere");
         assert!(!valid_block(&BlockUpdate {
+            seq: 1,
             galaxy: 77,
             planet: 0,
             x: 0,
@@ -1141,6 +1194,7 @@ mod tests {
             dir: 0,
         }));
         assert!(!valid_block(&BlockUpdate {
+            seq: 1,
             galaxy: 77,
             planet: 0,
             x: i32::MIN,
@@ -1150,6 +1204,7 @@ mod tests {
             dir: 0,
         }));
         assert!(!valid_block(&BlockUpdate {
+            seq: 1,
             galaxy: 77,
             planet: 0,
             x: 0,
@@ -1163,10 +1218,14 @@ mod tests {
     #[test]
     fn pending_blocks_coalesce_repeated_cells() {
         let mut net = NetworkState::default();
-        for id in [crate::data::ids::STONE, crate::data::ids::AIR] {
+        for (seq, id) in [crate::data::ids::STONE, crate::data::ids::AIR]
+            .into_iter()
+            .enumerate()
+        {
             queue_pending_block(
                 &mut net,
                 BlockUpdate {
+                    seq: seq as u64 + 1,
                     galaxy: 77,
                     planet: 2,
                     x: 3,
@@ -1179,6 +1238,33 @@ mod tests {
         }
         let pending = &net.pending_blocks[&(77, 2)];
         assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, crate::data::ids::AIR);
+    }
+
+    #[test]
+    fn pending_blocks_ignore_late_older_udp_update() {
+        let mut net = NetworkState::default();
+        for (seq, id) in [
+            (9, crate::data::ids::AIR),
+            (8, crate::data::ids::STONE),
+        ] {
+            queue_pending_block(
+                &mut net,
+                BlockUpdate {
+                    seq,
+                    galaxy: 77,
+                    planet: 2,
+                    x: 3,
+                    y: 4,
+                    z: 5,
+                    id,
+                    dir: 0,
+                },
+            );
+        }
+        let pending = &net.pending_blocks[&(77, 2)];
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].seq, 9);
         assert_eq!(pending[0].id, crate::data::ids::AIR);
     }
 
@@ -1236,7 +1322,7 @@ mod tests {
         }
         assert!(
             wait_for(&e1, &|p| {
-                matches!(p, ServerPacket::Snapshot { players } if players.len() == 2)
+                matches!(p, ServerPacket::Snapshot { players, .. } if players.len() == 2)
             })
             .is_some()
         );
@@ -1254,6 +1340,7 @@ mod tests {
 
         c1.send(ClientCommand::Packet(ClientPacket::Block {
             update: BlockUpdate {
+                seq: 0,
                 galaxy: 77,
                 planet: 0,
                 x: 2,

@@ -1740,8 +1740,14 @@ pub fn drops_system(
         }
     }
     // 掉落上限（JS DROP_CAP 90：超限最旧入包）
-    if snap.len() > DROP_CAP {
-        let mut order: Vec<usize> = (0..snap.len()).collect();
+    let surviving_count = snap.len().saturating_sub(merged.len());
+    if surviving_count > DROP_CAP {
+        // Entries already merged into an earlier drop are pending despawn.
+        // Counting/collecting one of those entries again can duplicate its
+        // items because the surviving entry already includes its quantity.
+        let mut order: Vec<usize> = (0..snap.len())
+            .filter(|idx| !merged.contains(idx))
+            .collect();
         order.sort_by(|a, b| {
             snap[*b]
                 .1
@@ -1749,7 +1755,7 @@ pub fn drops_system(
                 .partial_cmp(&snap[*a].1.age)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        for &idx in order.iter().take(snap.len() - DROP_CAP) {
+        for &idx in order.iter().take(surviving_count - DROP_CAP) {
             let (e, d, _) = &snap[idx];
             let added = p.inv.add_item(&d.item, d.n);
             if added >= d.n {

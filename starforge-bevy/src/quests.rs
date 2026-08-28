@@ -45,7 +45,7 @@ impl Default for Quests {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SideQuest {
     pub item: String,
     pub need: i32,
@@ -228,7 +228,9 @@ pub fn quest_tick_system(
     let mut announced: Vec<(String, String, f32)> = Vec::new();
     if let Ok(mut p) = player.single_mut() {
         if let Some(q) = quests.check(&p, &research.techs) {
-            p.credits += 50 + quests.idx as i32 * 25;
+            p.credits = p
+                .credits
+                .saturating_add(50 + quests.idx as i32 * 25);
             announced.push((
                 format!("任务完成：{}", q.title),
                 format!("奖励 ₪{}", 50 + quests.idx as i32 * 25),
@@ -301,7 +303,7 @@ pub fn side_quest_system(
                                 let have = p.inv.count_item(&sq.item);
                                 if have >= sq.need {
                                     p.inv.remove_item(&sq.item, sq.need);
-                                    p.credits += sq.reward;
+                                    p.credits = p.credits.saturating_add(sq.reward);
                                     p.toast(format!("村庄感谢你！+₪{}", sq.reward));
                                     if let Some(side) = quests.side.as_mut() {
                                         side.done = true;
@@ -352,6 +354,10 @@ pub fn village_side_quest_system(
     mut commands: Commands,
 ) {
     if *mode != crate::space::FlightMode::Planet {
+        if let Some(entity) = quests.villager.take() {
+            commands.entity(entity).despawn();
+        }
+        quests.villager_pos = None;
         return;
     }
     let Some(world) = world else { return };

@@ -149,6 +149,24 @@ pub struct ShipStateSave {
     pub roll: f32,
     #[serde(default)]
     pub speed: f32,
+    /// 当前船体生命；旧存档缺失时按船级上限恢复。
+    #[serde(default)]
+    pub hp: Option<f32>,
+}
+
+/// 跃迁途中继续动画所需的最小状态。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WarpAnimSave {
+    #[serde(default)]
+    pub t: f32,
+    #[serde(default)]
+    pub seed: u32,
+    #[serde(default)]
+    pub yaw: f32,
+    #[serde(default)]
+    pub pitch: f32,
+    #[serde(default)]
+    pub v0: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -194,7 +212,7 @@ pub struct WorldData {
     pub biome: String,
     pub day_t: f32,
     pub mods: HashMap<String, Vec<u16>>,
-    /// "planet" | "space"
+    /// "planet" | "atmo" | "space" | "warping"
     #[serde(default = "d_state")]
     pub state: String,
     #[serde(default)]
@@ -212,9 +230,12 @@ pub struct WorldData {
     /// 地面飞船停泊点
     #[serde(default)]
     pub ship_pos: Option<[f32; 3]>,
-    /// 太空飞船状态（state=space 时存在）
+    /// 飞船位置/姿态/生命；飞行状态恢复时使用位置和姿态。
     #[serde(default)]
     pub ship_state: Option<ShipStateSave>,
+    /// 跃迁动画状态（state=warping 时存在）。
+    #[serde(default)]
+    pub warp_anim: Option<WarpAnimSave>,
     /// 当前星球地图标记（JS mapMarks[pid]）
     #[serde(default)]
     pub marks: Vec<crate::space::Mark>,
@@ -224,6 +245,9 @@ pub struct WorldData {
     /// 放置任务计数（JS placedCount）
     #[serde(default)]
     pub placed: HashMap<String, i32>,
+    /// 当前村庄支线；对话本身是瞬时 UI，不进入存档。
+    #[serde(default)]
+    pub side_quest: Option<crate::quests::SideQuest>,
     /// 当前活动星球的机器状态。
     #[serde(default)]
     pub machines: Vec<crate::factory::MachineSave>,
@@ -386,6 +410,12 @@ pub fn save_char(
 
 pub fn load_char(name: &str) -> Option<CharData> {
     let mut data: CharData = read_json(&char_path(name))?;
+    data.name = data.name.chars().filter(|c| !c.is_control()).take(80).collect();
+    data.world = data
+        .world
+        .map(|world| world.chars().filter(|c| !c.is_control()).take(80).collect());
+    data.credits = data.credits.clamp(0, 1_000_000_000);
+    data.fuel_loaded = data.fuel_loaded.clamp(0, 1);
     data.hot_idx = data.hot_idx.clamp(-1, 8);
     data.inv = crate::inventory::Inventory::from_slots(data.inv).slots;
     data.equipment.sanitize();
@@ -394,12 +424,14 @@ pub fn load_char(name: &str) -> Option<CharData> {
     data.techs.retain(|tech| {
         crate::data::TECHS.iter().any(|known| known.id == tech) && seen_techs.insert(tech.clone())
     });
+    sanitize_ship_save(&mut data.player_ship);
     let cargo_slots = crate::data::ship_class_by_key(&data.player_ship.cls).slots;
     data.player_ship.inv =
         crate::inventory::Inventory::from_slots_with_capacity(data.player_ship.inv, cargo_slots)
             .slots;
     data.ship_garage.truncate(64);
     for ship in &mut data.ship_garage {
+        sanitize_ship_save(ship);
         let slots = crate::data::ship_class_by_key(&ship.cls).slots;
         ship.inv = crate::inventory::Inventory::from_slots_with_capacity(
             std::mem::take(&mut ship.inv),
@@ -429,6 +461,25 @@ pub fn load_char(name: &str) -> Option<CharData> {
     Some(data)
 }
 
+fn sanitize_ship_save(ship: &mut ShipSave) {
+    ship.cls = crate::data::ship_class_by_key(&ship.cls).key.to_string();
+    if !crate::data::SHIP_MODEL_NAMES
+        .iter()
+        .any(|(model, _)| *model == ship.model)
+    {
+        ship.model.clear();
+    }
+    ship.name = ship
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    if ship.name.trim().is_empty() {
+        ship.name = d_ship_name();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn save_world_full(
     world: &World,
@@ -443,9 +494,11 @@ pub fn save_world_full(
     flags: &HashMap<String, bool>,
     ship_pos: Option<[f32; 3]>,
     ship_state: Option<&ShipStateSave>,
+    warp_anim: Option<&WarpAnimSave>,
     marks: &[crate::space::Mark],
     warp_lock: Option<&crate::space::WarpLock>,
     placed: &HashMap<String, i32>,
+    side_quest: Option<&crate::quests::SideQuest>,
     machines: &[crate::factory::MachineSave],
     visited: &HashMap<usize, crate::space::PlanetArchive>,
     archives: &HashMap<u32, crate::space::GalaxyArchive>,
@@ -469,9 +522,11 @@ pub fn save_world_full(
         flags: flags.clone(),
         ship_pos,
         ship_state: ship_state.cloned(),
+        warp_anim: warp_anim.cloned(),
         marks: marks.to_vec(),
         warp_lock: warp_lock.cloned(),
         placed: placed.clone(),
+        side_quest: side_quest.cloned(),
         machines: machines.to_vec(),
         visited: visited.clone(),
         archives: archives.clone(),
@@ -495,9 +550,11 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         &HashMap::new(),
         None,
         None,
+        None,
         &[],
         None,
         &HashMap::new(),
+        None,
         &[],
         &HashMap::new(),
         &HashMap::new(),
@@ -521,6 +578,53 @@ pub fn load_world(name: &str) -> Option<WorldData> {
         0.0
     };
     data.galaxy_count = data.galaxy_count.clamp(1, 1024);
+    data.ship_pos = data.ship_pos.and_then(|mut pos| {
+        if !pos.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        pos[0] = pos[0].clamp(-1_000_000.0, 1_000_000.0);
+        pos[1] = pos[1].clamp(
+            -256.0,
+            crate::planet_scale::PLANET_SCALE.atmosphere_top + 256.0,
+        );
+        pos[2] = pos[2].clamp(-1_000_000.0, 1_000_000.0);
+        Some(pos)
+    });
+    data.state = match data.state.as_str() {
+        "atmo" => "atmo",
+        "space" => "space",
+        "warping" => "warping",
+        _ => "planet",
+    }
+    .to_string();
+    if data.state == "warping" {
+        let valid_warp = data.warp_anim.as_mut().is_some_and(|anim| {
+            let valid = anim.t.is_finite()
+                && anim.yaw.is_finite()
+                && anim.pitch.is_finite()
+                && anim.v0.is_finite()
+                && anim.seed != data.galaxy_seed;
+            if valid {
+                anim.t = anim
+                    .t
+                    .clamp(0.0, crate::space::WARP_LAUNCH + crate::space::WARP_RIDE);
+                anim.pitch = anim.pitch.clamp(
+                    -std::f32::consts::FRAC_PI_2,
+                    std::f32::consts::FRAC_PI_2,
+                );
+                anim.v0 = anim.v0.clamp(0.0, 4_800.0);
+            }
+            valid
+        });
+        if !valid_warp {
+            // A corrupt/incomplete warp record must not load into a mode whose
+            // simulation can never advance. Fall back to ordinary space.
+            data.state = "space".to_string();
+            data.warp_anim = None;
+        }
+    } else {
+        data.warp_anim = None;
+    }
     sanitize_marks(&mut data.marks);
     data.flags = data.flags.into_iter().take(4096).collect();
     data.market = data
@@ -546,6 +650,13 @@ pub fn load_world(name: &str) -> Option<WorldData> {
         })
         .take(4096)
         .collect();
+    data.side_quest = data.side_quest.take().filter(|quest| {
+        crate::data::item_by_key(&quest.item).is_some()
+            && (1..=100).contains(&quest.need)
+            && (0..=1_000_000).contains(&quest.reward)
+            && quest.x.unsigned_abs() <= 1_000_000
+            && quest.z.unsigned_abs() <= 1_000_000
+    });
     data.machines.truncate(200_000);
     sanitize_planet_map(&mut data.visited);
     sanitize_creature_records(&mut data.creatures, &mut data.creature_cells);
@@ -599,13 +710,21 @@ fn sanitize_creature_records(
     cells: &mut Vec<crate::creatures::CellSave>,
 ) {
     creatures.truncate(100_000);
-    creatures.retain(|herd| {
-        herd.cand < u32::BITS as usize
+    creatures.retain_mut(|herd| {
+        let valid = herd.cand < u32::BITS as usize
             && herd.cx.unsigned_abs() <= 1_000_000
             && herd.cz.unsigned_abs() <= 1_000_000
             && [herd.x, herd.z, herd.hp, herd.home_x, herd.home_z]
                 .iter()
-                .all(|value| value.is_finite())
+                .all(|value| value.is_finite());
+        if valid {
+            herd.x = herd.x.clamp(-1_000_000.0, 1_000_000.0);
+            herd.z = herd.z.clamp(-1_000_000.0, 1_000_000.0);
+            herd.home_x = herd.home_x.clamp(-1_000_000.0, 1_000_000.0);
+            herd.home_z = herd.home_z.clamp(-1_000_000.0, 1_000_000.0);
+            herd.hp = herd.hp.clamp(-1_000.0, 1_000.0);
+        }
+        valid
     });
     cells.truncate(100_000);
     cells.retain(|cell| {
@@ -686,60 +805,91 @@ fn list_files(dir: &PathBuf, suffix: &str) -> Vec<String> {
     out
 }
 
-fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> bool {
+fn write_bytes(path: &PathBuf, bytes: &[u8]) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match serde_json::to_string_pretty(data) {
-        Ok(json) => {
-            let Some(parent) = path.parent() else {
-                return false;
-            };
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("save.json");
-            let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-            let result = (|| {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&tmp)?;
-                file.write_all(json.as_bytes())?;
-                file.sync_all()?;
-                match std::fs::rename(&tmp, path) {
-                    Ok(()) => Ok(()),
-                    Err(_) if path.exists() => {
-                        // Windows does not atomically replace an existing file
-                        // with rename. Keep the previous save recoverable until
-                        // the new file has reached its final name.
-                        let backup = parent.join(format!(".{name}.bak"));
-                        if backup.exists() {
-                            std::fs::remove_file(&backup)?;
-                        }
-                        std::fs::rename(path, &backup)?;
-                        match std::fs::rename(&tmp, path) {
-                            Ok(()) => {
-                                let _ = std::fs::remove_file(&backup);
-                                Ok(())
-                            }
-                            Err(error) => {
-                                let _ = std::fs::rename(&backup, path);
-                                Err(error)
-                            }
-                        }
-                    }
-                    Err(e) => Err(e),
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("save.json");
+    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(_) if path.exists() => {
+                // Windows does not atomically replace an existing file with
+                // rename. Keep the previous save recoverable until the new
+                // file has reached its final name.
+                let backup = parent.join(format!(".{name}.bak"));
+                if backup.exists() {
+                    std::fs::remove_file(&backup)?;
                 }
-            })();
-            if result.is_err() {
-                let _ = std::fs::remove_file(&tmp);
+                std::fs::rename(path, &backup)?;
+                match std::fs::rename(&tmp, path) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&backup);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = std::fs::rename(&backup, path);
+                        Err(error)
+                    }
+                }
             }
-            result.is_ok()
+            Err(e) => Err(e),
         }
-        Err(_) => false,
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.is_ok()
+}
+
+fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> bool {
+    serde_json::to_vec_pretty(data)
+        .ok()
+        .is_some_and(|json| write_bytes(path, &json))
+}
+
+/// Previous character-file contents used to roll back a half-completed
+/// character/world save pair.
+pub enum SaveFileSnapshot {
+    Missing,
+    Bytes(Vec<u8>),
+}
+
+pub fn snapshot_char_file(name: &str) -> Option<SaveFileSnapshot> {
+    const MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
+    let path = char_path(name);
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.len() <= MAX_SAVE_BYTES => {
+            std::fs::read(path).ok().map(SaveFileSnapshot::Bytes)
+        }
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(SaveFileSnapshot::Missing)
+        }
+        Err(_) => None,
+    }
+}
+
+pub fn restore_char_file(name: &str, snapshot: &SaveFileSnapshot) -> bool {
+    let path = char_path(name);
+    match snapshot {
+        SaveFileSnapshot::Missing => !path.exists() || std::fs::remove_file(path).is_ok(),
+        SaveFileSnapshot::Bytes(bytes) => write_bytes(&path, bytes),
     }
 }
 
@@ -924,6 +1074,30 @@ impl Plugin for SaveSettingsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_ship_state_keeps_optional_health_compatible() {
+        let state: ShipStateSave = serde_json::from_str(
+            r#"{"pos":[1.0,2.0,3.0],"yaw":0.1,"pitch":0.2,"roll":0.3,"speed":4.0}"#,
+        )
+        .unwrap();
+        assert_eq!(state.hp, None);
+    }
+
+    #[test]
+    fn ship_save_sanitizer_canonicalizes_untrusted_identity() {
+        let mut ship = ShipSave {
+            model: "../../unknown".into(),
+            cls: "unknown".into(),
+            name: format!("{}\0", "x".repeat(100)),
+            inv: Vec::new(),
+        };
+        sanitize_ship_save(&mut ship);
+        assert_eq!(ship.cls, crate::data::SHIP_CLASSES[0].key);
+        assert!(ship.model.is_empty());
+        assert_eq!(ship.name.chars().count(), 64);
+        assert!(!ship.name.chars().any(char::is_control));
+    }
 
     #[test]
     fn archive_sanitizer_bounds_nested_untrusted_state() {

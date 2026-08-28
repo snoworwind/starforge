@@ -3752,7 +3752,8 @@ fn enter_planet(
     }
     // 异球再入：发换球事件（planet_switch_system 用旧 current_planet 归档并重建场景）；
     // 同球再入：无需切换世界
-    if let Some(archive_current) = planet_switch_policy(game.current_planet, game.landed_planet, pid)
+    if let Some(archive_current) =
+        planet_switch_policy(game.current_planet, game.landed_planet, pid)
     {
         land_ev.write(LandPlanetEvent {
             pid,

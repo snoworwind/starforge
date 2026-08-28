@@ -3866,9 +3866,7 @@ pub fn garage_panel_system(
             ui.label("（点击舱内物品取出到背包）");
             let put_label = selected_cargo
                 .as_ref()
-                .map(|(_, slot)| {
-                    format!("存入当前快捷栏：{} ×{}", item_name(&slot.item), slot.n)
-                })
+                .map(|(_, slot)| format!("存入当前快捷栏：{} ×{}", item_name(&slot.item), slot.n))
                 .unwrap_or_else(|| "当前快捷栏没有可存入物品".to_string());
             if ui
                 .add_enabled(selected_cargo.is_some(), egui::Button::new(put_label))

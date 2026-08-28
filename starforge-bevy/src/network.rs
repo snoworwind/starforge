@@ -482,13 +482,7 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                                 continue;
                             }
                             client.block_count += 1;
-                            let key = (
-                                update.galaxy,
-                                update.planet,
-                                update.x,
-                                update.y,
-                                update.z,
-                            );
+                            let key = (update.galaxy, update.planet, update.x, update.y, update.z);
                             if !block_log.contains_key(&key) && block_log.len() >= MAX_BLOCK_LOG {
                                 continue;
                             }
@@ -708,13 +702,7 @@ fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
     if !valid_block(&update) {
         return;
     }
-    let version_key = (
-        update.galaxy,
-        update.planet,
-        update.x,
-        update.y,
-        update.z,
-    );
+    let version_key = (update.galaxy, update.planet, update.x, update.y, update.z);
     if update.seq == 0
         || net
             .block_versions
@@ -723,9 +711,7 @@ fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
     {
         return;
     }
-    if !net.block_versions.contains_key(&version_key)
-        && net.block_versions.len() >= MAX_BLOCK_LOG
-    {
+    if !net.block_versions.contains_key(&version_key) && net.block_versions.len() >= MAX_BLOCK_LOG {
         return;
     }
     net.block_versions.insert(version_key, update.seq);
@@ -911,12 +897,7 @@ pub fn network_system(
     let current_planet = game.current_planet;
     let smooth = 1.0 - (-12.0 * time.delta_secs()).exp();
     for (mut transform, mut visibility, avatar) in &mut avatars {
-        *visibility = if should_show_remote(
-            &avatar,
-            local_mode,
-            game.galaxy.seed,
-            current_planet,
-        ) {
+        *visibility = if should_show_remote(&avatar, local_mode, game.galaxy.seed, current_planet) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -1244,10 +1225,7 @@ mod tests {
     #[test]
     fn pending_blocks_ignore_late_older_udp_update() {
         let mut net = NetworkState::default();
-        for (seq, id) in [
-            (9, crate::data::ids::AIR),
-            (8, crate::data::ids::STONE),
-        ] {
+        for (seq, id) in [(9, crate::data::ids::AIR), (8, crate::data::ids::STONE)] {
             queue_pending_block(
                 &mut net,
                 BlockUpdate {

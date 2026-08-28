@@ -410,7 +410,12 @@ pub fn save_char(
 
 pub fn load_char(name: &str) -> Option<CharData> {
     let mut data: CharData = read_json(&char_path(name))?;
-    data.name = data.name.chars().filter(|c| !c.is_control()).take(80).collect();
+    data.name = data
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect();
     data.world = data
         .world
         .map(|world| world.chars().filter(|c| !c.is_control()).take(80).collect());
@@ -608,10 +613,9 @@ pub fn load_world(name: &str) -> Option<WorldData> {
                 anim.t = anim
                     .t
                     .clamp(0.0, crate::space::WARP_LAUNCH + crate::space::WARP_RIDE);
-                anim.pitch = anim.pitch.clamp(
-                    -std::f32::consts::FRAC_PI_2,
-                    std::f32::consts::FRAC_PI_2,
-                );
+                anim.pitch = anim
+                    .pitch
+                    .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
                 anim.v0 = anim.v0.clamp(0.0, 4_800.0);
             }
             valid
@@ -727,9 +731,7 @@ fn sanitize_creature_records(
         valid
     });
     cells.truncate(100_000);
-    cells.retain(|cell| {
-        cell.cx.unsigned_abs() <= 1_000_000 && cell.cz.unsigned_abs() <= 1_000_000
-    });
+    cells.retain(|cell| cell.cx.unsigned_abs() <= 1_000_000 && cell.cz.unsigned_abs() <= 1_000_000);
 }
 
 fn sanitize_planet_archive(archive: &mut crate::space::PlanetArchive) {
@@ -1109,10 +1111,7 @@ mod tests {
                 biome: "not-a-biome".into(),
                 ship_pos: [f32::NAN, 0.0, 0.0],
                 machines: Vec::new(),
-                mods: HashMap::from([
-                    ("0,0".into(), vec![1, 1]),
-                    ("0,0,extra".into(), vec![1, 1]),
-                ]),
+                mods: HashMap::from([("0,0".into(), vec![1, 1]), ("0,0,extra".into(), vec![1, 1])]),
                 marks: vec![crate::space::Mark {
                     x: i32::MIN,
                     y: 0,

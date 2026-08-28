@@ -228,9 +228,7 @@ pub fn quest_tick_system(
     let mut announced: Vec<(String, String, f32)> = Vec::new();
     if let Ok(mut p) = player.single_mut() {
         if let Some(q) = quests.check(&p, &research.techs) {
-            p.credits = p
-                .credits
-                .saturating_add(50 + quests.idx as i32 * 25);
+            p.credits = p.credits.saturating_add(50 + quests.idx as i32 * 25);
             announced.push((
                 format!("任务完成：{}", q.title),
                 format!("奖励 ₪{}", 50 + quests.idx as i32 * 25),

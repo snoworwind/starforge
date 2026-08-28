@@ -1423,9 +1423,10 @@ fn spawn_scene(
     let loaded_world_is_archived = world_data.as_ref().is_some_and(|saved| {
         matches!(saved.state.as_str(), "space" | "warping")
             && saved.archives.values().any(|galaxy| {
-                galaxy.planets.values().any(|planet| {
-                    planet.seed == world.seed && planet.biome == world.biome().key
-                })
+                galaxy
+                    .planets
+                    .values()
+                    .any(|planet| planet.seed == world.seed && planet.biome == world.biome().key)
             })
     });
     game.landed_planet = if loaded_world_is_archived {
@@ -1439,10 +1440,7 @@ fn spawn_scene(
         start_mode,
         FlightMode::Atmo | FlightMode::Space | FlightMode::Warping
     );
-    if active_flight
-        && ship_state.pos.is_finite()
-        && ship_state.pos.length_squared() >= 1e-6
-    {
+    if active_flight && ship_state.pos.is_finite() && ship_state.pos.length_squared() >= 1e-6 {
         p.pos = ship_state.pos;
     }
     let mut ship_data = save::ShipSave {
@@ -1483,10 +1481,7 @@ fn spawn_scene(
     // A space save stores the active ship in ship_state, not in the
     // planetary parking position. Keep that position so loading in space
     // does not teleport the ship back to the planet-side spawn pad.
-    if !active_flight
-        || !ship_state.pos.is_finite()
-        || ship_state.pos.length_squared() < 1e-6
-    {
+    if !active_flight || !ship_state.pos.is_finite() || ship_state.pos.length_squared() < 1e-6 {
         ship_state.pos = game.ship_pos;
     }
     ship_state.board_yaw = 0.0;
@@ -1945,9 +1940,8 @@ fn save_system(
                 &creatures_save,
                 &creature_cells_save,
             );
-        let rollback_ok = !ok_char
-            || ok_world
-            || save::restore_char_file(&names.char, &char_snapshot);
+        let rollback_ok =
+            !ok_char || ok_world || save::restore_char_file(&names.char, &char_snapshot);
         if ok_char && ok_world {
             audio::play(&mut commands, sfx.pickup.clone(), 0.5, None);
             if request.quit_after {

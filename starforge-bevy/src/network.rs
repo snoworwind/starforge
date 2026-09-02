@@ -676,7 +676,7 @@ fn apply_block(
     update: &BlockUpdate,
     world: &mut World,
     commands: &mut Commands,
-    machines: &Query<(Entity, &Machine)>,
+    machines: &mut Query<(Entity, &mut Machine)>,
 ) {
     if !valid_block(update) {
         return;
@@ -684,17 +684,16 @@ fn apply_block(
     world.set(update.x, update.y, update.z, update.id);
     let pos = [update.x, update.y, update.z];
     let block = crate::data::block_by_id(update.id);
-    let existing = machines.iter().find(|(_, machine)| machine.pos == pos);
-    let existing_matches = existing.is_some_and(|(_, machine)| {
-        block.machine.is_some() && machine.kind.block_key() == block.key
-    });
-    if !existing_matches {
-        if let Some((entity, _)) = existing {
-            commands.entity(entity).despawn();
+    if let Some((entity, mut machine)) = machines.iter_mut().find(|(_, machine)| machine.pos == pos)
+    {
+        if block.machine.is_some() && machine.kind.block_key() == block.key {
+            machine.dir = update.dir;
+            return;
         }
-        if block.machine.is_some() {
-            crate::factory::spawn_machine(commands, pos, block.key, update.dir);
-        }
+        commands.entity(entity).despawn();
+    }
+    if block.machine.is_some() {
+        crate::factory::spawn_machine(commands, pos, block.key, update.dir);
     }
 }
 
@@ -764,7 +763,7 @@ pub fn network_system(
     mode: Res<FlightMode>,
     game: Res<SpaceGame>,
     mut world: ResMut<World>,
-    machines: Query<(Entity, &Machine)>,
+    mut machines: Query<(Entity, &mut Machine)>,
     mut avatars: Query<(&mut Transform, &mut Visibility, &mut RemoteAvatar)>,
     mut block_events: MessageReader<BlockChanged>,
 ) {
@@ -913,7 +912,7 @@ pub fn network_system(
         .remove(&(game.galaxy.seed, current_planet))
     {
         for update in updates {
-            apply_block(&update, &mut world, &mut commands, &machines);
+            apply_block(&update, &mut world, &mut commands, &mut machines);
         }
     }
 
@@ -1244,6 +1243,43 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].seq, 9);
         assert_eq!(pending[0].id, crate::data::ids::AIR);
+    }
+
+    #[test]
+    fn matching_remote_machine_update_applies_direction() {
+        let mut ecs_world = bevy::ecs::world::World::new();
+        let pos = [3, 4, 5];
+        let entity = ecs_world
+            .spawn(Machine {
+                pos,
+                kind: crate::factory::MachineKind::Belt,
+                dir: 0,
+                active: false,
+            })
+            .id();
+        let mut voxel_world = World::new(77, "lush", 3);
+        let update = BlockUpdate {
+            seq: 1,
+            galaxy: 77,
+            planet: 0,
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+            id: crate::data::block_by_key("belt").id,
+            dir: 2,
+        };
+        let mut state =
+            bevy::ecs::system::SystemState::<(Commands, Query<(Entity, &mut Machine)>)>::new(
+                &mut ecs_world,
+            );
+
+        {
+            let (mut commands, mut machines) = state.get_mut(&mut ecs_world).unwrap();
+            apply_block(&update, &mut voxel_world, &mut commands, &mut machines);
+        }
+        state.apply(&mut ecs_world);
+
+        assert_eq!(ecs_world.get::<Machine>(entity).unwrap().dir, update.dir);
     }
 
     #[test]

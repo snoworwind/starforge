@@ -1737,7 +1737,7 @@ pub fn drops_system(
             }
             let (_, di, pi) = &snap[i];
             let (_, dj, pj) = &snap[j];
-            if di.item == dj.item && di.pick_delay <= 0.0 && dj.pick_delay <= 0.0 {
+            if di.item == dj.item && di.age >= di.pick_delay && dj.age >= dj.pick_delay {
                 let d2 = (pi.x - pj.x).powi(2) + (pi.y - pj.y).powi(2) + (pi.z - pj.z).powi(2);
                 if d2 < 1.44
                     && let Some(total) = di.n.checked_add(dj.n)
@@ -1980,6 +1980,34 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn ordinary_drops_merge_only_after_their_pickup_delay() {
+        let mut app = drop_test_app();
+        app.world_mut()
+            .spawn(Player::new(crate::data::Difficulty::Normal));
+        for n in [3, 4] {
+            let mut drop = test_drop("iron", n, 0.0);
+            drop.pick_delay = 0.4;
+            app.world_mut()
+                .spawn((drop, Transform::from_xyz(100.0, 10.0, 0.0)));
+        }
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&DropItem>()
+                .iter(app.world())
+                .count(),
+            2
+        );
+        for _ in 0..30 {
+            app.update();
+        }
+        let mut query = app.world_mut().query::<&DropItem>();
+        let drops: Vec<_> = query.iter(app.world()).collect();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].n, 7);
     }
 
     #[test]

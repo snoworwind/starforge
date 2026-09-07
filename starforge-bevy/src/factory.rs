@@ -1150,7 +1150,7 @@ impl Snapshot {
     }
 }
 
-/// 装配/精炼：该面是否是输入面（皮带终点指向机器所在格——简化：邻格有皮带）。
+/// 装配/精炼：该面是否是输入面（皮带终点指向机器所在格）。
 fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
     let (dx, dz) = DIRS[dir_index(d)];
     let bp = [m.pos[0] + dx, m.pos[1], m.pos[2] + dz];
@@ -1159,7 +1159,7 @@ fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
     b1.map(|e| {
         snap.machines
             .get(e)
-            .map(|mm| mm.kind == MachineKind::Belt)
+            .map(|mm| mm.kind == MachineKind::Belt && DIRS[dir_index(mm.dir)] == (-dx, -dz))
             .unwrap_or(false)
     })
     .unwrap_or(false)
@@ -1167,7 +1167,7 @@ fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
             .map(|e| {
                 snap.machines
                     .get(e)
-                    .map(|mm| mm.kind == MachineKind::Belt)
+                    .map(|mm| mm.kind == MachineKind::Belt && DIRS[dir_index(mm.dir)] == (-dx, -dz))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -1204,7 +1204,7 @@ fn try_output(m: &Machine, item: &str, snap: &mut Snapshot) -> bool {
             continue;
         };
         if matches!(tm.kind, MachineKind::Belt) {
-            if crafter {
+            if crafter && tm.pos != front {
                 continue; // 装配/精炼不从侧面输出到皮带
             }
             if let MachineState::Belt(bs) = ts
@@ -2638,6 +2638,165 @@ mod tests {
         // 足够间距 → 接受
         assert!(belt_insert(&mut b, "copper_ore", 0.4));
         assert_eq!(b.items.len(), 2);
+    }
+
+    fn snapshot(machines: impl IntoIterator<Item = Machine>) -> Snapshot {
+        let mut world = bevy::prelude::World::new();
+        let mut snap = Snapshot {
+            machines: HashMap::new(),
+            states: HashMap::new(),
+            pos_index: HashMap::new(),
+        };
+        for m in machines {
+            let entity = world.spawn_empty().id();
+            snap.pos_index.insert(m.pos, entity);
+            snap.states.insert(entity, MachineState::for_kind(m.kind));
+            snap.machines.insert(entity, m);
+        }
+        snap
+    }
+
+    #[test]
+    fn crafter_output_belt_direction_rules() {
+        for kind in [MachineKind::Assembler, MachineKind::Refinery] {
+            for dir in 0..4 {
+                let m = machine(kind, [0, 2, 0], dir);
+                for (face, &(dx, dz)) in DIRS.iter().enumerate() {
+                    for belt_dir in 0..4 {
+                        let mut snap =
+                            snapshot([machine(MachineKind::Belt, [dx, 2, dz], belt_dir)]);
+                        let expected =
+                            face == dir_index(dir) && dir_index(belt_dir) != (face + 2) % 4;
+                        assert_eq!(
+                            try_output(&m, "gear", &mut snap),
+                            expected,
+                            "{kind:?}, direction {dir}, face {face}, belt direction {belt_dir}"
+                        );
+                        let entity = snap.pos_index[&[dx, 2, dz]];
+                        let MachineState::Belt(belt) = &snap.states[&entity] else {
+                            panic!("expected belt state");
+                        };
+                        assert_eq!(belt.items.len(), usize::from(expected));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crafter_output_reaches_chest_via_front_belt() {
+        for (kind, recipe_id) in [
+            (MachineKind::Assembler, "gear"),
+            (MachineKind::Refinery, "fuel2"),
+        ] {
+            let recipe = data::RECIPES.iter().find(|r| r.id == recipe_id).unwrap();
+            let researched = vec!["refining".to_string()];
+            for dir in 0..4 {
+                let (dx, dz) = DIRS[dir_index(dir)];
+                let mut m = machine(kind, [0, 2, 0], dir);
+                let mut belt = machine(MachineKind::Belt, [dx, 2, dz], dir);
+                let mut snap = snapshot([
+                    belt.clone(),
+                    machine(MachineKind::Chest, [dx * 2, 2, dz * 2], dir),
+                ]);
+                let belt_entity = snap.pos_index[&belt.pos];
+                let chest_entity = snap.pos_index[&[dx * 2, 2, dz * 2]];
+                let mut crafter = CrafterState {
+                    recipe: Some(recipe_id),
+                    input: recipe
+                        .inputs
+                        .iter()
+                        .map(|(i, n)| (i.to_string(), *n))
+                        .collect(),
+                    ..default()
+                };
+                let mut drops = Vec::new();
+                for _ in 0..140 {
+                    crafter_tick(
+                        &mut m,
+                        &mut crafter,
+                        1.0,
+                        kind.block_key(),
+                        &mut snap,
+                        &mut drops,
+                        &researched,
+                    );
+                    let Some(MachineState::Belt(mut state)) = snap.states.remove(&belt_entity)
+                    else {
+                        panic!("expected belt state");
+                    };
+                    belt_tick(&mut belt, &mut state, 1.0, &mut snap);
+                    snap.states.insert(belt_entity, MachineState::Belt(state));
+                }
+                let MachineState::Chest(chest) = &snap.states[&chest_entity] else {
+                    panic!("expected chest state");
+                };
+                let delivered: i32 = chest
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter(|slot| slot.item == recipe.output.0)
+                    .map(|slot| slot.n)
+                    .sum();
+                assert_eq!(delivered, recipe.output.1, "{kind:?}, direction {dir}");
+                assert!(crafter.output.is_none());
+                assert!(crafter.input.values().all(|n| *n == 0));
+                assert!(drops.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn crafter_output_waits_for_belt_space_without_losing_items() {
+        let mut m = machine(MachineKind::Assembler, [0, 2, 0], 0);
+        let mut snap = snapshot([machine(MachineKind::Belt, [1, 2, 0], 0)]);
+        let entity = snap.pos_index[&[1, 2, 0]];
+        assert!(machine_insert(
+            &snap.machines[&entity],
+            snap.states.get_mut(&entity).unwrap(),
+            "iron"
+        ));
+        let mut crafter = CrafterState {
+            recipe: Some("gear"),
+            output: Some(Slot {
+                item: "gear".into(),
+                n: 2,
+            }),
+            ..default()
+        };
+        let mut drops = Vec::new();
+        crafter_tick(
+            &mut m,
+            &mut crafter,
+            1.0,
+            "assembler",
+            &mut snap,
+            &mut drops,
+            &[],
+        );
+        assert_eq!(crafter.output.as_ref().unwrap().n, 2);
+        let Some(MachineState::Belt(belt)) = snap.states.get_mut(&entity) else {
+            panic!("expected belt state");
+        };
+        assert_eq!(belt.items.len(), 1);
+        belt.items[0].t = 0.5;
+        crafter_tick(
+            &mut m,
+            &mut crafter,
+            1.0,
+            "assembler",
+            &mut snap,
+            &mut drops,
+            &[],
+        );
+        assert_eq!(crafter.output.as_ref().unwrap().n, 1);
+        let MachineState::Belt(belt) = &snap.states[&entity] else {
+            panic!("expected belt state");
+        };
+        assert_eq!(belt.items.len(), 2);
+        assert_eq!(belt.items[0].item, "iron");
+        assert_eq!(belt.items[1].item, "gear");
+        assert!(drops.is_empty());
     }
 
     #[test]

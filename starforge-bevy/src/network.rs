@@ -907,9 +907,12 @@ pub fn network_system(
             .slerp(Quat::from_rotation_y(avatar.yaw), smooth);
     }
 
-    if let Some(updates) = net
-        .pending_blocks
-        .remove(&(game.galaxy.seed, current_planet))
+    // A warp changes galaxy identity before replacing the voxel scene.
+    // Keep destination updates queued until that scene has been rebuilt.
+    if game.landed_planet >= 0
+        && let Some(updates) = net
+            .pending_blocks
+            .remove(&(game.galaxy.seed, current_planet))
     {
         for update in updates {
             apply_block(&update, &mut world, &mut commands, &mut machines);

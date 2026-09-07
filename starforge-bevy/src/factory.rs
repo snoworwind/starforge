@@ -738,6 +738,14 @@ impl MachineState {
     }
 
     pub fn from_save(kind: MachineKind, d: &MachineDataSave) -> Self {
+        // Production buffers are counters, not inventory slots. A blocked
+        // output can legitimately accumulate more than one backpack stack.
+        let clean_output = |slot: &Option<Slot>| {
+            slot.as_ref().and_then(|slot| {
+                data::item_by_key(&slot.item)?;
+                (slot.n > 0).then(|| slot.clone())
+            })
+        };
         let clean_slot = |slot: &Option<Slot>| {
             slot.as_ref().and_then(|slot| {
                 let max = data::item_by_key(&slot.item)?.stack;
@@ -767,7 +775,7 @@ impl MachineState {
             MachineKind::Furnace => Self::Furnace(FurnaceState {
                 input: clean_slot(&d.input),
                 fuel: clean_slot(&d.fuel),
-                output: clean_slot(&d.output),
+                output: clean_output(&d.output),
                 prog: finite(d.prog, 0.0, 1.0),
                 burn: finite(d.burn, 0.0, 86_400.0),
                 burn_max: finite(d.burn_max, 0.0, 86_400.0),
@@ -775,7 +783,7 @@ impl MachineState {
                 on: false,
             }),
             MachineKind::Miner => Self::Miner(MinerState {
-                output: clean_slot(&d.output),
+                output: clean_output(&d.output),
                 prog: finite(d.prog, 0.0, 1.0),
                 deposit: d.deposit.clamp(0, 300),
             }),
@@ -821,7 +829,7 @@ impl MachineState {
                     .filter(|(item, n)| data::item_by_key(item).is_some() && **n > 0)
                     .map(|(item, n)| (item.clone(), (*n).min(1_000_000)))
                     .collect(),
-                output: clean_slot(&d.output),
+                output: clean_output(&d.output),
                 prog: finite(d.prog, 0.0, 1.0),
             }),
             MachineKind::Chest => Self::Chest(ChestState {
@@ -840,7 +848,7 @@ impl MachineState {
                     .filter(|(item, amount)| colony_supply(item) && **amount > 0)
                     .map(|(item, amount)| (item.clone(), (*amount).min(1_000)))
                     .collect(),
-                output: clean_slot(&d.output).filter(|slot| slot.item == "data"),
+                output: clean_output(&d.output).filter(|slot| slot.item == "data"),
                 prog: finite(d.prog, 0.0, 1.0),
                 habitat: d.habitat.clamp(0, 10_000),
                 residents: d.residents.clamp(0, 8),
@@ -940,6 +948,12 @@ fn colony_output_room(output: &Option<Slot>) -> bool {
     output
         .as_ref()
         .is_none_or(|slot| slot.item == "data" && slot.n <= 498)
+}
+
+fn production_output_room(output: &Option<Slot>, item: &str, amount: i32) -> bool {
+    output
+        .as_ref()
+        .is_none_or(|slot| slot.item != item || slot.n.checked_add(amount).is_some())
 }
 
 pub fn can_machine_accept(m: &Machine, item: &str, state: &MachineState) -> bool {
@@ -1244,7 +1258,8 @@ fn furnace_tick(
             .as_deref()
             .and_then(|it| r.inputs.iter().find(|(i, _)| *i == it).map(|(_, n)| *n))
     });
-    let can_work = r.is_some() && f.input.as_ref().map(|s| s.n).unwrap_or(0) >= need.unwrap_or(1);
+    let can_work = r.is_some_and(|r| production_output_room(&f.output, r.output.0, r.output.1))
+        && f.input.as_ref().map(|s| s.n).unwrap_or(0) >= need.unwrap_or(1);
     if f.burn <= 0.0
         && can_work
         && let Some(fuel) = f.fuel.as_mut()
@@ -1328,6 +1343,12 @@ fn miner_tick(
     if !below.ore {
         return;
     }
+    let drop = below.drops.first().map(|d| d.item).unwrap_or("stone");
+    if s.output.as_ref().is_some_and(|o| o.item != drop)
+        || !production_output_room(&s.output, drop, 1)
+    {
+        return;
+    }
     if sat <= 0.05 {
         return;
     }
@@ -1381,7 +1402,9 @@ fn crafter_tick(
         .inputs
         .iter()
         .all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n);
-    if c.prog > 0.0 || (has_all && sat > 0.05) {
+    if production_output_room(&c.output, r.output.0, r.output.1)
+        && (c.prog > 0.0 || (has_all && sat > 0.05))
+    {
         if c.prog == 0.0 {
             for (i, n) in r.inputs {
                 let v = c.input.entry(i.to_string()).or_insert(0);
@@ -2275,7 +2298,14 @@ pub fn factory_system(
         let Some(mut st) = snap.states.remove(&e) else {
             continue;
         };
-        let machine_sat = sat_by.get(&e).copied().unwrap_or(sat);
+        // Routing earlier in this tick can supply an idle machine after
+        // demand was measured. It must wait for the next power allocation;
+        // a zero-demand component's satisfaction of 1 is not free energy.
+        let machine_sat = if power_use(m.kind) > 0.0 && !use_by.contains_key(&e) {
+            0.0
+        } else {
+            sat_by.get(&e).copied().unwrap_or(sat)
+        };
         let mut colony_reward = None;
         match &mut st {
             MachineState::Furnace(f) => furnace_tick(
@@ -2654,6 +2684,128 @@ mod tests {
             snap.machines.insert(entity, m);
         }
         snap
+    }
+
+    #[test]
+    fn production_buffers_survive_save_roundtrip_above_stack_limit() {
+        for (kind, item, n) in [
+            (MachineKind::Furnace, "iron", 750),
+            (MachineKind::Miner, "iron_ore", 750),
+            (MachineKind::Assembler, "gear", 750),
+            (MachineKind::Refinery, "fuel", 750),
+            (MachineKind::ColonyCore, "data", 500),
+        ] {
+            let saved = MachineDataSave {
+                output: Some(Slot {
+                    item: item.into(),
+                    n,
+                }),
+                ..default()
+            };
+            assert_eq!(
+                MachineState::from_save(kind, &saved).to_save().output,
+                saved.output,
+                "{kind:?} lost production during load"
+            );
+        }
+    }
+
+    #[test]
+    fn full_production_counter_does_not_consume_crafter_inputs() {
+        let mut crafter = CrafterState {
+            recipe: Some("gear"),
+            input: HashMap::from([("iron".into(), 100)]),
+            output: Some(Slot {
+                item: "gear".into(),
+                n: i32::MAX,
+            }),
+            ..default()
+        };
+        let before = crafter.input.clone();
+        let mut m = machine(MachineKind::Assembler, [0, 2, 0], 0);
+        crafter_tick(
+            &mut m,
+            &mut crafter,
+            1.0,
+            "assembler",
+            &mut snapshot([]),
+            &mut Vec::new(),
+            &[],
+        );
+        assert_eq!(crafter.input, before);
+        assert_eq!(crafter.prog, 0.0);
+        assert_eq!(crafter.output.unwrap().n, i32::MAX);
+    }
+
+    #[test]
+    fn newly_fed_pump_waits_for_power_allocation() {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(100));
+        app.insert_resource(time)
+            .init_resource::<TickAcc>()
+            .init_resource::<Power>()
+            .insert_resource(daynight::DayTime(0.3))
+            .insert_resource(GameWorld::new(42, "lush", 3))
+            .insert_resource(crate::ui::IconMaterials {
+                quad: default(),
+                fallback: default(),
+                map: default(),
+            })
+            .insert_resource(crate::audio::Sfx::build(&mut Assets::default(), 0.0))
+            .add_message::<crate::quests::FlagEvent>()
+            .add_systems(Update, factory_system);
+        let mut entities = [
+            app.world_mut().spawn_empty().id(),
+            app.world_mut().spawn_empty().id(),
+        ];
+        entities.sort();
+        app.world_mut().entity_mut(entities[0]).insert((
+            machine(MachineKind::Belt, [0, 2, 0], 0),
+            MachineState::Belt(BeltState {
+                items: vec![BeltItem {
+                    item: "coolant".into(),
+                    t: 1.0,
+                }],
+            }),
+        ));
+        app.world_mut().entity_mut(entities[1]).insert((
+            machine(MachineKind::Pump, [1, 2, 0], 0),
+            MachineState::for_kind(MachineKind::Pump),
+        ));
+        for _ in 0..3 {
+            app.update();
+            let MachineState::Belt(pump) = app.world().get::<MachineState>(entities[1]).unwrap()
+            else {
+                panic!("expected pump")
+            };
+            assert_eq!(pump.items.len(), 1);
+            assert_eq!(pump.items[0].t, 0.0, "unpowered pump moved an item");
+            assert!(!app.world().get::<Machine>(entities[1]).unwrap().active);
+        }
+    }
+
+    #[test]
+    fn cable_grids_do_not_exchange_power_with_each_other_or_wireless_pool() {
+        let snap = snapshot([
+            machine(MachineKind::Solar, [0, 2, 0], 0),
+            machine(MachineKind::Cable, [1, 2, 0], 0),
+            machine(MachineKind::Battery, [2, 2, 0], 0),
+            machine(MachineKind::Cable, [10, 2, 0], 0),
+            machine(MachineKind::Miner, [11, 2, 0], 0),
+            machine(MachineKind::Solar, [20, 2, 0], 0),
+            machine(MachineKind::Miner, [30, 2, 0], 0),
+        ]);
+        let mut components: Vec<Vec<i32>> = power_components(&snap)
+            .into_iter()
+            .map(|component| {
+                let mut xs: Vec<_> = component.iter().map(|e| snap.machines[e].pos[0]).collect();
+                xs.sort();
+                xs
+            })
+            .collect();
+        components.sort();
+        assert_eq!(components, vec![vec![0, 1, 2], vec![10, 11], vec![20, 30]]);
     }
 
     #[test]

@@ -128,6 +128,48 @@ impl FlightMode {
 
 // ---------- 输入 ----------
 
+/// Space combat can kill the pilot while the ground survival system is
+/// disabled. Recover at the station exit without mixing voxel/space coords.
+pub fn flight_respawn_system(
+    time: Res<Time>,
+    mut player: Query<&mut Player>,
+    mut mode: ResMut<FlightMode>,
+    mut ship: ResMut<ShipState>,
+    mut game: ResMut<SpaceGame>,
+    mut warp: ResMut<WarpAnim>,
+    mut input: ResMut<SpaceInput>,
+) {
+    if !mode.space_scene() {
+        return;
+    }
+    for mut player in &mut player {
+        if !player.dead {
+            continue;
+        }
+        player.respawn_timer -= time.delta_secs();
+        if player.respawn_timer > 0.0 {
+            continue;
+        }
+        let exit =
+            crate::station::station_exit_pos(Vec3::from(game.galaxy.station), game.galaxy.seed);
+        player.respawn_at(exit);
+        player.toast("紧急救援：外骨骼已在空间站附近重建");
+        let hp_max = ship.hp_max;
+        let engine_snd = ship.engine_snd;
+        *ship = ShipState {
+            pos: exit,
+            hp: hp_max,
+            hp_max,
+            engine_snd,
+            ..default()
+        };
+        *mode = FlightMode::Space;
+        *warp = WarpAnim::default();
+        *input = SpaceInput::default();
+        game.dock_cd = 5.0;
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct SpaceInput {
     pub thrust: bool,
@@ -3528,6 +3570,11 @@ fn snapshot_current_planet(
     spawner: &crate::creatures::CreatureSpawner,
     creatures: &Query<(Entity, &mut Creature, &Transform)>,
 ) {
+    // After a warp, the voxel world still belongs to the departed galaxy
+    // until a landing rebuilds it. Another warp must not archive it again.
+    if game.landed_planet < 0 {
+        return;
+    }
     let current = game.current_planet;
     let mut archive = game.visited.get(&current).cloned().unwrap_or_default();
     archive.seed = world.seed;
@@ -4146,6 +4193,7 @@ impl Plugin for SpacePlugin {
             .add_systems(
                 Update,
                 (
+                    flight_respawn_system,
                     atmo_system,
                     atmoland_system,
                     seated_camera_system,
@@ -4245,6 +4293,80 @@ mod tests {
         assert_eq!(planet_switch_policy(0, -1, 3), Some(false));
         assert_eq!(planet_switch_policy(0, 0, 3), Some(true));
         assert_eq!(planet_switch_policy(3, 3, 3), None);
+    }
+
+    #[test]
+    fn consecutive_warps_preserve_each_galaxys_planet_archive() {
+        use bevy::ecs::system::SystemState;
+        let mut ecs = bevy::prelude::World::new();
+        let mut state: SystemState<(
+            Query<(Entity, &factory::Machine, &factory::MachineState)>,
+            Query<(Entity, &mut Creature, &Transform)>,
+        )> = SystemState::new(&mut ecs);
+        let (machines, creatures) = state.get_mut(&mut ecs).unwrap();
+        let mut game = SpaceGame::new(data::generate_galaxy(54321));
+        game.visited.insert(
+            0,
+            PlanetArchive {
+                seed: 999,
+                ..default()
+            },
+        );
+        let world = VoxelWorld::new(42, "lush", 3);
+        let spawner = crate::creatures::CreatureSpawner::default();
+        // The old scene is not a planet in the current galaxy.
+        snapshot_current_planet(&mut game, &world, &machines, &spawner, &creatures);
+        assert_eq!(game.visited[&0].seed, 999);
+        // Once landed, normal snapshots must still update the archive.
+        game.landed_planet = 0;
+        snapshot_current_planet(&mut game, &world, &machines, &spawner, &creatures);
+        assert_eq!(game.visited[&0].seed, 42);
+    }
+
+    #[test]
+    fn dead_pilot_recovers_from_space_and_interrupted_warp() {
+        for mode in [FlightMode::Space, FlightMode::Warping] {
+            let mut app = App::new();
+            let mut time = Time::<()>::default();
+            time.advance_by(Duration::from_secs(2));
+            let game = SpaceGame::new(data::home_galaxy());
+            let exit =
+                crate::station::station_exit_pos(Vec3::from(game.galaxy.station), game.galaxy.seed);
+            app.insert_resource(time)
+                .insert_resource(game)
+                .insert_resource(mode)
+                .insert_resource(ShipState {
+                    pulsing: true,
+                    speed: 900.0,
+                    ..default()
+                })
+                .insert_resource(WarpAnim {
+                    active: true,
+                    ..default()
+                })
+                .insert_resource(SpaceInput {
+                    thrust: true,
+                    ..default()
+                })
+                .add_systems(Update, flight_respawn_system);
+            let mut player = Player::new(data::Difficulty::Normal);
+            player.equipment.equip("oxygen_tank").unwrap();
+            assert!(player.damage(100.0));
+            let entity = app.world_mut().spawn(player).id();
+            app.update();
+            let player = app.world().get::<Player>(entity).unwrap();
+            assert!(!player.dead);
+            assert_eq!(player.pos, exit);
+            assert_eq!(player.stats.o2, 180.0);
+            assert_eq!(player.stats.hp, 8.0);
+            assert_eq!(*app.world().resource::<FlightMode>(), FlightMode::Space);
+            let ship = app.world().resource::<ShipState>();
+            assert_eq!(ship.pos, exit);
+            assert_eq!(ship.speed, 0.0);
+            assert!(!ship.pulsing);
+            assert!(!app.world().resource::<WarpAnim>().active);
+            assert!(!app.world().resource::<SpaceInput>().thrust);
+        }
     }
 
     #[test]

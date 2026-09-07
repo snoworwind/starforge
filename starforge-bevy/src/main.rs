@@ -1429,7 +1429,11 @@ fn spawn_scene(
                     .any(|planet| planet.seed == world.seed && planet.biome == world.biome().key)
             })
     });
-    game.landed_planet = if loaded_world_is_archived {
+    let world_in_current_galaxy = world_data
+        .as_ref()
+        .and_then(|saved| saved.world_in_current_galaxy)
+        .unwrap_or(!loaded_world_is_archived);
+    game.landed_planet = if !world_in_current_galaxy {
         -1
     } else {
         game.current_planet as i32
@@ -1861,11 +1865,22 @@ fn save_system(
     creatures_q: Query<(Entity, &mut creatures::Creature, &Transform)>,
     mut commands: Commands,
     mut quit_ev: MessageWriter<ui::QuitToMenuEvent>,
+    mut ui_state: ResMut<UiState>,
 ) {
     for request in ev.read() {
         let Ok(mut p) = player.single_mut() else {
             continue;
         };
+        // F5 can be pressed while dragging a stack. The cursor is transient
+        // UI state, so return it to persistent inventory before saving.
+        if let Some(cursor) = ui_state.cursor.as_ref() {
+            if p.inv.room_for(&cursor.item) < cursor.n {
+                p.toast("保存前请先放下手持物品，背包空间不足");
+                continue;
+            }
+            p.inv.add_item(&cursor.item, cursor.n);
+            ui_state.cursor = None;
+        }
         let state_str = match *mode {
             FlightMode::Atmo | FlightMode::AtmoLand => "atmo",
             FlightMode::Space | FlightMode::Station => "space",
@@ -1928,6 +1943,7 @@ fn save_system(
                 day.0,
                 state_str,
                 game.current_planet,
+                game.landed_planet >= 0,
                 game.galaxy.seed,
                 game.galaxy_count,
                 &game.galaxy.market,

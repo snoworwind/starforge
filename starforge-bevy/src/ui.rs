@@ -1500,11 +1500,7 @@ pub fn inventory_panel_system(
                     };
                     let name = data::item_by_key(item).map(|i| i.name).unwrap_or(item);
                     let cur = stats_snap.get(sys);
-                    let max = match *sys {
-                        "hp" => 8.0,
-                        "shield" => 6.0,
-                        _ => 100.0,
-                    };
+                    let max = player.single().map(|p| p.stat_max(sys)).unwrap_or(100.0);
                     let can = cur < max - 0.01 && has_items(&inv_snapshot, &[(item, *cost)]);
                     if cols[0]
                         .add_enabled(

@@ -253,6 +253,18 @@ impl Player {
         self.toasts.push((text.into(), 3.0));
     }
 
+    pub fn respawn_at(&mut self, pos: Vec3) {
+        self.pos = pos;
+        self.vel = Vec3::ZERO;
+        self.stats = Stats::full();
+        self.stats.o2 = self.stat_max("o2");
+        self.stats.shield = self.stat_max("shield");
+        self.dead = false;
+        self.respawn_timer = 0.0;
+        self.dmg_acc = 0.0;
+        self.mining = None;
+    }
+
     /// Apply damage: shield first, then hp. Returns true if the player died.
     pub fn damage(&mut self, n: f32) -> bool {
         if self.dead || !n.is_finite() || n <= 0.0 || self.creative() {
@@ -557,14 +569,7 @@ pub fn survival_system(
             p.respawn_timer -= dt;
             if p.respawn_timer <= 0.0 {
                 let spawn = world.find_spawn(96, 96);
-                p.pos = spawn;
-                p.vel = Vec3::ZERO;
-                p.stats = Stats::full();
-                let max_o2 = p.stat_max("o2");
-                let max_shield = p.stat_max("shield");
-                p.stats.o2 = max_o2;
-                p.stats.shield = max_shield;
-                p.dead = false;
+                p.respawn_at(spawn);
                 p.toast("外骨骼已在重生点重建");
             }
             continue;

@@ -157,9 +157,20 @@ impl Inventory {
     }
 
     pub fn has_items(&self, costs: &[(&str, i32)]) -> bool {
-        costs
-            .iter()
-            .all(|(item, n)| *n >= 0 && self.count_item(item) >= *n)
+        let mut totals = std::collections::HashMap::<&str, i32>::new();
+        for (item, n) in costs {
+            if *n < 0 {
+                return false;
+            }
+            let total = totals.entry(item).or_default();
+            let Some(sum) = total.checked_add(*n) else {
+                return false;
+            };
+            *total = sum;
+        }
+        totals
+            .into_iter()
+            .all(|(item, n)| self.count_item(item) >= n)
     }
 
     pub fn pay_items(&mut self, costs: &[(&str, i32)]) -> bool {
@@ -235,6 +246,19 @@ impl bevy::prelude::Plugin for InventoryPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payment_aggregates_duplicate_costs_and_is_atomic() {
+        let mut inventory = Inventory::default();
+        inventory.add_item("iron", 5);
+        let before = inventory.slots.clone();
+        assert!(!inventory.pay_items(&[("iron", 3), ("iron", 3)]));
+        assert_eq!(inventory.slots, before);
+        assert!(!inventory.pay_items(&[("iron", i32::MAX), ("iron", 1)]));
+        assert_eq!(inventory.slots, before);
+        assert!(inventory.pay_items(&[("iron", 2), ("iron", 3)]));
+        assert_eq!(inventory.count_item("iron"), 0);
+    }
 
     #[test]
     fn loaded_inventory_preserves_hotbar_and_storage_layout() {

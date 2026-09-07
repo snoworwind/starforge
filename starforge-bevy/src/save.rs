@@ -217,6 +217,10 @@ pub struct WorldData {
     pub state: String,
     #[serde(default)]
     pub current_planet: usize,
+    /// Whether the loaded voxel scene belongs to the current galaxy. None
+    /// is reserved for legacy saves; false forces a rebuild on landing.
+    #[serde(default)]
+    pub world_in_current_galaxy: Option<bool>,
     #[serde(default = "d_galaxy_seed")]
     pub galaxy_seed: u32,
     #[serde(default = "d_galaxy_count")]
@@ -492,6 +496,7 @@ pub fn save_world_full(
     day_t: f32,
     state: &str,
     current_planet: usize,
+    world_in_current_galaxy: bool,
     galaxy_seed: u32,
     galaxy_count: u32,
     market: &HashMap<String, f32>,
@@ -520,6 +525,7 @@ pub fn save_world_full(
         mods: world.serialize_mods(),
         state: state.into(),
         current_planet,
+        world_in_current_galaxy: Some(world_in_current_galaxy),
         galaxy_seed,
         galaxy_count,
         market: market.clone(),
@@ -548,6 +554,7 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         day_t,
         "planet",
         0,
+        true,
         crate::data::HOME_GALAXY_SEED,
         1,
         &HashMap::new(),
@@ -798,12 +805,17 @@ fn list_files(dir: &PathBuf, suffix: &str) -> Vec<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if let Some(stem) = name.strip_suffix(&format!(".{suffix}")) {
+            let candidate = name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".bak"))
+                .unwrap_or(&name);
+            if let Some(stem) = candidate.strip_suffix(&format!(".{suffix}")) {
                 out.push(stem.to_string());
             }
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 
@@ -1076,6 +1088,52 @@ impl Plugin for SaveSettingsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_scene_ownership_is_optional_for_legacy_saves_and_roundtrips() {
+        let mut json = serde_json::json!({
+            "v": 5, "kind": "world", "name": "test", "seed": 42,
+            "biome": "lush", "day_t": 0.3, "mods": {}
+        });
+        let legacy: WorldData = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(legacy.world_in_current_galaxy, None);
+        for owned in [false, true] {
+            json["world_in_current_galaxy"] = owned.into();
+            let saved: WorldData = serde_json::from_value(json.clone()).unwrap();
+            let restored: WorldData =
+                serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+            assert_eq!(restored.world_in_current_galaxy, Some(owned));
+        }
+    }
+
+    #[test]
+    fn interrupted_save_backup_is_listed_and_recoverable() {
+        let dir = std::env::temp_dir().join(format!(
+            "starforge-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.world.json");
+        let backup = dir.join(".test.world.json.bak");
+        assert!(write_json(&path, &vec![1, 2, 3]));
+        assert!(write_json(&path, &vec![4, 5, 6]));
+        assert_eq!(read_json::<Vec<i32>>(&path), Some(vec![4, 5, 6]));
+        // Reproduce interruption between moving the previous save aside
+        // and installing its replacement on Windows.
+        std::fs::rename(&path, &backup).unwrap();
+        assert_eq!(list_files(&dir, "world.json"), vec!["test"]);
+        assert_eq!(read_json::<Vec<i32>>(&path), Some(vec![4, 5, 6]));
+        std::fs::write(&path, b"truncated json").unwrap();
+        assert_eq!(read_json::<Vec<i32>>(&path), Some(vec![4, 5, 6]));
+        assert_eq!(list_files(&dir, "world.json"), vec!["test"]);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(backup).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
 
     #[test]
     fn legacy_ship_state_keeps_optional_health_compatible() {

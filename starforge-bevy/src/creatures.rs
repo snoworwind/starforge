@@ -1153,6 +1153,7 @@ pub fn creature_spawn_system(
 /// Creature AI: 游荡 / 跳跃 / 淡入淡出 / 行走动画（Minecraft 风格：不因距离消失，由兽群系统卸载休眠）。
 pub fn creature_system(
     time: Res<Time>,
+    mode: Res<crate::space::FlightMode>,
     mut q: Query<(&mut Creature, &mut Transform)>,
     world: Res<World>,
     mut player: Query<&mut Player>,
@@ -1241,7 +1242,7 @@ pub fn creature_system(
             c.dir = Vec3::new(player_delta.x, 0.0, player_delta.z).normalize_or_zero();
             c.vel.x = c.dir.x * c.speed * 1.8;
             c.vel.z = c.dir.z * c.speed * 1.8;
-            if player_dist < 1.5 && c.attack_cd <= 0.0 {
+            if can_melee_player(*mode, player_delta, 1.5) && c.attack_cd <= 0.0 {
                 c.attack_cd = 1.2;
                 p.damage(if c.kind == "beetle" { 2.0 } else { 1.0 });
             }
@@ -1488,6 +1489,7 @@ pub struct SentinelSpawner {
 #[allow(clippy::too_many_arguments)]
 pub fn sentinel_system(
     time: Res<Time>,
+    mode: Res<crate::space::FlightMode>,
     mut spawner: ResMut<SentinelSpawner>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -1611,7 +1613,7 @@ pub fn sentinel_system(
             }
             let yaw = dir.x.atan2(dir.z);
             tf.rotation = Quat::from_rotation_y(yaw);
-            if dist < 1.9 {
+            if can_melee_player(*mode, ppos - tf.translation, 1.9) {
                 *dmg_cd -= dt;
                 if *dmg_cd <= 0.0 {
                     *dmg_cd = 1.15;
@@ -1627,6 +1629,12 @@ pub fn sentinel_system(
 }
 
 // ---------- Dropped items ----------
+
+fn can_melee_player(mode: crate::space::FlightMode, delta: Vec3, reach: f32) -> bool {
+    mode == crate::space::FlightMode::Planet
+        && delta.xz().length_squared() < reach * reach
+        && delta.y.abs() < 2.5
+}
 
 #[derive(Component)]
 pub struct DropItem {
@@ -1718,6 +1726,7 @@ pub fn drops_system(
     }
     // 同类合并（JS: dist²<1.2 合并，n 相加、age 重置）
     let mut merged: Vec<usize> = Vec::new();
+    let mut removed = std::collections::HashSet::new();
     for i in 0..snap.len() {
         if merged.contains(&i) {
             continue;
@@ -1730,10 +1739,13 @@ pub fn drops_system(
             let (_, dj, pj) = &snap[j];
             if di.item == dj.item && di.pick_delay <= 0.0 && dj.pick_delay <= 0.0 {
                 let d2 = (pi.x - pj.x).powi(2) + (pi.y - pj.y).powi(2) + (pi.z - pj.z).powi(2);
-                if d2 < 1.44 {
-                    snap[i].1.n += dj.n;
+                if d2 < 1.44
+                    && let Some(total) = di.n.checked_add(dj.n)
+                {
+                    snap[i].1.n = total;
                     snap[i].1.age = 0.0;
                     commands.entity(snap[j].0).despawn();
+                    removed.insert(snap[j].0);
                     merged.push(j);
                 }
             }
@@ -1756,25 +1768,31 @@ pub fn drops_system(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         for &idx in order.iter().take(surviving_count - DROP_CAP) {
-            let (e, d, _) = &snap[idx];
+            let (e, d, _) = &mut snap[idx];
             let added = p.inv.add_item(&d.item, d.n);
-            if added >= d.n {
+            d.n -= added;
+            if d.n <= 0 {
                 commands.entity(*e).despawn();
-            } else if added > 0
-                && let Ok((_, mut dd, _)) = drops.get_mut(*e)
-            {
-                dd.n -= added;
+                removed.insert(*e);
             }
         }
     }
     // 合并结果写回实体（幸存者数量/年龄）
     for (e, d, _) in &snap {
+        if removed.contains(e) {
+            continue;
+        }
         if let Ok((_, mut dd, _)) = drops.get_mut(*e) {
             dd.n = d.n;
             dd.age = d.age;
         }
     }
     for (e, mut d, mut tf) in &mut drops {
+        // Despawns are deferred until this system returns. Never magnet-
+        // collect an entity already merged or collected by the cap pass.
+        if removed.contains(&e) {
+            continue;
+        }
         d.age += dt;
         if d.age > 240.0 {
             commands.entity(e).despawn();
@@ -1901,6 +1919,107 @@ impl Plugin for CreaturesPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn drop_test_app() -> App {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(16));
+        app.insert_resource(time)
+            .insert_resource(World::new(42, "lush", 3))
+            .insert_resource(crate::audio::Sfx::build(&mut Assets::default(), 0.0))
+            .add_systems(Update, drops_system);
+        app
+    }
+
+    #[test]
+    fn ground_melee_cannot_hit_cockpits_or_players_far_above() {
+        use crate::space::FlightMode;
+        assert!(can_melee_player(FlightMode::Planet, Vec3::X, 1.5));
+        assert!(!can_melee_player(FlightMode::Planet, Vec3::Y * 20.0, 1.5));
+        for mode in [FlightMode::Seated, FlightMode::Atmo, FlightMode::AtmoLand] {
+            assert!(!can_melee_player(mode, Vec3::X, 1.5));
+        }
+    }
+
+    fn test_drop(item: &str, n: i32, age: f32) -> DropItem {
+        DropItem {
+            item: item.into(),
+            n,
+            age,
+            vel: Vec3::ZERO,
+            pick_delay: 0.0,
+            base_y: 0.0,
+            resting: false,
+            no_space_t: 0.0,
+        }
+    }
+
+    #[test]
+    fn merged_drops_are_not_picked_up_twice_in_the_same_frame() {
+        let mut app = drop_test_app();
+        let mut player = Player::new(crate::data::Difficulty::Normal);
+        player.pos = Vec3::Y;
+        let entity = app.world_mut().spawn(player).id();
+        app.world_mut()
+            .spawn((test_drop("iron", 3, 1.0), Transform::default()));
+        app.world_mut()
+            .spawn((test_drop("iron", 4, 1.0), Transform::default()));
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Player>(entity)
+                .unwrap()
+                .inv
+                .count_item("iron"),
+            7
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&DropItem>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn drop_cap_partial_pickup_preserves_total_quantity() {
+        let mut app = drop_test_app();
+        let mut player = Player::new(crate::data::Difficulty::Normal);
+        for slot in &mut player.inv.slots {
+            *slot = Some(Slot {
+                item: "iron".into(),
+                n: 250,
+            });
+        }
+        player.inv.slots[0].as_mut().unwrap().n = 249;
+        let entity = app.world_mut().spawn(player).id();
+        let oldest = app
+            .world_mut()
+            .spawn((
+                test_drop("iron", 3, 100.0),
+                Transform::from_xyz(100.0, 10.0, 0.0),
+            ))
+            .id();
+        for index in 0..DROP_CAP {
+            app.world_mut().spawn((
+                test_drop("copper", 1, 1.0),
+                Transform::from_xyz(100.0 + index as f32 * 3.0, 10.0, 10.0),
+            ));
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Player>(entity)
+                .unwrap()
+                .inv
+                .count_item("iron"),
+            9000
+        );
+        assert_eq!(app.world().get::<DropItem>(oldest).unwrap().n, 2);
+        app.update();
+        assert_eq!(app.world().get::<DropItem>(oldest).unwrap().n, 2);
+    }
 
     fn test_world(seed: u32) -> World {
         let biome = data::biome_by_key("lush");

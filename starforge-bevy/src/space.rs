@@ -2647,6 +2647,11 @@ fn board_ship(
     );
     p.vel = Vec3::ZERO;
     p.mining = None;
+    // Ground movement stops running in the cockpit, so it cannot stop a
+    // jetpack sound that was active when the player boarded.
+    if let Some(entity) = p.jet_entity.take() {
+        commands.entity(entity).despawn();
+    }
     crate::audio::play(commands, sfx.click.clone(), 0.5, None);
     p.toast("已登船：W 点火起飞 · E 下船");
 }
@@ -4244,6 +4249,85 @@ impl Plugin for SpacePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boarding_ship_stops_jetpack_sound() {
+        for difficulty in [data::Difficulty::Normal, data::Difficulty::Creative] {
+            for jetting in [false, true] {
+                let mut app = App::new();
+                let mut time = Time::<()>::default();
+                time.advance_by(Duration::from_millis(16));
+                let mut audio_assets = Assets::<AudioSource>::default();
+                let sfx = crate::audio::Sfx::build(&mut audio_assets, 1.0);
+                let mut game = SpaceGame::new(data::home_galaxy());
+                game.ship_pos = Vec3::new(96.0, 40.0, 96.0);
+                let mut player = Player::new(difficulty);
+                player.pos = game.ship_pos;
+                let mut quests = crate::quests::Quests::default();
+                quests.flags.insert("shipRepaired".into(), true);
+                let mut keys = ButtonInput::<KeyCode>::default();
+                if jetting {
+                    keys.press(KeyCode::Space);
+                }
+                app.insert_resource(time)
+                    .insert_resource(sfx)
+                    .insert_resource(game)
+                    .insert_resource(quests)
+                    .insert_resource(keys)
+                    .insert_resource(UiState::default())
+                    .insert_resource(VoxelWorld::new(42, "lush", 3))
+                    .insert_resource(FlightMode::Planet)
+                    .insert_resource(ShipState::default())
+                    .add_message::<FlagEvent>()
+                    .add_message::<BigMessageEvent>()
+                    .add_systems(
+                        Update,
+                        (
+                            crate::player::movement_system.run_if(crate::schedule::ground_mode),
+                            ship_interact_system,
+                            seated_system,
+                        )
+                            .chain(),
+                    );
+                let entity = app.world_mut().spawn(player).id();
+                app.update();
+                let jet = app.world().get::<Player>(entity).unwrap().jet_entity;
+                assert_eq!(jet.is_some(), jetting);
+                if let Some(jet) = jet {
+                    assert!(app.world().get::<crate::audio::JetSound>(jet).is_some());
+                }
+
+                app.world_mut()
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(KeyCode::KeyE);
+                app.update();
+                assert_eq!(*app.world().resource::<FlightMode>(), FlightMode::Seated);
+                if let Some(jet) = jet {
+                    assert!(
+                        app.world().get_entity(jet).is_err(),
+                        "boarding must despawn the active jetpack sound"
+                    );
+                }
+                assert!(
+                    app.world()
+                        .get::<Player>(entity)
+                        .unwrap()
+                        .jet_entity
+                        .is_none()
+                );
+                // Ground movement no longer runs in the cockpit, so boarding
+                // must finish cleanup without waiting for another ground frame.
+                app.update();
+                assert!(
+                    app.world()
+                        .get::<Player>(entity)
+                        .unwrap()
+                        .jet_entity
+                        .is_none()
+                );
+            }
+        }
+    }
 
     #[test]
     fn galaxy_generation_deterministic() {

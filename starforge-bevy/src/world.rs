@@ -655,8 +655,9 @@ impl WorldGen {
 
     /// RLE decode into data; returns false on corruption/length mismatch.
     pub fn rle_decode(data: &mut [u8], pairs: &[u16]) -> bool {
-        if !pairs.len().is_multiple_of(2)
-            || pairs.chunks_exact(2).any(|p| {
+        let (pairs, remainder) = pairs.as_chunks::<2>();
+        if !remainder.is_empty()
+            || pairs.iter().any(|p| {
                 p[1] > u8::MAX as u16
                     || !crate::data::BLOCKS
                         .iter()
@@ -665,12 +666,12 @@ impl WorldGen {
         {
             return false;
         }
-        let total: u64 = pairs.iter().step_by(2).map(|&r| r as u64).sum();
+        let total: u64 = pairs.iter().map(|pair| pair[0] as u64).sum();
         if total != data.len() as u64 {
             return false;
         }
         let mut i = 0usize;
-        for p in pairs.chunks_exact(2) {
+        for p in pairs {
             data[i..i + p[0] as usize].fill(p[1] as u8);
             i += p[0] as usize;
         }

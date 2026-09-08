@@ -13,8 +13,7 @@ use std::time::Duration;
 use crate::creatures::Creature;
 use crate::data::{self, Galaxy, PlanetDef, ShipClass};
 use crate::daynight::DIRECT_SUNLIGHT_BOOST;
-use crate::factory::MachineSave;
-use crate::inventory::Slot;
+use crate::factory::{self, MachineSave};
 use crate::player::Player;
 use crate::quests::{BigMessageEvent, FlagEvent};
 use crate::save;
@@ -128,6 +127,48 @@ impl FlightMode {
 }
 
 // ---------- 输入 ----------
+
+/// Space combat can kill the pilot while the ground survival system is
+/// disabled. Recover at the station exit without mixing voxel/space coords.
+pub fn flight_respawn_system(
+    time: Res<Time>,
+    mut player: Query<&mut Player>,
+    mut mode: ResMut<FlightMode>,
+    mut ship: ResMut<ShipState>,
+    mut game: ResMut<SpaceGame>,
+    mut warp: ResMut<WarpAnim>,
+    mut input: ResMut<SpaceInput>,
+) {
+    if !mode.space_scene() {
+        return;
+    }
+    for mut player in &mut player {
+        if !player.dead {
+            continue;
+        }
+        player.respawn_timer -= time.delta_secs();
+        if player.respawn_timer > 0.0 {
+            continue;
+        }
+        let exit =
+            crate::station::station_exit_pos(Vec3::from(game.galaxy.station), game.galaxy.seed);
+        player.respawn_at(exit);
+        player.toast("紧急救援：外骨骼已在空间站附近重建");
+        let hp_max = ship.hp_max;
+        let engine_snd = ship.engine_snd;
+        *ship = ShipState {
+            pos: exit,
+            hp: hp_max,
+            hp_max,
+            engine_snd,
+            ..default()
+        };
+        *mode = FlightMode::Space;
+        *warp = WarpAnim::default();
+        *input = SpaceInput::default();
+        game.dock_cd = 5.0;
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct SpaceInput {
@@ -441,6 +482,10 @@ pub struct Mark {
 pub struct GalaxyArchive {
     pub planets: HashMap<usize, PlanetArchive>,
     pub marks: HashMap<usize, Vec<Mark>>,
+    #[serde(default)]
+    pub market: HashMap<String, f32>,
+    #[serde(default)]
+    pub stock: HashMap<String, i32>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -462,14 +507,14 @@ pub struct SpaceGame {
     pub ship_pos: Vec3,
     pub landed_planet: i32,
     pub play_time: f32,
-    /// 飞船舱货物（当前座驾）
-    pub ship_inv: Vec<Option<Slot>>,
     /// 机库飞船
     pub garage: Vec<save::ShipSave>,
     /// 当前星球地图标记（JS mapMarks[pid]）
     pub marks: Vec<Mark>,
     /// 离站后禁止立即重新泊入的倒计时（秒）。
     pub dock_cd: f32,
+    /// Accumulator for station restocking and market normalization.
+    pub economy_t: f32,
 }
 
 impl SpaceGame {
@@ -493,10 +538,10 @@ impl SpaceGame {
             ship_pos: Vec3::ZERO,
             landed_planet: -1,
             play_time: 0.0,
-            ship_inv: Vec::new(),
             garage: Vec::new(),
             marks: Vec::new(),
             dock_cd: 0.0,
+            economy_t: 0.0,
         }
     }
 
@@ -606,6 +651,8 @@ pub struct VisitorShip {
     pub path_index: usize,
     pub pad: Option<usize>,
     pub timer: f32,
+    pub hostile: bool,
+    pub fire_cd: f32,
 }
 
 /// 太空掉落物（击碎小行星 / 击毁访客船）。
@@ -683,6 +730,7 @@ pub struct BoltAux<'w, 's> {
     traffic: ResMut<'w, VisitorTraffic>,
     player: Query<'w, 's, &'static mut Player>,
     big_ev: MessageWriter<'w, BigMessageEvent>,
+    flag_ev: MessageWriter<'w, FlagEvent>,
     sfx: Res<'w, crate::audio::Sfx>,
     creatures: Query<
         'w,
@@ -705,6 +753,7 @@ pub fn bolt_system(
     mouse: Res<ButtonInput<MouseButton>>,
     mut ship: ResMut<ShipState>,
     ship_asset: Res<ShipAsset>,
+    research: Res<crate::ui::Research>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -768,7 +817,13 @@ pub fn bolt_system(
             _ => (0.22, &[-0.9, 0.9]),
         };
         ship.fire_cd = cooldown;
-        let (dmg, smul) = weapon_spec(&ship_asset.data.cls);
+        let (base_damage, smul) = weapon_spec(&ship_asset.data.cls);
+        let dmg = base_damage
+            * if data::tech_unlocked(&research.techs, "combat") {
+                1.35
+            } else {
+                1.0
+            };
         let q = ship_quat(ship.yaw, ship.pitch, ship.roll);
         let fwd = ship_forward(ship.yaw, ship.pitch);
         let right = q * Vec3::X;
@@ -818,11 +873,11 @@ pub fn bolt_system(
             }
         }
         if let Some(ve) = hit_vis {
-            let (cls, pos, pad) = {
+            let (cls, pos, pad, was_hostile) = {
                 let Ok((_, v, vt)) = visitors.get(ve) else {
                     continue;
                 };
-                (v.cls, vt.translation, v.pad)
+                (v.cls, vt.translation, v.pad, v.hostile)
             };
             let dead = {
                 let Ok((_, mut v, _)) = visitors.get_mut(ve) else {
@@ -838,7 +893,7 @@ pub fn bolt_system(
                 // 击毁：战利品直入货仓 + 信用点（JS destroyVisitor）
                 let (cr, items) = pirate_loot(cls);
                 if let Ok(mut p) = aux.player.single_mut() {
-                    p.credits += cr;
+                    p.credits = p.credits.saturating_add(cr);
                     for (item, a, bx) in items {
                         let n = a
                             + (crate::rng::Rng::new(
@@ -862,10 +917,23 @@ pub fn bolt_system(
                     }
                 }
                 aux.big_ev.write(BigMessageEvent {
-                    title: format!("☠ 击毁 {} 级访客船", cls),
+                    title: format!(
+                        "☠ 击毁 {} 级{}",
+                        cls,
+                        if was_hostile {
+                            "掠夺者"
+                        } else {
+                            "访客船"
+                        }
+                    ),
                     sub: format!("战利品入舱 · 信用点 +{}", cr),
                     dur: 3.5,
                 });
+                if was_hostile {
+                    aux.flag_ev.write(FlagEvent {
+                        flag: "pirateDefeated".into(),
+                    });
+                }
                 crate::audio::play_spatial(
                     &mut commands,
                     aux.sfx.explosion.clone(),
@@ -875,6 +943,13 @@ pub fn bolt_system(
                 );
                 commands.entity(ve).despawn();
             } else {
+                if let Ok((_, mut visitor, _)) = visitors.get_mut(ve) {
+                    visitor.hostile = true;
+                    visitor.phase = VisitorPhase::Cruise;
+                    if let Some(pad) = visitor.pad.take() {
+                        aux.traffic.pads[pad] = None;
+                    }
+                }
                 crate::audio::play_spatial(
                     &mut commands,
                     aux.sfx.laser_hit.clone(),
@@ -958,6 +1033,26 @@ pub fn bolt_system(
             );
             let trit = 4 + (rng.next() * 5.0) as i32;
             spawn_space_drop(&mut commands, &bolt_mesh, &drop_mat, apos, "tritium", trit);
+            let nickel = 2 + (rng.next() * 4.0) as i32;
+            spawn_space_drop(
+                &mut commands,
+                &bolt_mesh,
+                &drop_mat,
+                apos + Vec3::X * 1.5,
+                "nickel",
+                nickel,
+            );
+            if rng.next() < 0.35 {
+                let cobalt = 1 + (rng.next() * 3.0) as i32;
+                spawn_space_drop(
+                    &mut commands,
+                    &bolt_mesh,
+                    &drop_mat,
+                    apos - Vec3::X * 1.5,
+                    "cobalt",
+                    cobalt,
+                );
+            }
             if rng.next() < 0.25 {
                 let gold = 1 + (rng.next() * 2.0) as i32;
                 spawn_space_drop(
@@ -1223,6 +1318,10 @@ pub fn visitor_system(
     asset_server: Res<AssetServer>,
     game: Res<SpaceGame>,
     defense: Res<crate::station::StationDefense>,
+    ship: Res<ShipState>,
+    mut player: Query<&mut Player>,
+    sfx: Res<crate::audio::Sfx>,
+    mut big_ev: MessageWriter<BigMessageEvent>,
     mut respawn: ResMut<VisitorRespawn>,
     mut traffic: ResMut<VisitorTraffic>,
     mut visitors: Query<(Entity, &mut VisitorShip, &mut Transform)>,
@@ -1268,6 +1367,7 @@ pub fn visitor_system(
                 None,
             );
             let target = random_cruise_target(&game, &mut rng);
+            let hostile = game.galaxy.seed != data::HOME_GALAXY_SEED && rng.next() < 0.32;
             commands.entity(entity).insert(VisitorShip {
                 cls: cls.key,
                 hp: vis_hp(cls.key),
@@ -1279,7 +1379,16 @@ pub fn visitor_system(
                 path_index: 0,
                 pad: None,
                 timer: 8.0 + rng.next() * 20.0,
+                hostile,
+                fire_cd: 1.0 + rng.next() * 2.0,
             });
+            if hostile {
+                big_ev.write(BigMessageEvent {
+                    title: "⚠ 敌对信号".into(),
+                    sub: format!("{} 级掠夺者进入当前行星轨道", cls.key),
+                    dur: 3.0,
+                });
+            }
             if count + 1 >= 5 {
                 respawn.initial_fill_done = true;
             }
@@ -1294,6 +1403,39 @@ pub fn visitor_system(
     let station = Vec3::from(game.galaxy.station);
     let seed = game.galaxy.seed;
     for (entity, mut visitor, mut transform) in &mut visitors {
+        if visitor.hostile && *mode == FlightMode::Space && !defense.active() {
+            if let Some(pad) = visitor.pad.take() {
+                traffic.pads[pad] = None;
+            }
+            visitor.phase = VisitorPhase::Cruise;
+            visitor.path.clear();
+            visitor.target = ship.pos;
+            visitor.fire_cd -= dt;
+            let distance = transform.translation.distance(ship.pos);
+            if distance < 260.0 && visitor.fire_cd <= 0.0 {
+                visitor.fire_cd = match visitor.cls {
+                    "S" => 0.9,
+                    "A" => 1.15,
+                    _ => 1.4,
+                };
+                if let Ok(mut p) = player.single_mut() {
+                    let damage = match visitor.cls {
+                        "S" => 2.0,
+                        "A" => 1.25,
+                        _ => 0.75,
+                    };
+                    p.damage(damage);
+                    p.toast(format!("遭到 {} 级掠夺者攻击", visitor.cls));
+                }
+                crate::audio::play_spatial(
+                    &mut commands,
+                    sfx.laser_hit.clone(),
+                    ship.pos,
+                    0.35,
+                    None,
+                );
+            }
+        }
         match visitor.phase {
             VisitorPhase::Cruise => {
                 visitor.timer -= dt;
@@ -1306,7 +1448,7 @@ pub fn visitor_system(
                     );
                     visitor.target = random_cruise_target(&game, &mut rng);
                 }
-                if visitor.timer <= 0.0 && !defense.active() {
+                if visitor.timer <= 0.0 && !defense.active() && !visitor.hostile {
                     let free = traffic.pads.iter().position(Option::is_none);
                     let mut rng = crate::rng::Rng::new(
                         entity.index().index().wrapping_mul(97)
@@ -1417,6 +1559,9 @@ pub struct WarpArriveEvent;
 #[derive(Message)]
 pub struct LandPlanetEvent {
     pub pid: usize,
+    /// False after a cross-galaxy warp: the still-loaded voxel world belongs
+    /// to the galaxy that was already archived at warp completion.
+    pub archive_current: bool,
 }
 
 // ---------- 降落动画 ----------
@@ -3203,7 +3348,7 @@ pub fn space_system(mut p: SpaceSysParams) {
             let center = Vec3::from(pv.def.pos);
             let handoff_radius = pv.def.radius + handoff_dist(&pv.def);
             if segment_intersects_sphere(previous_pos, p.ship.pos, center, handoff_radius) {
-                let to_center = (center - p.ship.pos).normalize();
+                let to_center = (center - p.ship.pos).normalize_or_zero();
                 if fwd.dot(to_center) > -0.5 {
                     entering = Some(pv.def.id);
                 }
@@ -3367,6 +3512,10 @@ pub fn warp_system(
     mut big_ev: MessageWriter<BigMessageEvent>,
     mut arrive_ev: MessageWriter<WarpArriveEvent>,
     mut flight_cam: ResMut<FlightCamera>,
+    world: Res<VoxelWorld>,
+    machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
+    spawner: Res<crate::creatures::CreatureSpawner>,
+    creatures: Query<(Entity, &mut Creature, &Transform)>,
 ) {
     if *next_mode != FlightMode::Warping {
         return;
@@ -3401,6 +3550,7 @@ pub fn warp_system(
     *flight_cam = FlightCamera::set(ship.pos + cam_off, q, 111.0);
     if anim.t >= total {
         anim.active = false;
+        snapshot_current_planet(&mut game, &world, &machines, &spawner, &creatures);
         finish_warp(
             &mut next_mode,
             &mut game,
@@ -3411,6 +3561,32 @@ pub fn warp_system(
             &mut ship,
         );
     }
+}
+
+fn snapshot_current_planet(
+    game: &mut SpaceGame,
+    world: &VoxelWorld,
+    machines: &Query<(Entity, &factory::Machine, &factory::MachineState)>,
+    spawner: &crate::creatures::CreatureSpawner,
+    creatures: &Query<(Entity, &mut Creature, &Transform)>,
+) {
+    // After a warp, the voxel world still belongs to the departed galaxy
+    // until a landing rebuilds it. Another warp must not archive it again.
+    if game.landed_planet < 0 {
+        return;
+    }
+    let current = game.current_planet;
+    let mut archive = game.visited.get(&current).cloned().unwrap_or_default();
+    archive.seed = world.seed;
+    archive.biome = world.biome().key.to_string();
+    archive.ship_pos = [game.ship_pos.x, game.ship_pos.y, game.ship_pos.z];
+    archive.mods = world.serialize_mods();
+    archive.machines = factory::serialize_machines(machines);
+    archive.marks = game.marks.clone();
+    let (herds, cells) = spawner.serialize(creatures);
+    archive.creatures = herds;
+    archive.creature_cells = cells;
+    game.visited.insert(current, archive);
 }
 
 /// 曲速星线：在飞船局部空间循环 180 条发光细线，随加速阶段逐渐拉长。
@@ -3503,6 +3679,8 @@ fn finish_warp(
     let mut prev_archive = GalaxyArchive {
         planets: game.visited.clone(),
         marks: HashMap::new(),
+        market: game.galaxy.market.clone(),
+        stock: game.galaxy.stock.clone(),
     };
     prev_archive
         .marks
@@ -3513,10 +3691,20 @@ fn finish_warp(
     } else {
         data::generate_galaxy(target_seed)
     };
-    let restored = game.archives.remove(&target_seed).unwrap_or_default();
+    let mut restored = game.archives.remove(&target_seed).unwrap_or_default();
     game.galaxy = gal;
+    if !restored.market.is_empty() {
+        game.galaxy.market = restored.market.clone();
+    }
+    if !restored.stock.is_empty() {
+        game.galaxy.stock = restored.stock.clone();
+    }
     game.visited = restored.planets;
-    game.marks = restored.marks.get(&0).cloned().unwrap_or_default();
+    game.marks = restored
+        .marks
+        .remove(&0)
+        .or_else(|| game.visited.get(&0).map(|archive| archive.marks.clone()))
+        .unwrap_or_default();
     game.current_planet = 0;
     game.landed_planet = -1;
     game.galaxy_count += 1;
@@ -3575,7 +3763,15 @@ fn enter_planet(
     let s = voxel_scale(&pd);
     // 太空→体素换系
     let center = Vec3::from(pd.pos);
-    let dir = (ship.pos - center).normalize();
+    let offset = ship.pos - center;
+    let dir = if offset.length_squared() > 1e-8 {
+        offset.normalize()
+    } else {
+        // Corrupt/legacy coordinates can put the ship exactly at a planet's
+        // center. A stable radial fallback prevents NaNs from poisoning the
+        // local landing coordinates and every later transform.
+        Vec3::Y
+    };
     let local = crate::planet_scale::planet_direction_to_local(dir);
     let ex = local.x;
     let ez = local.y;
@@ -3603,8 +3799,13 @@ fn enter_planet(
     }
     // 异球再入：发换球事件（planet_switch_system 用旧 current_planet 归档并重建场景）；
     // 同球再入：无需切换世界
-    if pid != game.current_planet {
-        land_ev.write(LandPlanetEvent { pid });
+    if let Some(archive_current) =
+        planet_switch_policy(game.current_planet, game.landed_planet, pid)
+    {
+        land_ev.write(LandPlanetEvent {
+            pid,
+            archive_current,
+        });
     } else {
         game.current_planet = pid;
     }
@@ -3617,6 +3818,17 @@ fn enter_planet(
         dur: 4.0,
     });
     crate::audio::play(commands, sfx.laser_hit.clone(), 0.5, None);
+}
+
+fn planet_switch_policy(current_planet: usize, landed_planet: i32, target: usize) -> Option<bool> {
+    if landed_planet < 0 {
+        // A warp changed galaxies while the old voxel world stayed loaded.
+        Some(false)
+    } else if target != current_planet {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 // ---------- 降落动画 ----------
@@ -3938,6 +4150,7 @@ pub fn serialize_ship_state(ship: &ShipState) -> save::ShipStateSave {
         pitch: ship.pitch,
         roll: ship.roll,
         speed: ship.speed,
+        hp: Some(ship.hp),
     }
 }
 
@@ -3967,6 +4180,7 @@ impl Plugin for SpacePlugin {
                 Update,
                 (
                     space_input_system,
+                    ship_cam_input_system,
                     ship_interact_system,
                     ship_recall_system,
                     seated_system,
@@ -3976,82 +4190,53 @@ impl Plugin for SpacePlugin {
                     .in_set(crate::schedule::GameSet::LateSpaceInput)
                     .run_if(in_state(crate::schedule::GameState::Playing)),
             )
-            // 飞行系统（模式互斥，无需严格顺序；逐一注册规避 tuple 配置组合问题）
             .add_systems(
                 Update,
-                atmo_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (
+                    flight_respawn_system,
+                    atmo_system,
+                    atmoland_system,
+                    seated_camera_system,
+                    space_system,
+                    warp_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceFlight)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
-                atmoland_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (warp_arrive_system, space_scene_sync_system)
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceScene)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
-                seated_camera_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (
+                    visitor_system,
+                    asteroid_spin_system,
+                    bolt_system,
+                    space_drop_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpaceActors)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
                 Update,
-                space_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                warp_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                warp_visual_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                space_scene_sync_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                sphere_fade_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                warp_arrive_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                flight_camera_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                ship_sync_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                ship_parked_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                bolt_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                space_drop_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                visitor_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                asteroid_spin_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                engine_loop_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                ship_cam_input_system.run_if(in_state(crate::schedule::GameState::Playing)),
-            )
-            .add_systems(
-                Update,
-                space_stars_follow_system.run_if(in_state(crate::schedule::GameState::Playing)),
+                (
+                    ship_parked_system,
+                    warp_visual_system,
+                    sphere_fade_system,
+                    engine_loop_system,
+                    ship_sync_system,
+                    flight_camera_system,
+                    space_stars_follow_system,
+                )
+                    .chain()
+                    .in_set(crate::schedule::GameSet::LateSpacePresentation)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
             );
     }
 }
@@ -4100,6 +4285,88 @@ mod tests {
         assert!(!a.is_empty());
         let c = neighbor_seeds(999);
         assert!(c.contains(&data::HOME_GALAXY_SEED));
+    }
+
+    #[test]
+    fn planet_switch_policy_never_archives_old_world_into_new_galaxy() {
+        assert_eq!(planet_switch_policy(0, -1, 0), Some(false));
+        assert_eq!(planet_switch_policy(0, -1, 3), Some(false));
+        assert_eq!(planet_switch_policy(0, 0, 3), Some(true));
+        assert_eq!(planet_switch_policy(3, 3, 3), None);
+    }
+
+    #[test]
+    fn consecutive_warps_preserve_each_galaxys_planet_archive() {
+        use bevy::ecs::system::SystemState;
+        let mut ecs = bevy::prelude::World::new();
+        let mut state: SystemState<(
+            Query<(Entity, &factory::Machine, &factory::MachineState)>,
+            Query<(Entity, &mut Creature, &Transform)>,
+        )> = SystemState::new(&mut ecs);
+        let (machines, creatures) = state.get_mut(&mut ecs).unwrap();
+        let mut game = SpaceGame::new(data::generate_galaxy(54321));
+        game.visited.insert(
+            0,
+            PlanetArchive {
+                seed: 999,
+                ..default()
+            },
+        );
+        let world = VoxelWorld::new(42, "lush", 3);
+        let spawner = crate::creatures::CreatureSpawner::default();
+        // The old scene is not a planet in the current galaxy.
+        snapshot_current_planet(&mut game, &world, &machines, &spawner, &creatures);
+        assert_eq!(game.visited[&0].seed, 999);
+        // Once landed, normal snapshots must still update the archive.
+        game.landed_planet = 0;
+        snapshot_current_planet(&mut game, &world, &machines, &spawner, &creatures);
+        assert_eq!(game.visited[&0].seed, 42);
+    }
+
+    #[test]
+    fn dead_pilot_recovers_from_space_and_interrupted_warp() {
+        for mode in [FlightMode::Space, FlightMode::Warping] {
+            let mut app = App::new();
+            let mut time = Time::<()>::default();
+            time.advance_by(Duration::from_secs(2));
+            let game = SpaceGame::new(data::home_galaxy());
+            let exit =
+                crate::station::station_exit_pos(Vec3::from(game.galaxy.station), game.galaxy.seed);
+            app.insert_resource(time)
+                .insert_resource(game)
+                .insert_resource(mode)
+                .insert_resource(ShipState {
+                    pulsing: true,
+                    speed: 900.0,
+                    ..default()
+                })
+                .insert_resource(WarpAnim {
+                    active: true,
+                    ..default()
+                })
+                .insert_resource(SpaceInput {
+                    thrust: true,
+                    ..default()
+                })
+                .add_systems(Update, flight_respawn_system);
+            let mut player = Player::new(data::Difficulty::Normal);
+            player.equipment.equip("oxygen_tank").unwrap();
+            assert!(player.damage(100.0));
+            let entity = app.world_mut().spawn(player).id();
+            app.update();
+            let player = app.world().get::<Player>(entity).unwrap();
+            assert!(!player.dead);
+            assert_eq!(player.pos, exit);
+            assert_eq!(player.stats.o2, 180.0);
+            assert_eq!(player.stats.hp, 8.0);
+            assert_eq!(*app.world().resource::<FlightMode>(), FlightMode::Space);
+            let ship = app.world().resource::<ShipState>();
+            assert_eq!(ship.pos, exit);
+            assert_eq!(ship.speed, 0.0);
+            assert!(!ship.pulsing);
+            assert!(!app.world().resource::<WarpAnim>().active);
+            assert!(!app.world().resource::<SpaceInput>().thrust);
+        }
     }
 
     #[test]

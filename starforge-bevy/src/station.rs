@@ -581,17 +581,15 @@ pub fn ship_switch_system(
                     .find(|(k, _)| *k == e.model)
                     .map(|(_, n)| n.to_string())
                     .unwrap_or_else(|| "新飞船".into());
-                let mut fresh = crate::save::ShipSave {
+                let fresh = crate::save::ShipSave {
                     model: e.model.clone(),
                     cls: e.cls.clone(),
                     name,
                     inv: vec![None; data::ship_class_by_key(&e.cls).slots],
                 };
-                fresh.inv = old.inv.clone();
-                fresh.inv.truncate(data::ship_class_by_key(&e.cls).slots);
-                fresh
-                    .inv
-                    .resize(data::ship_class_by_key(&e.cls).slots, None);
+                // Cargo belongs to its ship. Buying a new hull stores the old
+                // ship (with its cargo) in the garage and starts with an empty
+                // hold instead of duplicating the old cargo into both ships.
                 game.garage.push(old.clone());
                 fresh
             }
@@ -618,7 +616,6 @@ pub fn ship_switch_system(
         ship_asset.entity = Some(ent);
         ship_asset.flames = flames;
         ship_asset.data = new_data;
-        game.ship_inv = ship_asset.data.inv.clone();
         // 船体生命随等级（JS VIS_HP）
         ship_state.hp = crate::space::vis_hp(&e.cls);
         ship_state.hp_max = crate::space::vis_hp(&e.cls);

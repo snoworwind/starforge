@@ -46,6 +46,8 @@ pub enum GameSet {
     CommonDaynight,
     /// Climate + rain audio (reads `ClearColor`/`SpaceFactor` — must follow daynight).
     CommonWeather,
+    /// Apply remote world changes before local mining/placement reads the same cells.
+    CommonNetwork,
     /// Player movement → collision → survival → mining → break → placement → hotbar.
     GroundPlayer,
     /// Terrain streaming around the player/ship.
@@ -64,6 +66,14 @@ pub enum GameSet {
     LateSpaceInput,
     /// Station state machine → defense → NPC spawn → ship switch.
     LateStation,
+    /// Deterministic flight simulation after all space input has been collected.
+    LateSpaceFlight,
+    /// Warp arrival followed by rebuilding/synchronising the active space scene.
+    LateSpaceScene,
+    /// Space actors/projectiles/drops, ordered before presentation follows them.
+    LateSpaceActors,
+    /// Ship/camera/visual/audio transforms that consume the completed simulation state.
+    LateSpacePresentation,
     /// Planet switch + ground-scene visibility (flow-owned).
     LateSwitchFlow,
     /// Space-mode sky sync (daynight-owned).
@@ -124,6 +134,7 @@ pub fn configure(app: &mut App) {
             (
                 GameSet::CommonDaynight,
                 GameSet::CommonWeather,
+                GameSet::CommonNetwork,
                 GameSet::GroundPlayer,
                 GameSet::GroundStream,
                 GameSet::GroundCreatures,
@@ -136,6 +147,10 @@ pub fn configure(app: &mut App) {
                 GameSet::LateLook,
                 GameSet::LateSpaceInput,
                 GameSet::LateStation,
+                GameSet::LateSpaceFlight,
+                GameSet::LateSpaceScene,
+                GameSet::LateSpaceActors,
+                GameSet::LateSpacePresentation,
                 GameSet::LateSwitchFlow,
                 GameSet::LateSwitchSky,
                 GameSet::LateSwitchCursor,

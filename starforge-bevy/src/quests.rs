@@ -1,4 +1,4 @@
-//! 任务线（21 步主线 + 村庄支线）— port of main.js QUESTS / checkQuest / announceQuest.
+//! 两章主线 + 村庄支线 — port of main.js QUESTS / checkQuest / announceQuest.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -45,7 +45,7 @@ impl Default for Quests {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SideQuest {
     pub item: String,
     pub need: i32,
@@ -137,7 +137,7 @@ impl Quests {
             }
             QuestType::Tech => q
                 .tech
-                .map(|t| techs.iter().any(|x| x == t))
+                .map(|t| data::tech_unlocked(techs, t))
                 .unwrap_or(false),
             QuestType::Event => q
                 .flag
@@ -151,6 +151,16 @@ impl Quests {
                 && nq.id == "q_explore"
             {
                 self.flags.insert("newPlanet".into(), false);
+            }
+            if let Some(nq) = data::QUESTS.get(self.idx)
+                && nq.id == "q_pirate"
+            {
+                self.flags.insert("pirateDefeated".into(), false);
+            }
+            if let Some(nq) = data::QUESTS.get(self.idx)
+                && nq.id == "q_colony_online"
+            {
+                self.flags.insert("colonyOnline".into(), false);
             }
             self.announce = Some((
                 format!("任务完成：{}", q.title),
@@ -181,8 +191,8 @@ impl Quests {
                     }
                 } else if !p.creative() {
                     self.announce = Some((
-                        "◈ 第一章 完结".into(),
-                        "宇宙没有边界。旅行者，继续前进吧。".into(),
+                        "◈ 第二章 完结".into(),
+                        "边疆基地已经点亮。宇宙仍会持续生成新的星系、市场与威胁。".into(),
                         5.0,
                     ));
                 }
@@ -218,7 +228,7 @@ pub fn quest_tick_system(
     let mut announced: Vec<(String, String, f32)> = Vec::new();
     if let Ok(mut p) = player.single_mut() {
         if let Some(q) = quests.check(&p, &research.techs) {
-            p.credits += 50 + quests.idx as i32 * 25;
+            p.credits = p.credits.saturating_add(50 + quests.idx as i32 * 25);
             announced.push((
                 format!("任务完成：{}", q.title),
                 format!("奖励 ₪{}", 50 + quests.idx as i32 * 25),
@@ -291,7 +301,7 @@ pub fn side_quest_system(
                                 let have = p.inv.count_item(&sq.item);
                                 if have >= sq.need {
                                     p.inv.remove_item(&sq.item, sq.need);
-                                    p.credits += sq.reward;
+                                    p.credits = p.credits.saturating_add(sq.reward);
                                     p.toast(format!("村庄感谢你！+₪{}", sq.reward));
                                     if let Some(side) = quests.side.as_mut() {
                                         side.done = true;
@@ -342,6 +352,10 @@ pub fn village_side_quest_system(
     mut commands: Commands,
 ) {
     if *mode != crate::space::FlightMode::Planet {
+        if let Some(entity) = quests.villager.take() {
+            commands.entity(entity).despawn();
+        }
+        quests.villager_pos = None;
         return;
     }
     let Some(world) = world else { return };
@@ -572,6 +586,30 @@ mod tests {
         let p = test_player(false);
         assert!(q.check(&p, &[]).is_none());
         q.placed.insert("furnace".into(), 1);
+        assert!(q.check(&p, &[]).is_some());
+    }
+
+    #[test]
+    fn colony_cycle_must_happen_after_core_quest_activates() {
+        let core_idx = data::QUESTS
+            .iter()
+            .position(|quest| quest.id == "q_colony_core")
+            .unwrap();
+        let mut q = Quests {
+            idx: core_idx,
+            ..Default::default()
+        };
+        let p = test_player(false);
+        q.placed.insert("colony_core".into(), 1);
+        q.flags.insert("colonyOnline".into(), true);
+        assert!(q.check(&p, &[]).is_some());
+        assert_eq!(
+            q.current_quest().map(|quest| quest.id),
+            Some("q_colony_online")
+        );
+        assert_eq!(q.flags.get("colonyOnline"), Some(&false));
+        assert!(q.check(&p, &[]).is_none());
+        q.flags.insert("colonyOnline".into(), true);
         assert!(q.check(&p, &[]).is_some());
     }
 

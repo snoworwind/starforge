@@ -36,11 +36,34 @@ impl Inventory {
 
     /// Normalize data loaded from disk to the fixed-size inventory shape.
     pub fn from_slots(slots: Vec<Option<Slot>>) -> Self {
-        let mut inventory = Self::default();
-        for slot in slots.into_iter().take(INV_SLOTS).flatten() {
-            if slot.n > 0 && data::item_by_key(&slot.item).is_some() {
-                inventory.add_item(&slot.item, slot.n.min(1_000_000));
+        Self::from_slots_with_capacity(slots, INV_SLOTS)
+    }
+
+    /// Normalize a variable-size container without rearranging valid saved slots.
+    pub fn from_slots_with_capacity(slots: Vec<Option<Slot>>, capacity: usize) -> Self {
+        let mut inventory = Self {
+            slots: vec![None; capacity],
+        };
+        let mut overflow = Vec::new();
+        for (index, slot) in slots.into_iter().take(capacity).enumerate() {
+            if let Some(mut slot) = slot
+                && slot.n > 0
+                && let Some(item) = data::item_by_key(&slot.item)
+            {
+                let count = slot.n.min(1_000_000);
+                slot.n = count.min(item.stack);
+                if count > slot.n {
+                    overflow.push(Slot {
+                        item: slot.item.clone(),
+                        n: count - slot.n,
+                    });
+                }
+                inventory.slots[index] = Some(slot);
             }
+        }
+        // Reserve every saved slot before redistributing oversized stacks.
+        for slot in overflow {
+            inventory.add_item(&slot.item, slot.n);
         }
         inventory
     }
@@ -114,10 +137,40 @@ impl Inventory {
         true
     }
 
+    /// Remove up to `n` from one exact slot and return what was removed.
+    pub fn take_from_slot(&mut self, index: usize, n: i32) -> Option<Slot> {
+        if n <= 0 {
+            return None;
+        }
+        let slot = self.slots.get_mut(index)?;
+        let current = slot.as_mut()?;
+        let take = current.n.max(0).min(n);
+        if take <= 0 {
+            return None;
+        }
+        let item = current.item.clone();
+        current.n -= take;
+        if current.n <= 0 {
+            *slot = None;
+        }
+        Some(Slot { item, n: take })
+    }
+
     pub fn has_items(&self, costs: &[(&str, i32)]) -> bool {
-        costs
-            .iter()
-            .all(|(item, n)| *n >= 0 && self.count_item(item) >= *n)
+        let mut totals = std::collections::HashMap::<&str, i32>::new();
+        for (item, n) in costs {
+            if *n < 0 {
+                return false;
+            }
+            let total = totals.entry(item).or_default();
+            let Some(sum) = total.checked_add(*n) else {
+                return false;
+            };
+            *total = sum;
+        }
+        totals
+            .into_iter()
+            .all(|(item, n)| self.count_item(item) >= n)
     }
 
     pub fn pay_items(&mut self, costs: &[(&str, i32)]) -> bool {
@@ -188,4 +241,134 @@ pub struct InventoryPlugin;
 
 impl bevy::prelude::Plugin for InventoryPlugin {
     fn build(&self, _app: &mut bevy::prelude::App) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payment_aggregates_duplicate_costs_and_is_atomic() {
+        let mut inventory = Inventory::default();
+        inventory.add_item("iron", 5);
+        let before = inventory.slots.clone();
+        assert!(!inventory.pay_items(&[("iron", 3), ("iron", 3)]));
+        assert_eq!(inventory.slots, before);
+        assert!(!inventory.pay_items(&[("iron", i32::MAX), ("iron", 1)]));
+        assert_eq!(inventory.slots, before);
+        assert!(inventory.pay_items(&[("iron", 2), ("iron", 3)]));
+        assert_eq!(inventory.count_item("iron"), 0);
+    }
+
+    #[test]
+    fn loaded_inventory_preserves_hotbar_and_storage_layout() {
+        let mut slots = vec![None; INV_SLOTS];
+        slots[2] = Some(Slot {
+            item: "iron".into(),
+            n: 3,
+        });
+        slots[8] = Some(Slot {
+            item: "copper".into(),
+            n: 5,
+        });
+        slots[INV_SLOTS - 1] = Some(Slot {
+            item: "iron".into(),
+            n: 7,
+        });
+
+        let inventory = Inventory::from_slots(slots.clone());
+        assert_eq!(inventory.slots, slots);
+        // Character loading normalizes once while reading and again at spawn.
+        assert_eq!(Inventory::from_slots(inventory.slots).slots, slots);
+    }
+
+    #[test]
+    fn loaded_cargo_preserves_slot_layout() {
+        let mut slots = vec![None; 48];
+        slots[10] = Some(Slot {
+            item: "iron".into(),
+            n: 3,
+        });
+        slots[47] = Some(Slot {
+            item: "iron".into(),
+            n: 7,
+        });
+
+        let inventory = Inventory::from_slots_with_capacity(slots.clone(), 48);
+        assert_eq!(inventory.slots, slots);
+    }
+
+    #[test]
+    fn loaded_slots_sanitize_without_displacing_valid_stacks() {
+        let max_stack = data::item_by_key("iron").unwrap().stack;
+        let copper = Some(Slot {
+            item: "copper".into(),
+            n: 5,
+        });
+        let inventory = Inventory::from_slots_with_capacity(
+            vec![
+                Some(Slot {
+                    item: "iron".into(),
+                    n: max_stack + 3,
+                }),
+                copper.clone(),
+                Some(Slot {
+                    item: "iron".into(),
+                    n: 0,
+                }),
+                Some(Slot {
+                    item: "carbon".into(),
+                    n: -1,
+                }),
+                Some(Slot {
+                    item: "unknown_item".into(),
+                    n: 10,
+                }),
+            ],
+            6,
+        );
+
+        assert_eq!(inventory.slots.len(), 6);
+        assert_eq!(inventory.slots[1], copper);
+        assert_eq!(inventory.count_item("iron"), max_stack + 3);
+        assert_eq!(inventory.count_item("copper"), 5);
+        for slot in inventory.slots.iter().flatten() {
+            let item = data::item_by_key(&slot.item).unwrap();
+            assert!(slot.n > 0 && slot.n <= item.stack);
+        }
+        assert_eq!(inventory.slots.iter().flatten().count(), 3);
+    }
+
+    #[test]
+    fn variable_container_preserves_requested_capacity() {
+        let inventory = Inventory::from_slots_with_capacity(
+            vec![Some(Slot {
+                item: "iron".into(),
+                n: 3,
+            })],
+            48,
+        );
+        assert_eq!(inventory.slots.len(), 48);
+        assert_eq!(inventory.count_item("iron"), 3);
+    }
+
+    #[test]
+    fn exact_slot_take_does_not_consume_other_stacks() {
+        let mut inventory = Inventory {
+            slots: vec![
+                Some(Slot {
+                    item: "iron".into(),
+                    n: 2,
+                }),
+                Some(Slot {
+                    item: "iron".into(),
+                    n: 5,
+                }),
+            ],
+        };
+        let taken = inventory.take_from_slot(0, 1).unwrap();
+        assert_eq!(taken.n, 1);
+        assert_eq!(inventory.slots[0].as_ref().map(|slot| slot.n), Some(1));
+        assert_eq!(inventory.slots[1].as_ref().map(|slot| slot.n), Some(5));
+    }
 }

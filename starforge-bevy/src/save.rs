@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 
 /// 外观（捏人）— 与原始 char record appearance 字段一致。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -149,6 +149,24 @@ pub struct ShipStateSave {
     pub roll: f32,
     #[serde(default)]
     pub speed: f32,
+    /// 当前船体生命；旧存档缺失时按船级上限恢复。
+    #[serde(default)]
+    pub hp: Option<f32>,
+}
+
+/// 跃迁途中继续动画所需的最小状态。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WarpAnimSave {
+    #[serde(default)]
+    pub t: f32,
+    #[serde(default)]
+    pub seed: u32,
+    #[serde(default)]
+    pub yaw: f32,
+    #[serde(default)]
+    pub pitch: f32,
+    #[serde(default)]
+    pub v0: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -161,6 +179,8 @@ pub struct CharData {
     pub pitch: f32,
     pub stats: [f32; 6], // hp, shield, o2, haz, jet, laser
     pub inv: Vec<Option<Slot>>,
+    #[serde(default)]
+    pub equipment: crate::player::Equipment,
     pub hot_idx: i32,
     pub credits: i32,
     pub difficulty: u8, // 0 easy, 1 normal, 2 hard, 3 creative
@@ -192,11 +212,15 @@ pub struct WorldData {
     pub biome: String,
     pub day_t: f32,
     pub mods: HashMap<String, Vec<u16>>,
-    /// "planet" | "space"
+    /// "planet" | "atmo" | "space" | "warping"
     #[serde(default = "d_state")]
     pub state: String,
     #[serde(default)]
     pub current_planet: usize,
+    /// Whether the loaded voxel scene belongs to the current galaxy. None
+    /// is reserved for legacy saves; false forces a rebuild on landing.
+    #[serde(default)]
+    pub world_in_current_galaxy: Option<bool>,
     #[serde(default = "d_galaxy_seed")]
     pub galaxy_seed: u32,
     #[serde(default = "d_galaxy_count")]
@@ -204,13 +228,18 @@ pub struct WorldData {
     #[serde(default)]
     pub market: HashMap<String, f32>,
     #[serde(default)]
+    pub stock: HashMap<String, i32>,
+    #[serde(default)]
     pub flags: HashMap<String, bool>,
     /// 地面飞船停泊点
     #[serde(default)]
     pub ship_pos: Option<[f32; 3]>,
-    /// 太空飞船状态（state=space 时存在）
+    /// 飞船位置/姿态/生命；飞行状态恢复时使用位置和姿态。
     #[serde(default)]
     pub ship_state: Option<ShipStateSave>,
+    /// 跃迁动画状态（state=warping 时存在）。
+    #[serde(default)]
+    pub warp_anim: Option<WarpAnimSave>,
     /// 当前星球地图标记（JS mapMarks[pid]）
     #[serde(default)]
     pub marks: Vec<crate::space::Mark>,
@@ -220,6 +249,15 @@ pub struct WorldData {
     /// 放置任务计数（JS placedCount）
     #[serde(default)]
     pub placed: HashMap<String, i32>,
+    /// 当前村庄支线；对话本身是瞬时 UI，不进入存档。
+    #[serde(default)]
+    pub side_quest: Option<crate::quests::SideQuest>,
+    /// 当前活动星球的机器状态。
+    #[serde(default)]
+    pub machines: Vec<crate::factory::MachineSave>,
+    /// 当前星系中已访问的非活动星球。
+    #[serde(default)]
+    pub visited: HashMap<usize, crate::space::PlanetArchive>,
     /// 跨星系档案（JS galaxyArchives）
     #[serde(default)]
     pub archives: HashMap<u32, crate::space::GalaxyArchive>,
@@ -352,6 +390,7 @@ pub fn save_char(
             p.stats.laser,
         ],
         inv: p.inv.slots.clone(),
+        equipment: p.equipment.clone(),
         hot_idx: p.hot_idx,
         credits: p.credits,
         difficulty: match p.difficulty {
@@ -375,22 +414,79 @@ pub fn save_char(
 
 pub fn load_char(name: &str) -> Option<CharData> {
     let mut data: CharData = read_json(&char_path(name))?;
+    data.name = data
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect();
+    data.world = data
+        .world
+        .map(|world| world.chars().filter(|c| !c.is_control()).take(80).collect());
+    data.credits = data.credits.clamp(0, 1_000_000_000);
+    data.fuel_loaded = data.fuel_loaded.clamp(0, 1);
     data.hot_idx = data.hot_idx.clamp(-1, 8);
-    data.inv.truncate(crate::inventory::INV_SLOTS);
-    data.player_ship.inv.truncate(12);
+    data.inv = crate::inventory::Inventory::from_slots(data.inv).slots;
+    data.equipment.sanitize();
+    data.quest_idx = data.quest_idx.min(crate::data::QUESTS.len());
+    let mut seen_techs = std::collections::HashSet::new();
+    data.techs.retain(|tech| {
+        crate::data::TECHS.iter().any(|known| known.id == tech) && seen_techs.insert(tech.clone())
+    });
+    sanitize_ship_save(&mut data.player_ship);
+    let cargo_slots = crate::data::ship_class_by_key(&data.player_ship.cls).slots;
+    data.player_ship.inv =
+        crate::inventory::Inventory::from_slots_with_capacity(data.player_ship.inv, cargo_slots)
+            .slots;
     data.ship_garage.truncate(64);
-    if let Some((_, progress)) = &mut data.researching {
-        if !progress.is_finite() {
-            *progress = 0.0;
-        }
-        *progress = progress.clamp(0.0, 1_000_000.0);
+    for ship in &mut data.ship_garage {
+        sanitize_ship_save(ship);
+        let slots = crate::data::ship_class_by_key(&ship.cls).slots;
+        ship.inv = crate::inventory::Inventory::from_slots_with_capacity(
+            std::mem::take(&mut ship.inv),
+            slots,
+        )
+        .slots;
     }
+    data.researching = data.researching.take().and_then(|(id, progress)| {
+        let tech = crate::data::TECHS.iter().find(|tech| tech.id == id)?;
+        if crate::data::tech_unlocked(&data.techs, &id)
+            || !crate::data::tech_requirements_met(&data.techs, tech)
+        {
+            return None;
+        }
+        let progress = if progress.is_finite() {
+            progress.clamp(0.0, tech.time)
+        } else {
+            0.0
+        };
+        Some((id, progress))
+    });
     data.play_time = if data.play_time.is_finite() {
         data.play_time.max(0.0)
     } else {
         0.0
     };
     Some(data)
+}
+
+fn sanitize_ship_save(ship: &mut ShipSave) {
+    ship.cls = crate::data::ship_class_by_key(&ship.cls).key.to_string();
+    if !crate::data::SHIP_MODEL_NAMES
+        .iter()
+        .any(|(model, _)| *model == ship.model)
+    {
+        ship.model.clear();
+    }
+    ship.name = ship
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    if ship.name.trim().is_empty() {
+        ship.name = d_ship_name();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -400,15 +496,21 @@ pub fn save_world_full(
     day_t: f32,
     state: &str,
     current_planet: usize,
+    world_in_current_galaxy: bool,
     galaxy_seed: u32,
     galaxy_count: u32,
     market: &HashMap<String, f32>,
+    stock: &HashMap<String, i32>,
     flags: &HashMap<String, bool>,
     ship_pos: Option<[f32; 3]>,
     ship_state: Option<&ShipStateSave>,
+    warp_anim: Option<&WarpAnimSave>,
     marks: &[crate::space::Mark],
     warp_lock: Option<&crate::space::WarpLock>,
     placed: &HashMap<String, i32>,
+    side_quest: Option<&crate::quests::SideQuest>,
+    machines: &[crate::factory::MachineSave],
+    visited: &HashMap<usize, crate::space::PlanetArchive>,
     archives: &HashMap<u32, crate::space::GalaxyArchive>,
     creatures: &[crate::creatures::HerdSave],
     creature_cells: &[crate::creatures::CellSave],
@@ -423,15 +525,21 @@ pub fn save_world_full(
         mods: world.serialize_mods(),
         state: state.into(),
         current_planet,
+        world_in_current_galaxy: Some(world_in_current_galaxy),
         galaxy_seed,
         galaxy_count,
         market: market.clone(),
+        stock: stock.clone(),
         flags: flags.clone(),
         ship_pos,
         ship_state: ship_state.cloned(),
+        warp_anim: warp_anim.cloned(),
         marks: marks.to_vec(),
         warp_lock: warp_lock.cloned(),
         placed: placed.clone(),
+        side_quest: side_quest.cloned(),
+        machines: machines.to_vec(),
+        visited: visited.clone(),
         archives: archives.clone(),
         creatures: creatures.to_vec(),
         creature_cells: creature_cells.to_vec(),
@@ -446,14 +554,20 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         day_t,
         "planet",
         0,
+        true,
         crate::data::HOME_GALAXY_SEED,
         1,
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
+        None,
         None,
         None,
         &[],
         None,
+        &HashMap::new(),
+        None,
+        &[],
         &HashMap::new(),
         &HashMap::new(),
         &[],
@@ -469,27 +583,60 @@ pub fn load_world(name: &str) -> Option<WorldData> {
     if data.mods.len() > 200_000 {
         return None;
     }
-    data.mods.retain(|key, pairs| {
-        let mut parts = key.split(',');
-        let valid_key = parts
-            .next()
-            .and_then(|x| x.parse::<i32>().ok())
-            .zip(parts.next().and_then(|z| z.parse::<i32>().ok()))
-            .is_some_and(|(x, z)| x.abs() <= 1_000_000 && z.abs() <= 1_000_000);
-        valid_key
-            && pairs.len()
-                <= crate::data::CHUNK as usize
-                    * crate::data::CHUNK as usize
-                    * crate::data::WORLD_H as usize
-                    * 2
-    });
+    sanitize_mods(&mut data.mods);
     data.day_t = if data.day_t.is_finite() {
         data.day_t.rem_euclid(1.0)
     } else {
         0.0
     };
     data.galaxy_count = data.galaxy_count.clamp(1, 1024);
-    data.marks.truncate(4096);
+    data.ship_pos = data.ship_pos.and_then(|mut pos| {
+        if !pos.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        pos[0] = pos[0].clamp(-1_000_000.0, 1_000_000.0);
+        pos[1] = pos[1].clamp(
+            -256.0,
+            crate::planet_scale::PLANET_SCALE.atmosphere_top + 256.0,
+        );
+        pos[2] = pos[2].clamp(-1_000_000.0, 1_000_000.0);
+        Some(pos)
+    });
+    data.state = match data.state.as_str() {
+        "atmo" => "atmo",
+        "space" => "space",
+        "warping" => "warping",
+        _ => "planet",
+    }
+    .to_string();
+    if data.state == "warping" {
+        let valid_warp = data.warp_anim.as_mut().is_some_and(|anim| {
+            let valid = anim.t.is_finite()
+                && anim.yaw.is_finite()
+                && anim.pitch.is_finite()
+                && anim.v0.is_finite()
+                && anim.seed != data.galaxy_seed;
+            if valid {
+                anim.t = anim
+                    .t
+                    .clamp(0.0, crate::space::WARP_LAUNCH + crate::space::WARP_RIDE);
+                anim.pitch = anim
+                    .pitch
+                    .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+                anim.v0 = anim.v0.clamp(0.0, 4_800.0);
+            }
+            valid
+        });
+        if !valid_warp {
+            // A corrupt/incomplete warp record must not load into a mode whose
+            // simulation can never advance. Fall back to ordinary space.
+            data.state = "space".to_string();
+            data.warp_anim = None;
+        }
+    } else {
+        data.warp_anim = None;
+    }
+    sanitize_marks(&mut data.marks);
     data.flags = data.flags.into_iter().take(4096).collect();
     data.market = data
         .market
@@ -497,9 +644,152 @@ pub fn load_world(name: &str) -> Option<WorldData> {
         .filter(|(_, value)| value.is_finite() && *value >= 0.0 && *value <= 1_000_000.0)
         .take(4096)
         .collect();
-    data.placed = data.placed.into_iter().take(4096).collect();
-    data.archives = data.archives.into_iter().take(256).collect();
+    data.stock = data
+        .stock
+        .into_iter()
+        .filter(|(item, amount)| {
+            crate::data::item_by_key(item).is_some() && (0..=100_000).contains(amount)
+        })
+        .take(4096)
+        .collect();
+    data.placed = data
+        .placed
+        .into_iter()
+        .filter(|(block, amount)| {
+            crate::data::BLOCKS.iter().any(|known| known.key == block)
+                && (0..=1_000_000).contains(amount)
+        })
+        .take(4096)
+        .collect();
+    data.side_quest = data.side_quest.take().filter(|quest| {
+        crate::data::item_by_key(&quest.item).is_some()
+            && (1..=100).contains(&quest.need)
+            && (0..=1_000_000).contains(&quest.reward)
+            && quest.x.unsigned_abs() <= 1_000_000
+            && quest.z.unsigned_abs() <= 1_000_000
+    });
+    data.machines.truncate(200_000);
+    sanitize_planet_map(&mut data.visited);
+    sanitize_creature_records(&mut data.creatures, &mut data.creature_cells);
+    data.archives = data
+        .archives
+        .into_iter()
+        .take(256)
+        .map(|(seed, mut archive)| {
+            sanitize_galaxy_archive(&mut archive);
+            (seed, archive)
+        })
+        .collect();
+    if let Some(lock) = &mut data.warp_lock {
+        lock.name = lock.name.chars().take(128).collect();
+    }
     Some(data)
+}
+
+fn sanitize_mods(mods: &mut HashMap<String, Vec<u16>>) {
+    let max_pairs = crate::data::CHUNK as usize
+        * crate::data::CHUNK as usize
+        * crate::data::WORLD_H as usize
+        * 2;
+    mods.retain(|key, pairs| {
+        let mut parts = key.split(',');
+        let coords = parts
+            .next()
+            .and_then(|x| x.parse::<i32>().ok())
+            .zip(parts.next().and_then(|z| z.parse::<i32>().ok()));
+        coords.is_some_and(|(x, z)| {
+            parts.next().is_none()
+                && x.unsigned_abs() <= 1_000_000
+                && z.unsigned_abs() <= 1_000_000
+                && pairs.len() <= max_pairs
+        })
+    });
+}
+
+fn sanitize_marks(marks: &mut Vec<crate::space::Mark>) {
+    marks.truncate(4096);
+    marks.retain_mut(|mark| {
+        mark.label = mark.label.chars().take(128).collect();
+        mark.x.unsigned_abs() <= 1_000_000
+            && mark.y.unsigned_abs() <= 1_000_000
+            && mark.z.unsigned_abs() <= 1_000_000
+    });
+}
+
+fn sanitize_creature_records(
+    creatures: &mut Vec<crate::creatures::HerdSave>,
+    cells: &mut Vec<crate::creatures::CellSave>,
+) {
+    creatures.truncate(100_000);
+    creatures.retain_mut(|herd| {
+        let valid = herd.cand < u32::BITS as usize
+            && herd.cx.unsigned_abs() <= 1_000_000
+            && herd.cz.unsigned_abs() <= 1_000_000
+            && [herd.x, herd.z, herd.hp, herd.home_x, herd.home_z]
+                .iter()
+                .all(|value| value.is_finite());
+        if valid {
+            herd.x = herd.x.clamp(-1_000_000.0, 1_000_000.0);
+            herd.z = herd.z.clamp(-1_000_000.0, 1_000_000.0);
+            herd.home_x = herd.home_x.clamp(-1_000_000.0, 1_000_000.0);
+            herd.home_z = herd.home_z.clamp(-1_000_000.0, 1_000_000.0);
+            herd.hp = herd.hp.clamp(-1_000.0, 1_000.0);
+        }
+        valid
+    });
+    cells.truncate(100_000);
+    cells.retain(|cell| cell.cx.unsigned_abs() <= 1_000_000 && cell.cz.unsigned_abs() <= 1_000_000);
+}
+
+fn sanitize_planet_archive(archive: &mut crate::space::PlanetArchive) {
+    if !archive.ship_pos.iter().all(|value| value.is_finite()) {
+        archive.ship_pos = [96.0, 40.0, 96.0];
+    }
+    for value in &mut archive.ship_pos {
+        *value = value.clamp(-1_000_000.0, 1_000_000.0);
+    }
+    archive.biome = crate::data::biome_by_key(&archive.biome).key.to_string();
+    sanitize_mods(&mut archive.mods);
+    archive.machines.truncate(200_000);
+    sanitize_marks(&mut archive.marks);
+    sanitize_creature_records(&mut archive.creatures, &mut archive.creature_cells);
+}
+
+fn sanitize_galaxy_archive(archive: &mut crate::space::GalaxyArchive) {
+    sanitize_planet_map(&mut archive.planets);
+    archive.marks = std::mem::take(&mut archive.marks)
+        .into_iter()
+        .filter(|(planet, _)| *planet < 64)
+        .take(64)
+        .map(|(planet, mut marks)| {
+            sanitize_marks(&mut marks);
+            (planet, marks)
+        })
+        .collect();
+    archive.market = std::mem::take(&mut archive.market)
+        .into_iter()
+        .filter(|(_, value)| value.is_finite() && *value >= 0.0 && *value <= 1_000_000.0)
+        .take(4096)
+        .collect();
+    archive.stock = std::mem::take(&mut archive.stock)
+        .into_iter()
+        .filter(|(item, amount)| {
+            crate::data::item_by_key(item).is_some() && (0..=100_000).contains(amount)
+        })
+        .take(4096)
+        .collect();
+}
+
+fn sanitize_planet_map(planets: &mut HashMap<usize, crate::space::PlanetArchive>) {
+    *planets = std::mem::take(planets)
+        .into_iter()
+        .filter(|(planet, _)| *planet < 64)
+        .take(64)
+        .map(|(planet, mut saved)| {
+            sanitize_planet_archive(&mut saved);
+            (planet, saved)
+        })
+        .collect();
 }
 
 pub fn list_worlds() -> Vec<String> {
@@ -515,66 +805,122 @@ fn list_files(dir: &PathBuf, suffix: &str) -> Vec<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if let Some(stem) = name.strip_suffix(&format!(".{suffix}")) {
+            let candidate = name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".bak"))
+                .unwrap_or(&name);
+            if let Some(stem) = candidate.strip_suffix(&format!(".{suffix}")) {
                 out.push(stem.to_string());
             }
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 
-fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> bool {
+fn write_bytes(path: &PathBuf, bytes: &[u8]) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match serde_json::to_string_pretty(data) {
-        Ok(json) => {
-            let Some(parent) = path.parent() else {
-                return false;
-            };
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("save.json");
-            let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-            let result = (|| {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&tmp)?;
-                file.write_all(json.as_bytes())?;
-                file.sync_all()?;
-                match std::fs::rename(&tmp, path) {
-                    Ok(()) => Ok(()),
-                    Err(_) if path.exists() => {
-                        // Windows does not replace an existing file with
-                        // rename. The target is removed only after the fully
-                        // written temporary file is synced.
-                        std::fs::remove_file(path)?;
-                        std::fs::rename(&tmp, path)
-                    }
-                    Err(e) => Err(e),
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("save.json");
+    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(_) if path.exists() => {
+                // Windows does not atomically replace an existing file with
+                // rename. Keep the previous save recoverable until the new
+                // file has reached its final name.
+                let backup = parent.join(format!(".{name}.bak"));
+                if backup.exists() {
+                    std::fs::remove_file(&backup)?;
                 }
-            })();
-            if result.is_err() {
-                let _ = std::fs::remove_file(&tmp);
+                std::fs::rename(path, &backup)?;
+                match std::fs::rename(&tmp, path) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&backup);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = std::fs::rename(&backup, path);
+                        Err(error)
+                    }
+                }
             }
-            result.is_ok()
+            Err(e) => Err(e),
         }
-        Err(_) => false,
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.is_ok()
+}
+
+fn write_json<T: Serialize>(path: &PathBuf, data: &T) -> bool {
+    serde_json::to_vec_pretty(data)
+        .ok()
+        .is_some_and(|json| write_bytes(path, &json))
+}
+
+/// Previous character-file contents used to roll back a half-completed
+/// character/world save pair.
+pub enum SaveFileSnapshot {
+    Missing,
+    Bytes(Vec<u8>),
+}
+
+pub fn snapshot_char_file(name: &str) -> Option<SaveFileSnapshot> {
+    const MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
+    let path = char_path(name);
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.len() <= MAX_SAVE_BYTES => {
+            std::fs::read(path).ok().map(SaveFileSnapshot::Bytes)
+        }
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(SaveFileSnapshot::Missing)
+        }
+        Err(_) => None,
+    }
+}
+
+pub fn restore_char_file(name: &str, snapshot: &SaveFileSnapshot) -> bool {
+    let path = char_path(name);
+    match snapshot {
+        SaveFileSnapshot::Missing => !path.exists() || std::fs::remove_file(path).is_ok(),
+        SaveFileSnapshot::Bytes(bytes) => write_bytes(&path, bytes),
     }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Option<T> {
     const MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
-    if std::fs::metadata(path).ok()?.len() > MAX_SAVE_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let read = |candidate: &PathBuf| {
+        if std::fs::metadata(candidate).ok()?.len() > MAX_SAVE_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(candidate).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    };
+    read(path).or_else(|| {
+        let parent = path.parent()?;
+        let name = path.file_name()?.to_str()?;
+        read(&parent.join(format!(".{name}.bak")))
+    })
 }
 
 /// List worlds that exist on disk as (name, seed, biome) for the menu.
@@ -736,5 +1082,110 @@ pub struct SaveSettingsPlugin(pub Settings);
 impl Plugin for SaveSettingsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.0.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_scene_ownership_is_optional_for_legacy_saves_and_roundtrips() {
+        let mut json = serde_json::json!({
+            "v": 5, "kind": "world", "name": "test", "seed": 42,
+            "biome": "lush", "day_t": 0.3, "mods": {}
+        });
+        let legacy: WorldData = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(legacy.world_in_current_galaxy, None);
+        for owned in [false, true] {
+            json["world_in_current_galaxy"] = owned.into();
+            let saved: WorldData = serde_json::from_value(json.clone()).unwrap();
+            let restored: WorldData =
+                serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+            assert_eq!(restored.world_in_current_galaxy, Some(owned));
+        }
+    }
+
+    #[test]
+    fn interrupted_save_backup_is_listed_and_recoverable() {
+        let dir = std::env::temp_dir().join(format!(
+            "starforge-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.world.json");
+        let backup = dir.join(".test.world.json.bak");
+        assert!(write_json(&path, &vec![1, 2, 3]));
+        assert!(write_json(&path, &vec![4, 5, 6]));
+        assert_eq!(read_json::<Vec<i32>>(&path), Some(vec![4, 5, 6]));
+        // Reproduce interruption between moving the previous save aside
+        // and installing its replacement on Windows.
+        std::fs::rename(&path, &backup).unwrap();
+        assert_eq!(list_files(&dir, "world.json"), vec!["test"]);
+        assert_eq!(read_json::<Vec<i32>>(&path), Some(vec![4, 5, 6]));
+        std::fs::write(&path, b"truncated json").unwrap();
+        assert_eq!(read_json::<Vec<i32>>(&path), Some(vec![4, 5, 6]));
+        assert_eq!(list_files(&dir, "world.json"), vec!["test"]);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(backup).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_ship_state_keeps_optional_health_compatible() {
+        let state: ShipStateSave = serde_json::from_str(
+            r#"{"pos":[1.0,2.0,3.0],"yaw":0.1,"pitch":0.2,"roll":0.3,"speed":4.0}"#,
+        )
+        .unwrap();
+        assert_eq!(state.hp, None);
+    }
+
+    #[test]
+    fn ship_save_sanitizer_canonicalizes_untrusted_identity() {
+        let mut ship = ShipSave {
+            model: "../../unknown".into(),
+            cls: "unknown".into(),
+            name: format!("{}\0", "x".repeat(100)),
+            inv: Vec::new(),
+        };
+        sanitize_ship_save(&mut ship);
+        assert_eq!(ship.cls, crate::data::SHIP_CLASSES[0].key);
+        assert!(ship.model.is_empty());
+        assert_eq!(ship.name.chars().count(), 64);
+        assert!(!ship.name.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn archive_sanitizer_bounds_nested_untrusted_state() {
+        let mut archive = crate::space::GalaxyArchive::default();
+        archive.planets.insert(
+            0,
+            crate::space::PlanetArchive {
+                seed: 7,
+                biome: "not-a-biome".into(),
+                ship_pos: [f32::NAN, 0.0, 0.0],
+                machines: Vec::new(),
+                mods: HashMap::from([("0,0".into(), vec![1, 1]), ("0,0,extra".into(), vec![1, 1])]),
+                marks: vec![crate::space::Mark {
+                    x: i32::MIN,
+                    y: 0,
+                    z: 0,
+                    label: "x".repeat(256),
+                    gal: false,
+                }],
+                creatures: Vec::new(),
+                creature_cells: Vec::new(),
+            },
+        );
+        sanitize_galaxy_archive(&mut archive);
+        let planet = &archive.planets[&0];
+        assert!(planet.ship_pos.iter().all(|value| value.is_finite()));
+        assert_eq!(planet.biome, crate::data::BIOMES[0].key);
+        assert_eq!(planet.mods.len(), 1);
+        assert!(planet.marks.is_empty());
     }
 }

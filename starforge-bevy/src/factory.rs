@@ -1,7 +1,8 @@
-//! Factory machines — full power grid + functional machines.
-//! Port of js/factory.js: furnace/chest + miner/belt/assembler/refinery/solar/wind/
-//! burner/reactor/medbay/collector/lumberbot/beacon/launchpad.
+//! Factory machines — local power grids, item/fluid logistics and colony systems.
+//! Includes production, storage, generation, automation, settlement and defense
+//! machines with per-planet persistence.
 
+use crate::creatures::Creature;
 use crate::data::{self, ids};
 use crate::daynight;
 use crate::inventory::Slot;
@@ -10,7 +11,7 @@ use crate::schedule::{GameSet, GameState, ground_mode};
 use crate::world::World as GameWorld;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const TICK: f32 = 0.1; // 工厂逻辑 tick（JS 原版同值）
 
@@ -21,6 +22,9 @@ pub fn power_use(kind: MachineKind) -> f32 {
         MachineKind::Assembler => 12.0,
         MachineKind::Refinery => 20.0,
         MachineKind::Medbay => 6.0,
+        MachineKind::Pump => 2.0,
+        MachineKind::ColonyCore => 15.0,
+        MachineKind::Turret => 10.0,
         _ => 0.0,
     }
 }
@@ -31,6 +35,7 @@ pub fn power_gen(kind: MachineKind) -> f32 {
         MachineKind::Solar => 10.0,
         MachineKind::Reactor => 100.0,
         MachineKind::Burner => 25.0,
+        MachineKind::Geothermal => 45.0,
         _ => 0.0,
     }
 }
@@ -60,6 +65,16 @@ pub enum MachineKind {
     Lumberbot,
     Collector,
     Medbay,
+    Splitter,
+    Filter,
+    Cable,
+    Battery,
+    Pipe,
+    Tank,
+    Pump,
+    Geothermal,
+    ColonyCore,
+    Turret,
     Other,
 }
 
@@ -81,6 +96,16 @@ impl MachineKind {
             "lumberbot" => Self::Lumberbot,
             "collector" => Self::Collector,
             "medbay" => Self::Medbay,
+            "splitter" => Self::Splitter,
+            "filter" => Self::Filter,
+            "cable" => Self::Cable,
+            "battery" => Self::Battery,
+            "pipe" => Self::Pipe,
+            "tank" => Self::Tank,
+            "pump" => Self::Pump,
+            "geothermal" => Self::Geothermal,
+            "colony_core" => Self::ColonyCore,
+            "turret" => Self::Turret,
             _ => Self::Other,
         }
     }
@@ -102,6 +127,16 @@ impl MachineKind {
             Self::Lumberbot => "lumberbot",
             Self::Collector => "collector",
             Self::Medbay => "medbay",
+            Self::Splitter => "splitter",
+            Self::Filter => "filter",
+            Self::Cable => "cable",
+            Self::Battery => "battery",
+            Self::Pipe => "pipe",
+            Self::Tank => "tank",
+            Self::Pump => "pump",
+            Self::Geothermal => "geothermal",
+            Self::ColonyCore => "colony_core",
+            Self::Turret => "turret",
             Self::Other => "stone",
         }
     }
@@ -123,6 +158,16 @@ impl MachineKind {
             Self::Lumberbot => "伐木机器人",
             Self::Collector => "收集点",
             Self::Medbay => "医疗站",
+            Self::Splitter => "智能分流器",
+            Self::Filter => "筛选分流器",
+            Self::Cable => "电力电缆",
+            Self::Battery => "工业蓄电池",
+            Self::Pipe => "流体管道",
+            Self::Tank => "储液罐",
+            Self::Pump => "流体泵",
+            Self::Geothermal => "地热发电机",
+            Self::ColonyCore => "殖民核心",
+            Self::Turret => "自动防御炮塔",
             Self::Other => "机器",
         }
     }
@@ -162,6 +207,41 @@ pub struct BeltItem {
 pub struct BeltState {
     /// (item, t) — t 0..1 progress along the belt.
     pub items: Vec<BeltItem>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RouterState {
+    pub items: Vec<BeltItem>,
+    /// 仅筛选分流器使用；匹配物走正面，其他物走右侧。
+    pub filter: Option<String>,
+    pub route: u8,
+}
+
+pub const BATTERY_CAPACITY: f32 = 500.0;
+
+#[derive(Clone, Debug, Default)]
+pub struct BatteryState {
+    /// 储能，单位 kWs。
+    pub charge: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ColonyState {
+    pub input: HashMap<String, i32>,
+    pub output: Option<Slot>,
+    /// 0..1, one full settlement production cycle.
+    pub prog: f32,
+    pub habitat: i32,
+    pub residents: i32,
+    pub scan_t: f32,
+    pub cycles: i32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TurretState {
+    pub cooldown: f32,
+    pub engaged: bool,
+    pub kills: i32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -247,8 +327,13 @@ pub enum MachineState {
     Furnace(FurnaceState),
     Miner(MinerState),
     Belt(BeltState),
+    Router(RouterState),
     Crafter(CrafterState),
     Chest(ChestState),
+    Tank(ChestState),
+    Battery(BatteryState),
+    Colony(ColonyState),
+    Turret(TurretState),
     Reactor(ReactorState),
     Burner(BurnerState),
     Beacon(BeaconState),
@@ -279,12 +364,20 @@ impl MachineState {
             MachineKind::Furnace => Self::Furnace(FurnaceState::default()),
             MachineKind::Miner => Self::Miner(MinerState::default()),
             MachineKind::Belt => Self::Belt(BeltState::default()),
+            MachineKind::Splitter | MachineKind::Filter => Self::Router(RouterState::default()),
+            MachineKind::Pipe | MachineKind::Pump => Self::Belt(BeltState::default()),
             MachineKind::Assembler | MachineKind::Refinery => {
                 Self::Crafter(CrafterState::default())
             }
             MachineKind::Chest => Self::Chest(ChestState {
                 slots: vec![None; 24],
             }),
+            MachineKind::Tank => Self::Tank(ChestState {
+                slots: vec![None; 12],
+            }),
+            MachineKind::Battery => Self::Battery(BatteryState::default()),
+            MachineKind::ColonyCore => Self::Colony(ColonyState::default()),
+            MachineKind::Turret => Self::Turret(TurretState::default()),
             MachineKind::Reactor => Self::Reactor(ReactorState::default()),
             MachineKind::Burner => Self::Burner(BurnerState::default()),
             MachineKind::Beacon => Self::Beacon(BeaconState::default()),
@@ -338,6 +431,16 @@ pub fn machine_drop(block_key: &str) -> &'static str {
         "lumberbot" => "lumberbot_b",
         "collector" => "collector_b",
         "medbay" => "medbay_b",
+        "splitter" => "splitter_b",
+        "filter" => "filter_b",
+        "cable" => "cable_b",
+        "battery" => "battery_b",
+        "pipe" => "pipe_b",
+        "tank" => "tank_b",
+        "pump" => "pump_b",
+        "geothermal" => "geothermal_b",
+        "colony_core" => "colony_core_b",
+        "turret" => "turret_b",
         _ => "stone",
     }
 }
@@ -372,6 +475,11 @@ pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
                 push(&mut out, &it.item, 1);
             }
         }
+        MachineState::Router(r) => {
+            for it in &r.items {
+                push(&mut out, &it.item, 1);
+            }
+        }
         MachineState::Crafter(c) => {
             for (k, v) in &c.input {
                 push(&mut out, k, *v);
@@ -395,13 +503,28 @@ pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
                 push(&mut out, &s.item, s.n);
             }
         }
+        MachineState::Tank(c) => {
+            for s in c.slots.iter().flatten() {
+                push(&mut out, &s.item, s.n);
+            }
+        }
+        MachineState::Colony(c) => {
+            for (item, amount) in &c.input {
+                push(&mut out, item, *amount);
+            }
+            if let Some(slot) = &c.output {
+                push(&mut out, &slot.item, slot.n);
+            }
+        }
         MachineState::Collector(c) => {
             for s in c.slots.iter().flatten() {
                 push(&mut out, &s.item, s.n);
             }
         }
         MachineState::Reactor(r) => {
-            push(&mut out, "uranium", (r.fuel / 60.0).round() as i32);
+            // Partial fuel has already produced power and must not round back
+            // into a whole uranium item when the reactor is dismantled.
+            push(&mut out, "uranium", (r.fuel / 60.0).floor() as i32);
         }
         MachineState::Burner(b) => {
             if let Some(s) = &b.fuel {
@@ -416,7 +539,7 @@ pub fn machine_refund(state: &MachineState) -> Vec<(String, i32)> {
     out
 }
 
-pub const MACHINE_BLOCK_IDS: [u8; 15] = [
+pub const MACHINE_BLOCK_IDS: [u8; 25] = [
     ids::FURNACE,
     ids::MINER,
     ids::BELT,
@@ -432,6 +555,16 @@ pub const MACHINE_BLOCK_IDS: [u8; 15] = [
     ids::LUMBERBOT,
     ids::COLLECTOR,
     ids::MEDBAY,
+    ids::SPLITTER,
+    ids::FILTER,
+    ids::CABLE,
+    ids::BATTERY,
+    ids::PIPE,
+    ids::TANK,
+    ids::PUMP,
+    ids::GEOTHERMAL,
+    ids::COLONY_CORE,
+    ids::TURRET,
 ];
 
 // ---------- serialization (per-planet archive) ----------
@@ -477,6 +610,10 @@ pub struct MachineDataSave {
     #[serde(default)]
     pub items: Vec<(String, f32)>,
     #[serde(default)]
+    pub route: u8,
+    #[serde(default)]
+    pub charge: f32,
+    #[serde(default)]
     pub deposit: i32,
     #[serde(default)]
     pub cargo: i32,
@@ -489,6 +626,21 @@ pub struct MachineDataSave {
     /// 伐木机器人位置
     #[serde(default)]
     pub bot_pos: Option<[f32; 3]>,
+    /// 殖民核心扫描到的有效舱室方块数。
+    #[serde(default)]
+    pub habitat: i32,
+    /// 殖民核心当前可容纳的居民数。
+    #[serde(default)]
+    pub residents: i32,
+    /// 殖民核心已完成的生产周期数。
+    #[serde(default)]
+    pub cycles: i32,
+    /// 炮塔射击冷却。
+    #[serde(default)]
+    pub cooldown: f32,
+    /// 炮塔累计击杀数。
+    #[serde(default)]
+    pub kills: i32,
 }
 
 impl MachineState {
@@ -514,6 +666,12 @@ impl MachineState {
                 items: b.items.iter().map(|it| (it.item.clone(), it.t)).collect(),
                 ..default()
             },
+            Self::Router(r) => MachineDataSave {
+                items: r.items.iter().map(|it| (it.item.clone(), it.t)).collect(),
+                label: r.filter.clone(),
+                route: r.route,
+                ..default()
+            },
             Self::Crafter(c) => MachineDataSave {
                 output: c.output.clone(),
                 prog: c.prog,
@@ -523,6 +681,28 @@ impl MachineState {
             },
             Self::Chest(c) => MachineDataSave {
                 slots: c.slots.clone(),
+                ..default()
+            },
+            Self::Tank(c) => MachineDataSave {
+                slots: c.slots.clone(),
+                ..default()
+            },
+            Self::Battery(b) => MachineDataSave {
+                charge: b.charge,
+                ..default()
+            },
+            Self::Colony(c) => MachineDataSave {
+                input_map: c.input.clone(),
+                output: c.output.clone(),
+                prog: c.prog,
+                habitat: c.habitat,
+                residents: c.residents,
+                cycles: c.cycles,
+                ..default()
+            },
+            Self::Turret(t) => MachineDataSave {
+                cooldown: t.cooldown,
+                kills: t.kills,
                 ..default()
             },
             Self::Reactor(r) => MachineDataSave {
@@ -558,6 +738,14 @@ impl MachineState {
     }
 
     pub fn from_save(kind: MachineKind, d: &MachineDataSave) -> Self {
+        // Production buffers are counters, not inventory slots. A blocked
+        // output can legitimately accumulate more than one backpack stack.
+        let clean_output = |slot: &Option<Slot>| {
+            slot.as_ref().and_then(|slot| {
+                data::item_by_key(&slot.item)?;
+                (slot.n > 0).then(|| slot.clone())
+            })
+        };
         let clean_slot = |slot: &Option<Slot>| {
             slot.as_ref().and_then(|slot| {
                 let max = data::item_by_key(&slot.item)?.stack;
@@ -568,11 +756,13 @@ impl MachineState {
             })
         };
         let clean_slots = |slots: &[Option<Slot>], max_len: usize| {
-            slots
+            let mut cleaned = slots
                 .iter()
                 .take(max_len)
                 .map(clean_slot)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            cleaned.resize(max_len, None);
+            cleaned
         };
         let finite = |value: f32, fallback: f32, max: f32| {
             if value.is_finite() {
@@ -585,7 +775,7 @@ impl MachineState {
             MachineKind::Furnace => Self::Furnace(FurnaceState {
                 input: clean_slot(&d.input),
                 fuel: clean_slot(&d.fuel),
-                output: clean_slot(&d.output),
+                output: clean_output(&d.output),
                 prog: finite(d.prog, 0.0, 1.0),
                 burn: finite(d.burn, 0.0, 86_400.0),
                 burn_max: finite(d.burn_max, 0.0, 86_400.0),
@@ -593,11 +783,11 @@ impl MachineState {
                 on: false,
             }),
             MachineKind::Miner => Self::Miner(MinerState {
-                output: clean_slot(&d.output),
+                output: clean_output(&d.output),
                 prog: finite(d.prog, 0.0, 1.0),
                 deposit: d.deposit.clamp(0, 300),
             }),
-            MachineKind::Belt => Self::Belt(BeltState {
+            MachineKind::Belt | MachineKind::Pipe | MachineKind::Pump => Self::Belt(BeltState {
                 items: d
                     .items
                     .iter()
@@ -608,6 +798,24 @@ impl MachineState {
                         t: t.clamp(0.0, 1.0),
                     })
                     .collect(),
+            }),
+            MachineKind::Splitter | MachineKind::Filter => Self::Router(RouterState {
+                items: d
+                    .items
+                    .iter()
+                    .take(128)
+                    .filter(|(item, t)| data::item_by_key(item).is_some() && t.is_finite())
+                    .map(|(i, t)| BeltItem {
+                        item: i.clone(),
+                        t: t.clamp(0.0, 1.0),
+                    })
+                    .collect(),
+                filter: d
+                    .label
+                    .as_ref()
+                    .filter(|item| data::item_by_key(item).is_some())
+                    .cloned(),
+                route: d.route % 3,
             }),
             MachineKind::Assembler | MachineKind::Refinery => Self::Crafter(CrafterState {
                 // 配方 id 以字符串存档，读档时解析回 &'static str
@@ -621,15 +829,36 @@ impl MachineState {
                     .filter(|(item, n)| data::item_by_key(item).is_some() && **n > 0)
                     .map(|(item, n)| (item.clone(), (*n).min(1_000_000)))
                     .collect(),
-                output: clean_slot(&d.output),
+                output: clean_output(&d.output),
                 prog: finite(d.prog, 0.0, 1.0),
             }),
             MachineKind::Chest => Self::Chest(ChestState {
-                slots: if d.slots.is_empty() {
-                    vec![None; 24]
-                } else {
-                    clean_slots(&d.slots, 24)
-                },
+                slots: clean_slots(&d.slots, 24),
+            }),
+            MachineKind::Tank => Self::Tank(ChestState {
+                slots: clean_slots(&d.slots, 12),
+            }),
+            MachineKind::Battery => Self::Battery(BatteryState {
+                charge: finite(d.charge, 0.0, BATTERY_CAPACITY),
+            }),
+            MachineKind::ColonyCore => Self::Colony(ColonyState {
+                input: d
+                    .input_map
+                    .iter()
+                    .filter(|(item, amount)| colony_supply(item) && **amount > 0)
+                    .map(|(item, amount)| (item.clone(), (*amount).min(1_000)))
+                    .collect(),
+                output: clean_output(&d.output).filter(|slot| slot.item == "data"),
+                prog: finite(d.prog, 0.0, 1.0),
+                habitat: d.habitat.clamp(0, 10_000),
+                residents: d.residents.clamp(0, 8),
+                scan_t: 0.0,
+                cycles: d.cycles.clamp(0, 1_000_000),
+            }),
+            MachineKind::Turret => Self::Turret(TurretState {
+                cooldown: finite(d.cooldown, 0.0, 60.0),
+                engaged: false,
+                kills: d.kills.clamp(0, 1_000_000),
             }),
             MachineKind::Reactor => Self::Reactor(ReactorState {
                 fuel: finite(d.fuel_s, 0.0, 86_400.0),
@@ -640,7 +869,14 @@ impl MachineState {
                 burn_max: finite(d.burn_max, 0.0, 86_400.0),
             }),
             MachineKind::Beacon => Self::Beacon(BeaconState {
-                label: d.label.clone().unwrap_or_else(|| "标记点".into()),
+                label: d
+                    .label
+                    .as_deref()
+                    .unwrap_or("标记点")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(128)
+                    .collect(),
                 gal: d.gal,
             }),
             MachineKind::Lumberbot => Self::Lumberbot(LumberbotState {
@@ -659,11 +895,7 @@ impl MachineState {
                 ..default()
             }),
             MachineKind::Collector => Self::Collector(CollectorState {
-                slots: if d.slots.is_empty() {
-                    vec![None; 12]
-                } else {
-                    clean_slots(&d.slots, 12)
-                },
+                slots: clean_slots(&d.slots, 12),
             }),
             MachineKind::Medbay => Self::Medbay(MedbayState {
                 heal_acc: finite(d.heal_acc, 0.0, 86_400.0),
@@ -690,7 +922,41 @@ fn belt_insert(b: &mut BeltState, item: &str, t_start: f32) -> bool {
     true
 }
 
-pub fn can_machine_accept(_m: &Machine, item: &str, state: &MachineState) -> bool {
+pub fn is_fluid_item(item: &str) -> bool {
+    matches!(item, "acid" | "coolant" | "oxygen_cell" | "hazard_cell")
+}
+
+pub fn colony_supply(item: &str) -> bool {
+    matches!(item, "oxygen_cell" | "medkit" | "biofiber")
+}
+
+fn colony_supplied(input: &HashMap<String, i32>) -> bool {
+    input.get("oxygen_cell").copied().unwrap_or(0) >= 1
+        && input.get("medkit").copied().unwrap_or(0) >= 1
+        && input.get("biofiber").copied().unwrap_or(0) >= 2
+}
+
+fn colony_resident_capacity(habitat: i32) -> i32 {
+    if habitat >= 12 {
+        (habitat / 4).clamp(1, 8)
+    } else {
+        0
+    }
+}
+
+fn colony_output_room(output: &Option<Slot>) -> bool {
+    output
+        .as_ref()
+        .is_none_or(|slot| slot.item == "data" && slot.n <= 498)
+}
+
+fn production_output_room(output: &Option<Slot>, item: &str, amount: i32) -> bool {
+    output
+        .as_ref()
+        .is_none_or(|slot| slot.item != item || slot.n.checked_add(amount).is_some())
+}
+
+pub fn can_machine_accept(m: &Machine, item: &str, state: &MachineState) -> bool {
     match state {
         MachineState::Furnace(f) => {
             if data::fuel_value(item) > 0.0
@@ -712,6 +978,7 @@ pub fn can_machine_accept(_m: &Machine, item: &str, state: &MachineState) -> boo
             f.input.as_ref().map(|s| s.n).unwrap_or(0) < 50
         }
         MachineState::Chest(c) => slots_accept(&c.slots, item),
+        MachineState::Tank(c) => is_fluid_item(item) && slots_accept(&c.slots, item),
         MachineState::Collector(c) => slots_accept(&c.slots, item),
         MachineState::Crafter(c) => {
             let Some(rid) = c.recipe else { return false };
@@ -729,7 +996,14 @@ pub fn can_machine_accept(_m: &Machine, item: &str, state: &MachineState) -> boo
                 .unwrap_or(1);
             c.input.get(item).copied().unwrap_or(0) < need * 3
         }
-        MachineState::Belt(b) => belt_can_accept(b, 0.0),
+        MachineState::Belt(b) => {
+            (!matches!(m.kind, MachineKind::Pipe | MachineKind::Pump) || is_fluid_item(item))
+                && belt_can_accept(b, 0.0)
+        }
+        MachineState::Router(r) => !r.items.iter().any(|it| it.t < BELT_GAP),
+        MachineState::Colony(c) => {
+            colony_supply(item) && c.input.get(item).copied().unwrap_or(0) < 24
+        }
         MachineState::Reactor(r) => item == "uranium" && r.fuel < 300.0,
         MachineState::Burner(b) => {
             data::fuel_value(item) > 0.0
@@ -803,12 +1077,24 @@ pub fn machine_insert(m: &Machine, state: &mut MachineState, item: &str) -> bool
             true
         }
         MachineState::Chest(c) => insert_into_slots(&mut c.slots, item),
+        MachineState::Tank(c) => insert_into_slots(&mut c.slots, item),
         MachineState::Collector(c) => insert_into_slots(&mut c.slots, item),
         MachineState::Crafter(c) => {
             *c.input.entry(item.to_string()).or_insert(0) += 1;
             true
         }
         MachineState::Belt(b) => belt_insert(b, item, 0.0),
+        MachineState::Router(r) => {
+            r.items.push(BeltItem {
+                item: item.to_string(),
+                t: 0.0,
+            });
+            true
+        }
+        MachineState::Colony(c) => {
+            *c.input.entry(item.to_string()).or_default() += 1;
+            true
+        }
         MachineState::Reactor(r) => {
             r.fuel += 60.0;
             true
@@ -878,7 +1164,7 @@ impl Snapshot {
     }
 }
 
-/// 装配/精炼：该面是否是输入面（皮带终点指向机器所在格——简化：邻格有皮带）。
+/// 装配/精炼：该面是否是输入面（皮带终点指向机器所在格）。
 fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
     let (dx, dz) = DIRS[dir_index(d)];
     let bp = [m.pos[0] + dx, m.pos[1], m.pos[2] + dz];
@@ -887,7 +1173,7 @@ fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
     b1.map(|e| {
         snap.machines
             .get(e)
-            .map(|mm| mm.kind == MachineKind::Belt)
+            .map(|mm| mm.kind == MachineKind::Belt && DIRS[dir_index(mm.dir)] == (-dx, -dz))
             .unwrap_or(false)
     })
     .unwrap_or(false)
@@ -895,7 +1181,7 @@ fn is_input_face(m: &Machine, d: u8, snap: &Snapshot) -> bool {
             .map(|e| {
                 snap.machines
                     .get(e)
-                    .map(|mm| mm.kind == MachineKind::Belt)
+                    .map(|mm| mm.kind == MachineKind::Belt && DIRS[dir_index(mm.dir)] == (-dx, -dz))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -932,7 +1218,7 @@ fn try_output(m: &Machine, item: &str, snap: &mut Snapshot) -> bool {
             continue;
         };
         if matches!(tm.kind, MachineKind::Belt) {
-            if crafter {
+            if crafter && tm.pos != front {
                 continue; // 装配/精炼不从侧面输出到皮带
             }
             if let MachineState::Belt(bs) = ts
@@ -954,22 +1240,26 @@ fn furnace_tick(
     m: &mut Machine,
     f: &mut FurnaceState,
     snap: &mut Snapshot,
-    drops: &mut Vec<(String, i32)>,
+    drops: &mut Vec<([i32; 3], String, i32)>,
     commands: &mut Commands,
     sfx: &crate::audio::Sfx,
+    researched: &[String],
 ) {
     let input_item = f.input.as_ref().map(|s| s.item.clone());
     let r = input_item.as_deref().and_then(|it| {
-        data::RECIPES
-            .iter()
-            .find(|r| r.station == "furnace" && r.inputs.iter().any(|(i, _)| *i == it))
+        data::RECIPES.iter().find(|r| {
+            r.station == "furnace"
+                && data::recipe_unlocked(researched, r)
+                && r.inputs.iter().any(|(i, _)| *i == it)
+        })
     });
     let need = r.and_then(|r| {
         input_item
             .as_deref()
             .and_then(|it| r.inputs.iter().find(|(i, _)| *i == it).map(|(_, n)| *n))
     });
-    let can_work = r.is_some() && f.input.as_ref().map(|s| s.n).unwrap_or(0) >= need.unwrap_or(1);
+    let can_work = r.is_some_and(|r| production_output_room(&f.output, r.output.0, r.output.1))
+        && f.input.as_ref().map(|s| s.n).unwrap_or(0) >= need.unwrap_or(1);
     if f.burn <= 0.0
         && can_work
         && let Some(fuel) = f.fuel.as_mut()
@@ -1000,7 +1290,7 @@ fn furnace_tick(
                 if let Some(o) = f.output.as_mut()
                     && o.item != out_item
                 {
-                    drops.push((o.item.clone(), o.n));
+                    drops.push((m.pos, o.item.clone(), o.n));
                     f.output = None;
                 }
                 if f.output.is_none() {
@@ -1053,9 +1343,17 @@ fn miner_tick(
     if !below.ore {
         return;
     }
-    let eff = sat.max(0.35); // 无电 35% 手摇
+    let drop = below.drops.first().map(|d| d.item).unwrap_or("stone");
+    if s.output.as_ref().is_some_and(|o| o.item != drop)
+        || !production_output_room(&s.output, drop, 1)
+    {
+        return;
+    }
+    if sat <= 0.05 {
+        return;
+    }
     m.active = true;
-    s.prog += TICK * 0.5 * eff;
+    s.prog += TICK * 0.5 * sat;
     if s.prog >= 1.0 {
         s.prog = 0.0;
         let drop = below.drops.first().map(|d| d.item).unwrap_or("stone");
@@ -1085,13 +1383,15 @@ fn crafter_tick(
     sat: f32,
     where_: &str,
     snap: &mut Snapshot,
-    drops: &mut Vec<(String, i32)>,
+    drops: &mut Vec<([i32; 3], String, i32)>,
+    researched: &[String],
 ) {
     m.active = false;
     let Some(rid) = c.recipe else { return };
     // 装配机可制作 station=="hand" 的便携配方（JS where:'both' 语义）
     let Some(r) = data::RECIPES.iter().find(|r| {
         r.id == rid
+            && data::recipe_unlocked(researched, r)
             && (r.station == where_
                 || r.station == "both"
                 || (where_ == "assembler" && r.station == "hand"))
@@ -1102,7 +1402,9 @@ fn crafter_tick(
         .inputs
         .iter()
         .all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n);
-    if c.prog > 0.0 || (has_all && sat > 0.05) {
+    if production_output_room(&c.output, r.output.0, r.output.1)
+        && (c.prog > 0.0 || (has_all && sat > 0.05))
+    {
         if c.prog == 0.0 {
             for (i, n) in r.inputs {
                 let v = c.input.entry(i.to_string()).or_insert(0);
@@ -1117,7 +1419,7 @@ fn crafter_tick(
             if let Some(o) = c.output.as_mut()
                 && o.item != out_item
             {
-                drops.push((o.item.clone(), o.n));
+                drops.push((m.pos, o.item.clone(), o.n));
                 c.output = None;
             }
             if c.output.is_none() {
@@ -1143,8 +1445,13 @@ fn crafter_tick(
     }
 }
 
-fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
-    m.active = !b.items.is_empty();
+fn belt_tick(m: &mut Machine, b: &mut BeltState, sat: f32, snap: &mut Snapshot) {
+    let speed = match m.kind {
+        MachineKind::Pipe => BELT_SPEED * 0.65,
+        MachineKind::Pump => BELT_SPEED * 2.0 * sat,
+        _ => BELT_SPEED,
+    };
+    m.active = !b.items.is_empty() && (m.kind != MachineKind::Pump || sat > 0.05);
     b.items.sort_by(|a, c| c.t.total_cmp(&a.t));
     let mut i = 0;
     while i < b.items.len() {
@@ -1154,7 +1461,7 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
             (b.items[i - 1].t - BELT_GAP).max(0.0)
         };
         let t = b.items[i].t;
-        b.items[i].t = (t + BELT_SPEED * TICK).min(max_t.max(t));
+        b.items[i].t = (t + speed * TICK).min(max_t.max(t));
         if b.items[i].t >= 0.999 {
             let (dx, dz) = DIRS[dir_index(m.dir)];
             let item = b.items[i].item.clone();
@@ -1201,6 +1508,158 @@ fn belt_tick(m: &mut Machine, b: &mut BeltState, snap: &mut Snapshot) {
         }
         i += 1;
     }
+}
+
+fn insert_at_direction(m: &Machine, dir: u8, item: &str, snap: &mut Snapshot) -> bool {
+    let (dx, dz) = DIRS[dir_index(dir)];
+    for y in [m.pos[1], m.pos[1] - 1, m.pos[1] + 1] {
+        let Some(target) = snap
+            .pos_index
+            .get(&[m.pos[0] + dx, y, m.pos[2] + dz])
+            .copied()
+        else {
+            continue;
+        };
+        let Some(tm) = snap.machines.get(&target).cloned() else {
+            continue;
+        };
+        let Some(ts) = snap.states.get_mut(&target) else {
+            continue;
+        };
+        if can_machine_accept(&tm, item, ts) && machine_insert(&tm, ts, item) {
+            return true;
+        }
+    }
+    false
+}
+
+fn router_tick(m: &mut Machine, r: &mut RouterState, snap: &mut Snapshot) {
+    m.active = !r.items.is_empty();
+    r.items.sort_by(|a, b| b.t.total_cmp(&a.t));
+    let mut i = 0;
+    while i < r.items.len() {
+        let max_t = if i == 0 {
+            1.0
+        } else {
+            (r.items[i - 1].t - BELT_GAP).max(0.0)
+        };
+        let old_t = r.items[i].t;
+        r.items[i].t = (old_t + BELT_SPEED * TICK).min(max_t.max(old_t));
+        if r.items[i].t >= 0.999 {
+            let item = r.items[i].item.clone();
+            let dirs: Vec<u8> = if m.kind == MachineKind::Filter {
+                if r.filter.as_deref() == Some(item.as_str()) {
+                    vec![m.dir]
+                } else {
+                    vec![(m.dir + 1) % 4]
+                }
+            } else {
+                let choices = [(m.dir + 3) % 4, m.dir, (m.dir + 1) % 4];
+                (0..3)
+                    .map(|n| choices[(r.route as usize + n) % 3])
+                    .collect()
+            };
+            let mut moved = false;
+            for dir in dirs {
+                if insert_at_direction(m, dir, &item, snap) {
+                    moved = true;
+                    break;
+                }
+            }
+            if moved {
+                r.route = (r.route + 1) % 3;
+                r.items.remove(i);
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn tank_tick(m: &mut Machine, tank: &mut ChestState, snap: &mut Snapshot) {
+    m.active = tank.slots.iter().any(Option::is_some);
+    for slot in &mut tank.slots {
+        let Some(stored) = slot.clone() else { continue };
+        if try_output(m, &stored.item, snap)
+            && let Some(current) = slot
+        {
+            current.n -= 1;
+            if current.n <= 0 {
+                *slot = None;
+            }
+        }
+        break;
+    }
+}
+
+fn colony_tick(
+    m: &mut Machine,
+    colony: &mut ColonyState,
+    sat: f32,
+    world: &GameWorld,
+    snap: &mut Snapshot,
+) -> Option<i32> {
+    colony.scan_t -= TICK;
+    if colony.scan_t <= 0.0 {
+        colony.scan_t = 5.0;
+        let mut habitat = 0;
+        for x in (m.pos[0] - 8)..=(m.pos[0] + 8) {
+            for y in (m.pos[1] - 4).max(0)..=(m.pos[1] + 4).min(data::WORLD_H - 1) {
+                for z in (m.pos[2] - 8)..=(m.pos[2] + 8) {
+                    if matches!(
+                        world.get(x, y, z),
+                        ids::HABITAT_FLOOR
+                            | ids::WHITE_PANEL
+                            | ids::DARK_PANEL
+                            | ids::REINFORCED_GLASS
+                    ) {
+                        habitat += 1;
+                    }
+                }
+            }
+        }
+        colony.habitat = habitat;
+        colony.residents = colony_resident_capacity(habitat);
+    }
+    if let Some(output) = colony.output.clone()
+        && output.n > 0
+        && try_output(m, &output.item, snap)
+        && let Some(current) = colony.output.as_mut()
+    {
+        current.n -= 1;
+        if current.n <= 0 {
+            colony.output = None;
+        }
+    }
+    let supplied = colony_supplied(&colony.input);
+    let output_room = colony_output_room(&colony.output);
+    m.active = colony.residents > 0 && supplied && output_room && sat > 0.05;
+    if !m.active {
+        return None;
+    }
+    colony.prog += TICK * sat / 90.0;
+    if colony.prog < 1.0 {
+        return None;
+    }
+    colony.prog = 0.0;
+    for (item, amount) in [("oxygen_cell", 1), ("medkit", 1), ("biofiber", 2)] {
+        if let Some(stored) = colony.input.get_mut(item) {
+            *stored -= amount;
+        }
+    }
+    colony.input.retain(|_, amount| *amount > 0);
+    match &mut colony.output {
+        Some(slot) if slot.item == "data" => slot.n += 2,
+        None => {
+            colony.output = Some(Slot {
+                item: "data".into(),
+                n: 2,
+            });
+        }
+        _ => {}
+    }
+    colony.cycles += 1;
+    Some(200 + colony.residents * 25)
 }
 
 fn collector_tick(m: &mut Machine, c: &mut CollectorState, snap: &mut Snapshot) {
@@ -1296,30 +1755,32 @@ fn lumberbot_tick(
             }
         }
         BotPhase::Chop => {
-            let Some(t) = lb.target else {
+            let Some(mut t) = lb.target else {
                 lb.phase = BotPhase::Scan;
                 return;
             };
             // 目标已被挖走 → 重新找
             if world.get(t[0], t[1], t[2]) != ids::LOG {
-                lb.target = find_log_segment(world, t[0], t[2]).or(lb.target);
-                if lb.target.map(|tg| world.get(tg[0], tg[1], tg[2])) != Some(ids::LOG) {
+                let Some(replacement) = find_log_segment(world, t[0], t[2]) else {
                     lb.phase = BotPhase::Scan;
                     return;
-                }
+                };
+                lb.target = Some(replacement);
+                t = replacement;
+                lb.chop_t = 0.0;
             }
             lb.chop_t += TICK;
             if lb.chop_t >= 1.1 {
                 lb.chop_t = 0.0;
                 // 砍一段：碳 +4
                 world_writes.push((t, ids::AIR));
-                lb.cargo += 4;
+                lb.cargo = (lb.cargo + 4).min(BOT_CARGO_FULL);
                 // 树干剩余？
-                if let Some(next) = find_log_segment(world, t[0], t[2]) {
+                if let Some(next) = find_log_segment_except(world, t[0], t[2], Some(t)) {
                     lb.target = Some(next);
                 } else {
                     // 整树砍完：碳 +6，清理 5×5×5 树叶（50% 各 +1）
-                    lb.cargo += 6;
+                    lb.cargo = (lb.cargo + 6).min(BOT_CARGO_FULL);
                     for dy in -1..=3 {
                         for ox in -2..=2 {
                             for oz in -2..=2 {
@@ -1334,7 +1795,7 @@ fn lumberbot_tick(
                                     .next()
                                         < 0.5
                                     {
-                                        lb.cargo += 1;
+                                        lb.cargo = (lb.cargo + 1).min(BOT_CARGO_FULL);
                                     }
                                 }
                             }
@@ -1355,6 +1816,11 @@ fn lumberbot_tick(
             let mut best_d = f32::MAX;
             for (e, mm) in &snap.machines {
                 if mm.kind != MachineKind::Collector {
+                    continue;
+                }
+                let home_d2 = (mm.pos[0] as f32 + 0.5 - home[0]).powi(2)
+                    + (mm.pos[2] as f32 + 0.5 - home[2]).powi(2);
+                if home_d2 > (BOT_RANGE * 2) as f32 * (BOT_RANGE * 2) as f32 {
                     continue;
                 }
                 let d = ((mm.pos[0] as f32 + 0.5 - lb.pos[0]).powi(2)
@@ -1415,14 +1881,24 @@ fn lumberbot_tick(
 
 /// 在 (x,z) 列从地表向下最多 12 格找原木段（返回最上方的 log）。
 fn find_log_segment(world: &GameWorld, x: i32, z: i32) -> Option<[i32; 3]> {
+    find_log_segment_except(world, x, z, None)
+}
+
+fn find_log_segment_except(
+    world: &GameWorld,
+    x: i32,
+    z: i32,
+    skip: Option<[i32; 3]>,
+) -> Option<[i32; 3]> {
     let top = world.top_at(x, z);
     for dy in 0..12 {
         let y = top - dy;
         if y < 1 {
             break;
         }
-        if world.get(x, y, z) == ids::LOG {
-            return Some([x, y, z]);
+        let pos = [x, y, z];
+        if Some(pos) != skip && world.get(x, y, z) == ids::LOG {
+            return Some(pos);
         }
     }
     None
@@ -1496,6 +1972,84 @@ fn medbay_wants(m: &Machine, p: &Player) -> bool {
     p.inv.count_item("sodium") >= 1 && p.inv.count_item("oxygen") >= 1
 }
 
+fn is_power_node(kind: MachineKind) -> bool {
+    power_use(kind) > 0.0
+        || power_gen(kind) > 0.0
+        || matches!(
+            kind,
+            MachineKind::Wind | MachineKind::Cable | MachineKind::Battery
+        )
+}
+
+fn power_components(snap: &Snapshot) -> Vec<Vec<Entity>> {
+    let nodes: HashSet<Entity> = snap
+        .machines
+        .iter()
+        .filter_map(|(entity, machine)| is_power_node(machine.kind).then_some(*entity))
+        .collect();
+    let cable_mode = snap
+        .machines
+        .values()
+        .any(|machine| machine.kind == MachineKind::Cable);
+    if !cable_mode {
+        return vec![nodes.into_iter().collect()];
+    }
+    let offsets = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
+    let mut unseen = nodes;
+    let mut out = Vec::new();
+    while let Some(start) = unseen.iter().next().copied() {
+        unseen.remove(&start);
+        let mut queue = VecDeque::from([start]);
+        let mut component = Vec::new();
+        while let Some(entity) = queue.pop_front() {
+            component.push(entity);
+            let Some(machine) = snap.machines.get(&entity) else {
+                continue;
+            };
+            for offset in offsets {
+                let pos = [
+                    machine.pos[0] + offset[0],
+                    machine.pos[1] + offset[1],
+                    machine.pos[2] + offset[2],
+                ];
+                if let Some(next) = snap.pos_index.get(&pos).copied()
+                    && unseen.remove(&next)
+                {
+                    queue.push_back(next);
+                }
+            }
+        }
+        out.push(component);
+    }
+    // Backward compatibility: machines that are not attached to any cable
+    // remain on the legacy wireless grid. Components containing a cable are
+    // explicit local grids and no longer exchange power with that pool.
+    let mut local = Vec::new();
+    let mut legacy = Vec::new();
+    for component in out {
+        if component.iter().any(|entity| {
+            snap.machines
+                .get(entity)
+                .is_some_and(|machine| machine.kind == MachineKind::Cable)
+        }) {
+            local.push(component);
+        } else {
+            legacy.extend(component);
+        }
+    }
+    if !legacy.is_empty() {
+        local.push(legacy);
+    }
+    local
+}
+
 // ---------- main factory system ----------
 
 #[derive(Resource, Default)]
@@ -1514,18 +2068,25 @@ pub fn factory_system(
     icons: Res<crate::ui::IconMaterials>,
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
+    research: Option<Res<crate::ui::Research>>,
+    mut flag_ev: MessageWriter<crate::quests::FlagEvent>,
 ) {
     acc.0 += time.delta_secs();
     if acc.0 < TICK {
         return;
     }
-    acc.0 = 0.0;
+    // Keep the fractional/backlogged time instead of discarding it. A long
+    // frame may catch up over following frames without making factories run
+    // permanently slower than the rest of the game.
+    acc.0 = (acc.0 - TICK).min(TICK * 4.0);
 
     // 阶段 A：快照
     let mut snap = Snapshot::new(&q);
     let day_f = daynight::day_factor(day.0);
     let mut gen_total = 0.0;
     let mut used = 0.0;
+    let mut gen_by: HashMap<Entity, f32> = HashMap::new();
+    let mut use_by: HashMap<Entity, f32> = HashMap::new();
     let wind_t = time.elapsed_secs();
     let Some(mut world) = world else { return };
     {
@@ -1534,7 +2095,10 @@ pub fn factory_system(
             match &mut *st {
                 MachineState::Plain => {
                     if m.kind == MachineKind::Solar {
-                        gen_total += power_gen(MachineKind::Solar) * day_f.max(0.0);
+                        let generated = power_gen(MachineKind::Solar) * day_f.max(0.0);
+                        gen_total += generated;
+                        gen_by.insert(e, generated);
+                        m.active = generated > 0.05;
                     }
                     if m.kind == MachineKind::Wind {
                         let alt = (m.pos[1] as f32 - data::SEA_Y).max(0.0) * 0.18;
@@ -1542,8 +2106,21 @@ pub fn factory_system(
                             .sin()
                             * 3.0
                             + (wind_t * 0.13).sin() * 2.0;
-                        gen_total += (6.0 + alt + gust).clamp(2.0, 16.0);
+                        let generated = (6.0 + alt + gust).clamp(2.0, 16.0);
+                        gen_total += generated;
+                        gen_by.insert(e, generated);
                         m.active = true;
+                    }
+                    if m.kind == MachineKind::Geothermal {
+                        let below = w.get(m.pos[0], m.pos[1] - 1, m.pos[2]);
+                        if matches!(below, ids::BASALT | ids::ASH | ids::OBSIDIAN) {
+                            let generated = power_gen(MachineKind::Geothermal);
+                            gen_total += generated;
+                            gen_by.insert(e, generated);
+                            m.active = true;
+                        } else {
+                            m.active = false;
+                        }
                     }
                 }
                 MachineState::Burner(b) => {
@@ -1561,6 +2138,7 @@ pub fn factory_system(
                     if b.burn > 0.0 {
                         b.burn -= TICK;
                         gen_total += power_gen(MachineKind::Burner);
+                        gen_by.insert(e, power_gen(MachineKind::Burner));
                         m.active = true;
                     } else {
                         m.active = false;
@@ -1569,6 +2147,7 @@ pub fn factory_system(
                 MachineState::Reactor(r) => {
                     if r.fuel > 0.0 {
                         gen_total += power_gen(MachineKind::Reactor);
+                        gen_by.insert(e, power_gen(MachineKind::Reactor));
                         r.fuel -= TICK;
                         m.active = true;
                     } else {
@@ -1577,18 +2156,47 @@ pub fn factory_system(
                 }
                 MachineState::Miner(_) => {
                     if data::block_by_id(w.get(m.pos[0], m.pos[1] - 1, m.pos[2])).ore {
-                        used += power_use(MachineKind::Miner);
+                        let draw = power_use(MachineKind::Miner);
+                        used += draw;
+                        use_by.insert(e, draw);
                     }
+                }
+                MachineState::Belt(b) if m.kind == MachineKind::Pump && !b.items.is_empty() => {
+                    let draw = power_use(MachineKind::Pump);
+                    used += draw;
+                    use_by.insert(e, draw);
+                }
+                MachineState::Colony(c) => {
+                    if c.residents > 0 && colony_supplied(&c.input) && colony_output_room(&c.output)
+                    {
+                        let draw = power_use(MachineKind::ColonyCore);
+                        used += draw;
+                        use_by.insert(e, draw);
+                    }
+                }
+                MachineState::Turret(turret) => {
+                    let draw = if turret.engaged {
+                        power_use(MachineKind::Turret)
+                    } else {
+                        1.0
+                    };
+                    used += draw;
+                    use_by.insert(e, draw);
                 }
                 MachineState::Crafter(c) => {
                     if let Some(rid) = c.recipe
                         && let Some(r) = data::RECIPES.iter().find(|r| r.id == rid)
+                        && research
+                            .as_ref()
+                            .is_some_and(|state| data::recipe_unlocked(&state.techs, r))
                         && (c.prog > 0.0
                             || r.inputs
                                 .iter()
                                 .all(|(i, n)| c.input.get(*i).copied().unwrap_or(0) >= *n))
                     {
-                        used += power_use(m.kind);
+                        let draw = power_use(m.kind);
+                        used += draw;
+                        use_by.insert(e, draw);
                     }
                 }
                 MachineState::Medbay(_) => {
@@ -1596,7 +2204,9 @@ pub fn factory_system(
                         && let Ok(p) = pq.single()
                         && medbay_wants(&m, p)
                     {
-                        used += power_use(MachineKind::Medbay);
+                        let draw = power_use(MachineKind::Medbay);
+                        used += draw;
+                        use_by.insert(e, draw);
                     }
                 }
                 _ => {}
@@ -1606,22 +2216,81 @@ pub fn factory_system(
             snap.machines.insert(e, m.clone());
         }
     }
+    let mut sat_by: HashMap<Entity, f32> = HashMap::new();
+    let mut battery_flow = 0.0;
+    let mut served_total = 0.0;
+    for component in power_components(&snap) {
+        let generation: f32 = component
+            .iter()
+            .map(|entity| gen_by.get(entity).copied().unwrap_or(0.0))
+            .sum();
+        let demand: f32 = component
+            .iter()
+            .map(|entity| use_by.get(entity).copied().unwrap_or(0.0))
+            .sum();
+        let batteries: Vec<Entity> = component
+            .iter()
+            .copied()
+            .filter(|entity| matches!(snap.states.get(entity), Some(MachineState::Battery(_))))
+            .collect();
+        let mut supplied = generation;
+        if generation < demand {
+            let mut energy_needed = (demand - generation) * TICK;
+            for entity in &batteries {
+                if let Some(MachineState::Battery(battery)) = snap.states.get_mut(entity) {
+                    let taken = battery.charge.min(energy_needed);
+                    battery.charge -= taken;
+                    energy_needed -= taken;
+                    battery_flow += taken / TICK;
+                    supplied += taken / TICK;
+                    if energy_needed <= f32::EPSILON {
+                        break;
+                    }
+                }
+            }
+        } else if generation > demand {
+            let mut surplus = (generation - demand) * TICK;
+            for entity in &batteries {
+                if let Some(MachineState::Battery(battery)) = snap.states.get_mut(entity) {
+                    let stored = (BATTERY_CAPACITY - battery.charge).min(surplus);
+                    battery.charge += stored;
+                    surplus -= stored;
+                    if surplus <= f32::EPSILON {
+                        break;
+                    }
+                }
+            }
+        }
+        let component_sat = if demand > 0.0 {
+            (supplied / demand).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        served_total += demand * component_sat;
+        for entity in component {
+            sat_by.insert(entity, component_sat);
+        }
+    }
     let sat = if used > 0.0 {
-        (gen_total / used).min(1.0)
+        (served_total / used).min(1.0)
     } else {
         1.0
     };
     *power = Power {
-        generation: gen_total.round(),
+        generation: (gen_total + battery_flow).round(),
         used,
         sat,
     };
 
     // 阶段 B：快照逻辑
-    let mut drops: Vec<(String, i32)> = Vec::new();
+    let mut drops: Vec<([i32; 3], String, i32)> = Vec::new();
     let mut world_writes: Vec<([i32; 3], u8)> = Vec::new();
     let mut order: Vec<Entity> = snap.machines.keys().copied().collect();
     order.sort();
+    let researched = research
+        .as_ref()
+        .map(|state| state.techs.as_slice())
+        .unwrap_or(&[]);
     for e in order {
         let Some(mut m) = snap.machines.get(&e).cloned() else {
             continue;
@@ -1629,23 +2298,62 @@ pub fn factory_system(
         let Some(mut st) = snap.states.remove(&e) else {
             continue;
         };
+        // Routing earlier in this tick can supply an idle machine after
+        // demand was measured. It must wait for the next power allocation;
+        // a zero-demand component's satisfaction of 1 is not free energy.
+        let machine_sat = if power_use(m.kind) > 0.0 && !use_by.contains_key(&e) {
+            0.0
+        } else {
+            sat_by.get(&e).copied().unwrap_or(sat)
+        };
+        let mut colony_reward = None;
         match &mut st {
-            MachineState::Furnace(f) => {
-                furnace_tick(&mut m, f, &mut snap, &mut drops, &mut commands, &sfx)
-            }
-            MachineState::Miner(ms) => {
-                miner_tick(&mut m, ms, sat, &world, &mut snap, &mut world_writes)
-            }
-            MachineState::Belt(bs) => belt_tick(&mut m, bs, &mut snap),
+            MachineState::Furnace(f) => furnace_tick(
+                &mut m,
+                f,
+                &mut snap,
+                &mut drops,
+                &mut commands,
+                &sfx,
+                researched,
+            ),
+            MachineState::Miner(ms) => miner_tick(
+                &mut m,
+                ms,
+                machine_sat,
+                &world,
+                &mut snap,
+                &mut world_writes,
+            ),
+            MachineState::Belt(bs) => belt_tick(&mut m, bs, machine_sat, &mut snap),
+            MachineState::Router(router) => router_tick(&mut m, router, &mut snap),
             MachineState::Crafter(cs) => {
                 let where_ = if m.kind == MachineKind::Refinery {
                     "refinery"
                 } else {
                     "assembler"
                 };
-                crafter_tick(&mut m, cs, sat, where_, &mut snap, &mut drops);
+                crafter_tick(
+                    &mut m,
+                    cs,
+                    machine_sat,
+                    where_,
+                    &mut snap,
+                    &mut drops,
+                    researched,
+                );
             }
             MachineState::Collector(cs) => collector_tick(&mut m, cs, &mut snap),
+            MachineState::Tank(tank) => tank_tick(&mut m, tank, &mut snap),
+            MachineState::Colony(colony) => {
+                colony_reward = colony_tick(&mut m, colony, machine_sat, &world, &mut snap)
+            }
+            MachineState::Turret(turret) => {
+                // Low-voltage grids reduce fire rate instead of granting full
+                // combat throughput from a tiny fraction of the 10 kW draw.
+                turret.cooldown = (turret.cooldown - TICK * machine_sat).max(0.0);
+                m.active = machine_sat > 0.05;
+            }
             MachineState::Lumberbot(lb) => {
                 lumberbot_tick(&mut m, lb, &world, &mut snap, &mut world_writes)
             }
@@ -1654,20 +2362,37 @@ pub fn factory_system(
                 if let Some(pq) = player.as_mut()
                     && let Ok(mut p) = pq.single_mut()
                     && medbay_wants(&m, &p)
-                    && sat > 0.05
+                    && machine_sat > 0.05
                 {
                     m.active = true;
-                    ms.heal_acc += TICK * sat;
-                    while ms.heal_acc >= 1.0 {
+                    ms.heal_acc += TICK * machine_sat;
+                    while ms.heal_acc >= 1.0
+                        && p.stats.hp < 8.0
+                        && p.inv.count_item("sodium") >= 1
+                        && p.inv.count_item("oxygen") >= 1
+                    {
                         ms.heal_acc -= 1.0;
-                        if p.inv.remove_item("sodium", 1) && p.inv.remove_item("oxygen", 1) {
-                            p.stats.hp = (p.stats.hp + 3.0).min(8.0);
-                            p.toast("医疗站：生命 +3");
-                        }
+                        let removed_sodium = p.inv.remove_item("sodium", 1);
+                        let removed_oxygen = p.inv.remove_item("oxygen", 1);
+                        debug_assert!(removed_sodium && removed_oxygen);
+                        p.stats.hp = (p.stats.hp + 3.0).min(8.0);
+                        p.toast("医疗站：生命 +3");
                     }
+                    ms.heal_acc = ms.heal_acc.min(0.999);
                 }
             }
             _ => {}
+        }
+        if let Some(credits) = colony_reward {
+            if let Some(pq) = player.as_mut()
+                && let Ok(mut p) = pq.single_mut()
+            {
+                p.credits = p.credits.saturating_add(credits);
+                p.toast(format!("殖民收益 +₪{credits} · 研究数据 ×2"));
+            }
+            flag_ev.write(crate::quests::FlagEvent {
+                flag: "colonyOnline".into(),
+            });
         }
         snap.states.insert(e, st);
         snap.machines.insert(e, m);
@@ -1683,21 +2408,21 @@ pub fn factory_system(
         }
     }
     // 掉落物（产出无处可送时洒在机器上方）
-    for (item, n) in drops {
-        if let Some(pq) = player.as_ref()
-            && let Ok(p) = pq.single()
-        {
-            crate::creatures::spawn_drop(
-                &mut commands,
-                &world,
-                &icons,
-                p.pos + Vec3::Y,
-                Vec3::ZERO,
-                item,
-                n,
-                0.4,
-            );
-        }
+    for (pos, item, n) in drops {
+        crate::creatures::spawn_drop(
+            &mut commands,
+            &world,
+            &icons,
+            Vec3::new(
+                pos[0] as f32 + 0.5,
+                pos[1] as f32 + 1.2,
+                pos[2] as f32 + 0.5,
+            ),
+            Vec3::ZERO,
+            item,
+            n,
+            0.4,
+        );
     }
     // 世界改块（矿脉耗尽）
     for (pos, id) in world_writes {
@@ -1711,19 +2436,31 @@ pub fn machine_sync_system(
     machines: Query<(Entity, &Machine)>,
     mut commands: Commands,
 ) {
-    let existing: std::collections::HashSet<[i32; 3]> =
-        machines.iter().map(|(_, m)| m.pos).collect();
+    let mut existing = std::collections::HashSet::new();
+    let mut replacements = Vec::new();
     for (e, m) in &machines {
         // `World::get` intentionally returns AIR for an unloaded chunk. Do
         // not interpret that streaming placeholder as a deleted machine.
         let cx = m.pos[0].div_euclid(data::CHUNK);
         let cz = m.pos[2].div_euclid(data::CHUNK);
         if world.get_chunk(cx, cz).is_none() {
+            if !existing.insert(m.pos) {
+                commands.entity(e).despawn();
+            }
             continue;
         }
         let def = data::block_by_id(world.get(m.pos[0], m.pos[1], m.pos[2]));
-        if def.machine.is_none() {
+        if def.machine == Some(m.kind.block_key()) {
+            if !existing.insert(m.pos) {
+                commands.entity(e).despawn();
+            }
+        } else {
             commands.entity(e).despawn();
+            if let Some(key) = def.machine
+                && existing.insert(m.pos)
+            {
+                replacements.push((m.pos, key));
+            }
         }
     }
 
@@ -1733,7 +2470,7 @@ pub fn machine_sync_system(
     // silently stop after the player returns.
     let needs_scan = world.chunks.values().any(|chunk| chunk.machine_scan);
     if needs_scan {
-        let mut to_spawn = Vec::new();
+        let mut to_spawn = replacements;
         for chunk in world.chunks.values_mut() {
             if !chunk.machine_scan {
                 continue;
@@ -1759,6 +2496,77 @@ pub fn machine_sync_system(
         for (pos, key) in to_spawn {
             spawn_machine(&mut commands, pos, key, 0);
         }
+    } else {
+        for (pos, key) in replacements {
+            spawn_machine(&mut commands, pos, key, 0);
+        }
+    }
+}
+
+/// Powered base-defense turret. Sentinels are always hostile; neutral fauna
+/// is targeted only while retaliating, so a colony does not exterminate its
+/// surrounding ecosystem by default.
+fn turret_targetable(kind: &str, hp: f32, fading: bool, aggro_t: f32) -> bool {
+    hp > 0.0
+        && !fading
+        && (kind == "sentinel" || (aggro_t > 0.0 && matches!(kind, "crab" | "beetle" | "hopper")))
+}
+
+pub fn turret_system(
+    mut machines: Query<(&Machine, &mut MachineState)>,
+    mut creatures: Query<(Entity, &mut Creature, &Transform)>,
+    mut commands: Commands,
+    sfx: Res<crate::audio::Sfx>,
+) {
+    let targets: Vec<(Entity, Vec3)> = creatures
+        .iter_mut()
+        .filter(|(_, creature, _)| {
+            turret_targetable(
+                creature.kind,
+                creature.hp,
+                creature.fading,
+                creature.aggro_t,
+            )
+        })
+        .map(|(entity, _, transform)| (entity, transform.translation))
+        .collect();
+    for (machine, mut state) in &mut machines {
+        let MachineState::Turret(turret) = &mut *state else {
+            continue;
+        };
+        let origin = Vec3::new(
+            machine.pos[0] as f32 + 0.5,
+            machine.pos[1] as f32 + 1.2,
+            machine.pos[2] as f32 + 0.5,
+        );
+        let target = targets
+            .iter()
+            .filter_map(|(entity, pos)| {
+                let distance_sq = origin.distance_squared(*pos);
+                (distance_sq <= 24.0 * 24.0).then_some((*entity, *pos, distance_sq))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        turret.engaged = target.is_some();
+        if !machine.active || turret.cooldown > 0.0 {
+            continue;
+        }
+        let Some((target, pos, _)) = target else {
+            continue;
+        };
+        let Ok((_, mut creature, _)) = creatures.get_mut(target) else {
+            continue;
+        };
+        if creature.hp <= 0.0 {
+            continue;
+        }
+        creature.hp -= 3.5;
+        creature.hit_t = 0.25;
+        creature.aggro_t = creature.aggro_t.max(8.0);
+        turret.cooldown = 0.65;
+        if creature.hp <= 0.0 {
+            turret.kills += 1;
+        }
+        crate::audio::play_spatial(&mut commands, sfx.laser_hit.clone(), pos, 0.4, None);
     }
 }
 
@@ -1784,14 +2592,18 @@ pub fn deserialize_machines(
     saves: &[MachineSave],
 ) -> Vec<(Entity, MachineSave)> {
     let mut out = Vec::new();
+    let mut positions = HashSet::new();
     for s in saves {
-        if s.y < 0
+        let kind = MachineKind::from_block_key(&s.kind);
+        if s.x.unsigned_abs() > 1_000_000
+            || s.z.unsigned_abs() > 1_000_000
+            || s.y < 0
             || s.y >= data::WORLD_H
-            || MachineKind::from_block_key(&s.kind) == MachineKind::Other
+            || kind == MachineKind::Other
+            || !positions.insert([s.x, s.y, s.z])
         {
             continue;
         }
-        let kind = MachineKind::from_block_key(&s.kind);
         let e = commands
             .spawn((
                 Transform::from_xyz(s.x as f32 + 0.5, s.y as f32 + 0.5, s.z as f32 + 0.5),
@@ -1823,6 +2635,7 @@ impl Plugin for FactoryPlugin {
                 Update,
                 (
                     factory_system.run_if(ground_mode),
+                    turret_system.run_if(ground_mode),
                     machine_sync_system.run_if(ground_mode),
                     lumberbot_visual_system.run_if(ground_mode),
                 )
@@ -1855,6 +2668,287 @@ mod tests {
         // 足够间距 → 接受
         assert!(belt_insert(&mut b, "copper_ore", 0.4));
         assert_eq!(b.items.len(), 2);
+    }
+
+    fn snapshot(machines: impl IntoIterator<Item = Machine>) -> Snapshot {
+        let mut world = bevy::prelude::World::new();
+        let mut snap = Snapshot {
+            machines: HashMap::new(),
+            states: HashMap::new(),
+            pos_index: HashMap::new(),
+        };
+        for m in machines {
+            let entity = world.spawn_empty().id();
+            snap.pos_index.insert(m.pos, entity);
+            snap.states.insert(entity, MachineState::for_kind(m.kind));
+            snap.machines.insert(entity, m);
+        }
+        snap
+    }
+
+    #[test]
+    fn production_buffers_survive_save_roundtrip_above_stack_limit() {
+        for (kind, item, n) in [
+            (MachineKind::Furnace, "iron", 750),
+            (MachineKind::Miner, "iron_ore", 750),
+            (MachineKind::Assembler, "gear", 750),
+            (MachineKind::Refinery, "fuel", 750),
+            (MachineKind::ColonyCore, "data", 500),
+        ] {
+            let saved = MachineDataSave {
+                output: Some(Slot {
+                    item: item.into(),
+                    n,
+                }),
+                ..default()
+            };
+            assert_eq!(
+                MachineState::from_save(kind, &saved).to_save().output,
+                saved.output,
+                "{kind:?} lost production during load"
+            );
+        }
+    }
+
+    #[test]
+    fn full_production_counter_does_not_consume_crafter_inputs() {
+        let mut crafter = CrafterState {
+            recipe: Some("gear"),
+            input: HashMap::from([("iron".into(), 100)]),
+            output: Some(Slot {
+                item: "gear".into(),
+                n: i32::MAX,
+            }),
+            ..default()
+        };
+        let before = crafter.input.clone();
+        let mut m = machine(MachineKind::Assembler, [0, 2, 0], 0);
+        crafter_tick(
+            &mut m,
+            &mut crafter,
+            1.0,
+            "assembler",
+            &mut snapshot([]),
+            &mut Vec::new(),
+            &[],
+        );
+        assert_eq!(crafter.input, before);
+        assert_eq!(crafter.prog, 0.0);
+        assert_eq!(crafter.output.unwrap().n, i32::MAX);
+    }
+
+    #[test]
+    fn newly_fed_pump_waits_for_power_allocation() {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(100));
+        app.insert_resource(time)
+            .init_resource::<TickAcc>()
+            .init_resource::<Power>()
+            .insert_resource(daynight::DayTime(0.3))
+            .insert_resource(GameWorld::new(42, "lush", 3))
+            .insert_resource(crate::ui::IconMaterials {
+                quad: default(),
+                fallback: default(),
+                map: default(),
+            })
+            .insert_resource(crate::audio::Sfx::build(&mut Assets::default(), 0.0))
+            .add_message::<crate::quests::FlagEvent>()
+            .add_systems(Update, factory_system);
+        let mut entities = [
+            app.world_mut().spawn_empty().id(),
+            app.world_mut().spawn_empty().id(),
+        ];
+        entities.sort();
+        app.world_mut().entity_mut(entities[0]).insert((
+            machine(MachineKind::Belt, [0, 2, 0], 0),
+            MachineState::Belt(BeltState {
+                items: vec![BeltItem {
+                    item: "coolant".into(),
+                    t: 1.0,
+                }],
+            }),
+        ));
+        app.world_mut().entity_mut(entities[1]).insert((
+            machine(MachineKind::Pump, [1, 2, 0], 0),
+            MachineState::for_kind(MachineKind::Pump),
+        ));
+        for _ in 0..3 {
+            app.update();
+            let MachineState::Belt(pump) = app.world().get::<MachineState>(entities[1]).unwrap()
+            else {
+                panic!("expected pump")
+            };
+            assert_eq!(pump.items.len(), 1);
+            assert_eq!(pump.items[0].t, 0.0, "unpowered pump moved an item");
+            assert!(!app.world().get::<Machine>(entities[1]).unwrap().active);
+        }
+    }
+
+    #[test]
+    fn cable_grids_do_not_exchange_power_with_each_other_or_wireless_pool() {
+        let snap = snapshot([
+            machine(MachineKind::Solar, [0, 2, 0], 0),
+            machine(MachineKind::Cable, [1, 2, 0], 0),
+            machine(MachineKind::Battery, [2, 2, 0], 0),
+            machine(MachineKind::Cable, [10, 2, 0], 0),
+            machine(MachineKind::Miner, [11, 2, 0], 0),
+            machine(MachineKind::Solar, [20, 2, 0], 0),
+            machine(MachineKind::Miner, [30, 2, 0], 0),
+        ]);
+        let mut components: Vec<Vec<i32>> = power_components(&snap)
+            .into_iter()
+            .map(|component| {
+                let mut xs: Vec<_> = component.iter().map(|e| snap.machines[e].pos[0]).collect();
+                xs.sort();
+                xs
+            })
+            .collect();
+        components.sort();
+        assert_eq!(components, vec![vec![0, 1, 2], vec![10, 11], vec![20, 30]]);
+    }
+
+    #[test]
+    fn crafter_output_belt_direction_rules() {
+        for kind in [MachineKind::Assembler, MachineKind::Refinery] {
+            for dir in 0..4 {
+                let m = machine(kind, [0, 2, 0], dir);
+                for (face, &(dx, dz)) in DIRS.iter().enumerate() {
+                    for belt_dir in 0..4 {
+                        let mut snap =
+                            snapshot([machine(MachineKind::Belt, [dx, 2, dz], belt_dir)]);
+                        let expected =
+                            face == dir_index(dir) && dir_index(belt_dir) != (face + 2) % 4;
+                        assert_eq!(
+                            try_output(&m, "gear", &mut snap),
+                            expected,
+                            "{kind:?}, direction {dir}, face {face}, belt direction {belt_dir}"
+                        );
+                        let entity = snap.pos_index[&[dx, 2, dz]];
+                        let MachineState::Belt(belt) = &snap.states[&entity] else {
+                            panic!("expected belt state");
+                        };
+                        assert_eq!(belt.items.len(), usize::from(expected));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crafter_output_reaches_chest_via_front_belt() {
+        for (kind, recipe_id) in [
+            (MachineKind::Assembler, "gear"),
+            (MachineKind::Refinery, "fuel2"),
+        ] {
+            let recipe = data::RECIPES.iter().find(|r| r.id == recipe_id).unwrap();
+            let researched = vec!["refining".to_string()];
+            for dir in 0..4 {
+                let (dx, dz) = DIRS[dir_index(dir)];
+                let mut m = machine(kind, [0, 2, 0], dir);
+                let mut belt = machine(MachineKind::Belt, [dx, 2, dz], dir);
+                let mut snap = snapshot([
+                    belt.clone(),
+                    machine(MachineKind::Chest, [dx * 2, 2, dz * 2], dir),
+                ]);
+                let belt_entity = snap.pos_index[&belt.pos];
+                let chest_entity = snap.pos_index[&[dx * 2, 2, dz * 2]];
+                let mut crafter = CrafterState {
+                    recipe: Some(recipe_id),
+                    input: recipe
+                        .inputs
+                        .iter()
+                        .map(|(i, n)| (i.to_string(), *n))
+                        .collect(),
+                    ..default()
+                };
+                let mut drops = Vec::new();
+                for _ in 0..140 {
+                    crafter_tick(
+                        &mut m,
+                        &mut crafter,
+                        1.0,
+                        kind.block_key(),
+                        &mut snap,
+                        &mut drops,
+                        &researched,
+                    );
+                    let Some(MachineState::Belt(mut state)) = snap.states.remove(&belt_entity)
+                    else {
+                        panic!("expected belt state");
+                    };
+                    belt_tick(&mut belt, &mut state, 1.0, &mut snap);
+                    snap.states.insert(belt_entity, MachineState::Belt(state));
+                }
+                let MachineState::Chest(chest) = &snap.states[&chest_entity] else {
+                    panic!("expected chest state");
+                };
+                let delivered: i32 = chest
+                    .slots
+                    .iter()
+                    .flatten()
+                    .filter(|slot| slot.item == recipe.output.0)
+                    .map(|slot| slot.n)
+                    .sum();
+                assert_eq!(delivered, recipe.output.1, "{kind:?}, direction {dir}");
+                assert!(crafter.output.is_none());
+                assert!(crafter.input.values().all(|n| *n == 0));
+                assert!(drops.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn crafter_output_waits_for_belt_space_without_losing_items() {
+        let mut m = machine(MachineKind::Assembler, [0, 2, 0], 0);
+        let mut snap = snapshot([machine(MachineKind::Belt, [1, 2, 0], 0)]);
+        let entity = snap.pos_index[&[1, 2, 0]];
+        assert!(machine_insert(
+            &snap.machines[&entity],
+            snap.states.get_mut(&entity).unwrap(),
+            "iron"
+        ));
+        let mut crafter = CrafterState {
+            recipe: Some("gear"),
+            output: Some(Slot {
+                item: "gear".into(),
+                n: 2,
+            }),
+            ..default()
+        };
+        let mut drops = Vec::new();
+        crafter_tick(
+            &mut m,
+            &mut crafter,
+            1.0,
+            "assembler",
+            &mut snap,
+            &mut drops,
+            &[],
+        );
+        assert_eq!(crafter.output.as_ref().unwrap().n, 2);
+        let Some(MachineState::Belt(belt)) = snap.states.get_mut(&entity) else {
+            panic!("expected belt state");
+        };
+        assert_eq!(belt.items.len(), 1);
+        belt.items[0].t = 0.5;
+        crafter_tick(
+            &mut m,
+            &mut crafter,
+            1.0,
+            "assembler",
+            &mut snap,
+            &mut drops,
+            &[],
+        );
+        assert_eq!(crafter.output.as_ref().unwrap().n, 1);
+        let MachineState::Belt(belt) = &snap.states[&entity] else {
+            panic!("expected belt state");
+        };
+        assert_eq!(belt.items.len(), 2);
+        assert_eq!(belt.items[0].item, "iron");
+        assert_eq!(belt.items[1].item, "gear");
+        assert!(drops.is_empty());
     }
 
     #[test]
@@ -1912,6 +3006,14 @@ mod tests {
             MachineKind::Reactor,
             MachineKind::Burner,
             MachineKind::Beacon,
+            MachineKind::Splitter,
+            MachineKind::Filter,
+            MachineKind::Pipe,
+            MachineKind::Pump,
+            MachineKind::Tank,
+            MachineKind::Battery,
+            MachineKind::ColonyCore,
+            MachineKind::Turret,
         ] {
             let st = MachineState::for_kind(kind);
             let save = st.to_save();
@@ -1940,6 +3042,26 @@ mod tests {
                     assert_eq!(a.fuel.is_some(), b.fuel.is_some());
                 }
                 (MachineState::Beacon(a), MachineState::Beacon(b)) => assert_eq!(a.label, b.label),
+                (MachineState::Router(a), MachineState::Router(b)) => {
+                    assert_eq!(a.items.len(), b.items.len());
+                    assert_eq!(a.filter, b.filter);
+                }
+                (MachineState::Tank(a), MachineState::Tank(b)) => {
+                    assert_eq!(a.slots.len(), b.slots.len())
+                }
+                (MachineState::Battery(a), MachineState::Battery(b)) => {
+                    assert!((a.charge - b.charge).abs() < 0.01)
+                }
+                (MachineState::Colony(a), MachineState::Colony(b)) => {
+                    assert_eq!(a.input, b.input);
+                    assert_eq!(a.habitat, b.habitat);
+                    assert_eq!(a.residents, b.residents);
+                    assert_eq!(a.cycles, b.cycles);
+                }
+                (MachineState::Turret(a), MachineState::Turret(b)) => {
+                    assert!((a.cooldown - b.cooldown).abs() < 0.01);
+                    assert_eq!(a.kills, b.kills);
+                }
                 _ => panic!("roundtrip kind mismatch"),
             }
         }
@@ -1971,6 +3093,11 @@ mod tests {
             }
             _ => panic!("expected furnace state"),
         }
+        let MachineState::Chest(chest) = MachineState::from_save(MachineKind::Chest, &data) else {
+            panic!("expected chest state");
+        };
+        assert_eq!(chest.slots.len(), 24);
+        assert!(chest.slots.iter().all(Option::is_none));
     }
 
     #[test]
@@ -1981,5 +3108,126 @@ mod tests {
         assert_eq!(power_gen(MachineKind::Solar), 10.0);
         assert_eq!(power_gen(MachineKind::Reactor), 100.0);
         assert_eq!(power_gen(MachineKind::Burner), 25.0);
+        assert_eq!(power_use(MachineKind::Pump), 2.0);
+        assert_eq!(power_use(MachineKind::ColonyCore), 15.0);
+        assert_eq!(power_use(MachineKind::Turret), 10.0);
+        assert_eq!(power_gen(MachineKind::Geothermal), 45.0);
+    }
+
+    #[test]
+    fn colony_accepts_only_bounded_supplies() {
+        let m = machine(MachineKind::ColonyCore, [0, 0, 0], 0);
+        let mut state = MachineState::for_kind(MachineKind::ColonyCore);
+        assert!(!machine_insert(&m, &mut state, "iron"));
+        for _ in 0..24 {
+            assert!(machine_insert(&m, &mut state, "oxygen_cell"));
+        }
+        assert!(!machine_insert(&m, &mut state, "oxygen_cell"));
+        assert!(machine_insert(&m, &mut state, "medkit"));
+        assert!(machine_insert(&m, &mut state, "biofiber"));
+        assert!(machine_insert(&m, &mut state, "biofiber"));
+        let MachineState::Colony(colony) = state else {
+            panic!("expected colony state");
+        };
+        assert!(colony_supplied(&colony.input));
+    }
+
+    #[test]
+    fn colony_capacity_and_turret_hostility_are_conservative() {
+        assert_eq!(colony_resident_capacity(11), 0);
+        assert_eq!(colony_resident_capacity(12), 3);
+        assert_eq!(colony_resident_capacity(200), 8);
+        assert!(colony_output_room(&None));
+        assert!(colony_output_room(&Some(Slot {
+            item: "data".into(),
+            n: 498,
+        })));
+        assert!(!colony_output_room(&Some(Slot {
+            item: "data".into(),
+            n: 499,
+        })));
+        assert!(turret_targetable("sentinel", 10.0, false, 0.0));
+        assert!(!turret_targetable("crab", 10.0, false, 0.0));
+        assert!(turret_targetable("crab", 10.0, false, 1.0));
+        assert!(!turret_targetable("strider", 10.0, false, 10.0));
+        assert!(!turret_targetable("sentinel", 0.0, false, 0.0));
+        assert!(!turret_targetable("sentinel", 10.0, true, 0.0));
+    }
+
+    #[test]
+    fn colony_save_discards_invalid_inventory_and_output() {
+        let data = MachineDataSave {
+            input_map: HashMap::from([
+                ("oxygen_cell".into(), 2),
+                ("iron".into(), 999),
+                ("biofiber".into(), -3),
+            ]),
+            output: Some(Slot {
+                item: "iron".into(),
+                n: 10,
+            }),
+            habitat: i32::MAX,
+            residents: i32::MAX,
+            cycles: i32::MAX,
+            ..default()
+        };
+        let MachineState::Colony(colony) = MachineState::from_save(MachineKind::ColonyCore, &data)
+        else {
+            panic!("expected colony state");
+        };
+        assert_eq!(colony.input, HashMap::from([("oxygen_cell".into(), 2)]));
+        assert!(colony.output.is_none());
+        assert_eq!(colony.habitat, 10_000);
+        assert_eq!(colony.residents, 8);
+        assert_eq!(colony.cycles, 1_000_000);
+    }
+
+    #[test]
+    fn machine_block_registry_covers_all_declared_machine_ids() {
+        let declared = data::BLOCKS
+            .iter()
+            .filter(|block| block.machine.is_some())
+            .count();
+        assert_eq!(MACHINE_BLOCK_IDS.len(), declared);
+        let unique: HashSet<_> = MACHINE_BLOCK_IDS.into_iter().collect();
+        assert_eq!(unique.len(), MACHINE_BLOCK_IDS.len());
+        for id in MACHINE_BLOCK_IDS {
+            let block = data::block_by_id(id);
+            let kind = MachineKind::from_block_key(block.key);
+            assert_ne!(kind, MachineKind::Other, "unmapped machine {}", block.key);
+            assert_eq!(block.machine, Some(kind.block_key()));
+            assert!(data::ITEMS.iter().any(|item| item.block == Some(block.key)));
+        }
+    }
+
+    #[test]
+    fn fluid_network_rejects_solid_items() {
+        for kind in [MachineKind::Pipe, MachineKind::Pump, MachineKind::Tank] {
+            let m = machine(kind, [0, 0, 0], 0);
+            let mut state = MachineState::for_kind(kind);
+            assert!(machine_insert(&m, &mut state, "coolant"));
+            assert!(!machine_insert(&m, &mut state, "iron"));
+        }
+    }
+
+    #[test]
+    fn filter_router_persists_configuration() {
+        let state = MachineState::Router(RouterState {
+            filter: Some("iron_ore".into()),
+            route: 2,
+            items: vec![BeltItem {
+                item: "copper_ore".into(),
+                t: 0.5,
+            }],
+        });
+        let save = state.to_save();
+        match MachineState::from_save(MachineKind::Filter, &save) {
+            MachineState::Router(router) => {
+                assert_eq!(router.filter.as_deref(), Some("iron_ore"));
+                assert_eq!(router.route, 2);
+                assert_eq!(router.items.len(), 1);
+            }
+            _ => panic!("expected router state"),
+        }
     }
 }

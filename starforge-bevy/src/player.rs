@@ -67,6 +67,76 @@ pub struct Mining {
     pub dig_sound_t: f32,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Equipment {
+    pub suit: Option<String>,
+    pub life_support: Option<String>,
+    pub tool: Option<String>,
+    pub defense: Option<String>,
+}
+
+impl Equipment {
+    fn slot_mut(&mut self, slot: &str) -> Option<&mut Option<String>> {
+        match slot {
+            "suit" => Some(&mut self.suit),
+            "life_support" => Some(&mut self.life_support),
+            "tool" => Some(&mut self.tool),
+            "defense" => Some(&mut self.defense),
+            _ => None,
+        }
+    }
+
+    pub fn equipped(&self) -> impl Iterator<Item = &String> {
+        [
+            self.suit.as_ref(),
+            self.life_support.as_ref(),
+            self.tool.as_ref(),
+            self.defense.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    pub fn bonus(&self, effect: &str) -> f32 {
+        self.equipped()
+            .filter_map(|key| data::item_by_key(key))
+            .filter_map(|item| item.equipment)
+            .filter(|bonus| bonus.effect == effect)
+            .map(|bonus| bonus.amount)
+            .sum()
+    }
+
+    pub fn equip(&mut self, item: &str) -> Result<Option<String>, &'static str> {
+        let bonus = data::item_by_key(item)
+            .and_then(|item| item.equipment)
+            .ok_or("该物品不是装备")?;
+        let slot = self.slot_mut(bonus.slot).ok_or("未知装备槽")?;
+        Ok(slot.replace(item.to_string()))
+    }
+
+    pub fn take_slot(&mut self, slot_name: &str) -> Option<String> {
+        self.slot_mut(slot_name).and_then(Option::take)
+    }
+
+    pub fn sanitize(&mut self) {
+        for (slot_name, equipped) in [
+            ("suit", &mut self.suit),
+            ("life_support", &mut self.life_support),
+            ("tool", &mut self.tool),
+            ("defense", &mut self.defense),
+        ] {
+            let valid = equipped
+                .as_deref()
+                .and_then(data::item_by_key)
+                .and_then(|item| item.equipment)
+                .is_some_and(|bonus| bonus.slot == slot_name);
+            if !valid {
+                *equipped = None;
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct Player {
     pub pos: Vec3,
@@ -78,6 +148,7 @@ pub struct Player {
     pub in_liquid: bool,
     pub stats: Stats,
     pub inv: Inventory,
+    pub equipment: Equipment,
     pub hot_idx: i32, // -1 = mining laser
     pub mining: Option<Mining>,
     pub dmg_acc: f32,
@@ -109,6 +180,7 @@ impl Player {
             in_liquid: false,
             stats: Stats::full(),
             inv: Inventory::default(),
+            equipment: Equipment::default(),
             hot_idx: -1,
             mining: None,
             dmg_acc: 0.0,
@@ -181,6 +253,18 @@ impl Player {
         self.toasts.push((text.into(), 3.0));
     }
 
+    pub fn respawn_at(&mut self, pos: Vec3) {
+        self.pos = pos;
+        self.vel = Vec3::ZERO;
+        self.stats = Stats::full();
+        self.stats.o2 = self.stat_max("o2");
+        self.stats.shield = self.stat_max("shield");
+        self.dead = false;
+        self.respawn_timer = 0.0;
+        self.dmg_acc = 0.0;
+        self.mining = None;
+    }
+
     /// Apply damage: shield first, then hp. Returns true if the player died.
     pub fn damage(&mut self, n: f32) -> bool {
         if self.dead || !n.is_finite() || n <= 0.0 || self.creative() {
@@ -205,11 +289,7 @@ impl Player {
         let Some(def) = CHARGE_DEFS.iter().find(|d| d.0 == system) else {
             return false;
         };
-        let max = match system {
-            "hp" => 8.0,
-            "shield" => 6.0,
-            _ => 100.0,
-        };
+        let max = self.stat_max(system);
         self.stats.get(system) < max - 0.01 && self.inv.count_item(def.1) >= def.2
     }
 
@@ -221,13 +301,24 @@ impl Player {
             return false;
         }
         self.inv.remove_item(def.1, def.2);
-        let max = match system {
-            "hp" => 8.0,
-            "shield" => 6.0,
-            _ => 100.0,
-        };
+        let max = self.stat_max(system);
         *self.stats.get_mut(system) = (self.stats.get(system) + def.3).min(max);
         true
+    }
+
+    pub fn stat_max(&self, system: &str) -> f32 {
+        match system {
+            "hp" => 8.0,
+            "shield" => 6.0 + self.equipment.bonus("shield_capacity"),
+            "o2" => 100.0 + self.equipment.bonus("o2_capacity"),
+            _ => 100.0,
+        }
+    }
+
+    pub fn hazard_resistance(&self, hazard: &str) -> f32 {
+        self.equipment
+            .bonus(&format!("{hazard}_resist"))
+            .clamp(0.0, 0.9)
     }
 }
 
@@ -478,10 +569,7 @@ pub fn survival_system(
             p.respawn_timer -= dt;
             if p.respawn_timer <= 0.0 {
                 let spawn = world.find_spawn(96, 96);
-                p.pos = spawn;
-                p.vel = Vec3::ZERO;
-                p.stats = Stats::full();
-                p.dead = false;
+                p.respawn_at(spawn);
                 p.toast("外骨骼已在重生点重建");
             }
             continue;
@@ -493,7 +581,12 @@ pub fn survival_system(
         let biome = world.biome();
         // O₂ 无条件消耗（JS player.js:700）——与是否在水中无关
         if !p.creative() {
-            p.stats.o2 = (p.stats.o2 - 0.35 * dt).max(0.0);
+            let life_support_mul = if p.equipment.bonus("o2_capacity") > 0.0 {
+                0.75
+            } else {
+                1.0
+            };
+            p.stats.o2 = (p.stats.o2 - 0.35 * life_support_mul * dt).max(0.0);
             if p.stats.o2 <= 0.0 {
                 p.dmg_acc += dt * 0.5;
             }
@@ -510,18 +603,45 @@ pub fn survival_system(
             }
         }
         if p.creative() {
+            let max_o2 = p.stat_max("o2");
+            let max_shield = p.stat_max("shield");
             p.stats.haz = 100.0;
-            p.stats.o2 = 100.0;
-            p.stats.shield = 6.0;
+            p.stats.o2 = max_o2;
+            p.stats.shield = max_shield;
             p.stats.hp = 8.0;
             p.stats.laser = 100.0;
-        } else if biome.haz.is_some() {
-            p.stats.haz = (p.stats.haz - biome.haz_rate * dt).max(0.0);
+        } else if let Some(hazard) = biome.haz {
+            let exposure = 1.0 - p.hazard_resistance(hazard);
+            p.stats.haz = (p.stats.haz - biome.haz_rate * exposure * dt).max(0.0);
+            // Hazards change how the player plans a trip instead of merely
+            // presenting five labels for the same meter drain.
+            match hazard {
+                "heat" if p.stats.haz < 35.0 => {
+                    p.stats.jet = (p.stats.jet - 0.35 * exposure * dt).max(0.0);
+                }
+                "cold" => {
+                    p.stats.jet = (p.stats.jet - 0.18 * exposure * dt).max(0.0);
+                }
+                "toxic" => {
+                    p.stats.o2 = (p.stats.o2 - 0.16 * exposure * dt).max(0.0);
+                }
+                "rad" if p.stats.haz < 20.0 => {
+                    p.dmg_acc += 0.35 * exposure * dt;
+                }
+                "storm" => {
+                    p.stats.shield = (p.stats.shield - 0.12 * exposure * dt).max(0.0);
+                }
+                _ => {}
+            }
         } else {
             p.stats.haz = (p.stats.haz + 2.0 * dt).min(100.0);
         }
         if p.stats.o2 > 20.0 && p.stats.haz > 10.0 {
-            p.stats.shield = (p.stats.shield + 0.15 * dt).min(6.0);
+            let storm_blocks_regen = biome.haz == Some("storm");
+            if !storm_blocks_regen {
+                let max_shield = p.stat_max("shield");
+                p.stats.shield = (p.stats.shield + 0.15 * dt).min(max_shield);
+            }
         }
         if p.stats.haz <= 0.0 && biome.haz.is_some() {
             p.dmg_acc += dt * 0.4;
@@ -648,12 +768,24 @@ pub fn mining_system(
         }
         let origin = p.eye();
         let dir = p.look_dir();
-        let mut laser_mul = if p.stats.laser <= 0.0 { 0.25 } else { 1.0 };
+        let tool_bonus = p.equipment.bonus("laser_efficiency").clamp(0.0, 0.8);
+        let mut laser_mul = if p.stats.laser <= 0.0 {
+            0.25
+        } else {
+            1.0 + tool_bonus
+        };
+        let laser_drain = 1.8 * (1.0 - tool_bonus * 0.7);
         if p.creative() {
             laser_mul = 1.0;
         }
-        // creature hit (nearest within 22)
-        let mut best = 22.0f32;
+        // Creature fire has a longer reach than block mining, but solid
+        // terrain must still occlude it. Without this cap the creature pass
+        // happened before the block raycast and allowed shots through walls.
+        let obstruction = world
+            .raycast(origin, dir, 22.0)
+            .map(|(_, _, distance)| distance)
+            .unwrap_or(22.0);
+        let mut best = obstruction.min(22.0);
         let mut hit_ent = None;
         for (ent, c, tf) in creatures.p0().iter() {
             let center = tf.translation + Vec3::Y * c.height * 0.4;
@@ -683,12 +815,12 @@ pub fn mining_system(
                     };
                     c.hp -= dmg;
                     c.hit_t = 0.25; // 受击反馈（缩放脉冲）
+                    c.aggro_t = 8.0;
                     audio::play(&mut commands, sfx.laser_hit.clone(), 0.5, None);
                 }
             }
             if !p.creative() {
-                let drain = 1.8;
-                p.stats.laser = (p.stats.laser - drain * dt).max(0.0);
+                p.stats.laser = (p.stats.laser - laser_drain * dt).max(0.0);
             }
         } else if let Some((cell, _normal, dist)) = world.raycast(origin, dir, 6.0) {
             let def = data::block_by_id(world.get(cell[0], cell[1], cell[2]));
@@ -719,11 +851,15 @@ pub fn mining_system(
                     }
                 }
                 if !p.creative() {
-                    p.stats.laser = (p.stats.laser - 1.8 * dt).max(0.0);
+                    p.stats.laser = (p.stats.laser - laser_drain * dt).max(0.0);
                 }
             } else {
                 p.mining = None;
-                let drain = if dist < 6.0 { 1.8 } else { 0.9 };
+                let drain = if dist < 6.0 {
+                    laser_drain
+                } else {
+                    laser_drain * 0.5
+                };
                 if !p.creative() {
                     p.stats.laser = (p.stats.laser - drain * dt).max(0.0);
                 }
@@ -731,7 +867,7 @@ pub fn mining_system(
         } else {
             p.mining = None;
             if !p.creative() {
-                p.stats.laser = (p.stats.laser - 0.9 * dt).max(0.0);
+                p.stats.laser = (p.stats.laser - laser_drain * 0.5 * dt).max(0.0);
             }
         }
     }
@@ -763,8 +899,9 @@ pub fn placement_system(
             p.toast(format!("朝向：{}", ["东", "南", "西", "北"][next as usize]));
         }
         // snapshot selected slot (owned clone so we can mutate the player later)
-        let sel_slot = p.selected_item().cloned();
-        let Some(slot) = sel_slot else {
+        let selected_index = p.hot_slot();
+        let sel_slot = selected_index.and_then(|index| p.inv.slots[index].clone());
+        let Some((selected_index, slot)) = selected_index.zip(sel_slot) else {
             continue;
         };
         let Some(item_def) = data::item_by_key(&slot.item) else {
@@ -811,6 +948,11 @@ pub fn placement_system(
         {
             let ok = p.inv.count_item(&slot.item) > 0 || p.creative();
             if ok {
+                if !p.creative() && p.inv.take_from_slot(selected_index, 1).is_none() {
+                    audio::play(&mut commands, sfx.error.clone(), 0.5, None);
+                    p.toast("物品状态已变化，请重试");
+                    continue;
+                }
                 world.set(t[0], t[1], t[2], b_def.id);
                 net_ev.write(crate::network::BlockChanged {
                     x: t[0],
@@ -830,9 +972,6 @@ pub fn placement_system(
                             p.effective_dir(),
                         );
                     }
-                }
-                if !p.creative() {
-                    p.inv.remove_item(&slot.item, 1);
                 }
                 placed_ev.write(crate::quests::PlacedEvent {
                     block: block_key.to_string(),
@@ -934,17 +1073,19 @@ pub fn hotbar_system(
                 let dir = p.look_dir();
                 let drop_pos = p.pos + Vec3::new(dir.x * 0.7, -0.15 + dir.y * 0.5, dir.z * 0.7);
                 let vel = Vec3::new(dir.x * 6.0, dir.y * 6.0 + 2.2, dir.z * 6.0);
+                let Some(taken) = p.inv.take_from_slot(i, n) else {
+                    continue;
+                };
                 spawn_drop(
                     &mut commands,
                     &world,
                     &icons,
                     drop_pos,
                     vel,
-                    s.item.clone(),
-                    n,
+                    taken.item,
+                    taken.n,
                     1.2,
                 );
-                p.inv.remove_item(&s.item, n);
                 audio::play(&mut commands, sfx.click.clone(), 0.4, None);
             }
         }
@@ -1246,5 +1387,35 @@ impl Plugin for PlayerPlugin {
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             );
+    }
+}
+
+#[cfg(test)]
+mod equipment_tests {
+    use super::*;
+
+    #[test]
+    fn equipment_replaces_only_its_slot_and_changes_caps() {
+        let mut player = Player::new(crate::data::Difficulty::Normal);
+        assert_eq!(player.stat_max("o2"), 100.0);
+        assert!(player.equipment.equip("oxygen_tank").unwrap().is_none());
+        assert_eq!(player.stat_max("o2"), 180.0);
+        assert!(player.equipment.equip("thermal_module").unwrap().is_none());
+        let previous = player.equipment.equip("cryo_module").unwrap();
+        assert_eq!(previous.as_deref(), Some("thermal_module"));
+        assert_eq!(player.hazard_resistance("cold"), 0.65);
+        assert_eq!(player.hazard_resistance("heat"), 0.0);
+    }
+
+    #[test]
+    fn equipment_sanitizer_removes_wrong_slot_items() {
+        let mut equipment = Equipment {
+            suit: Some("oxygen_tank".into()),
+            tool: Some("laser_mk2".into()),
+            ..default()
+        };
+        equipment.sanitize();
+        assert!(equipment.suit.is_none());
+        assert_eq!(equipment.tool.as_deref(), Some("laser_mk2"));
     }
 }

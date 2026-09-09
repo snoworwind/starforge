@@ -60,7 +60,8 @@ pub struct QuestDialog {
     pub name: String,
     pub lines: Vec<String>,
     pub idx: usize,
-    pub chars: usize,
+    /// Fractional reveal progress; truncate only when displaying characters.
+    pub chars: f32,
     pub on_close: Option<DialogAction>,
 }
 
@@ -239,18 +240,12 @@ pub fn quest_tick_system(
     }
     // 主线对话框打字机（JS 26 字符/秒）
     if let Some(d) = quests.dialog.as_mut() {
-        d.chars += (dt * 26.0) as usize;
         let cur = &d.lines[d.idx];
-        if d.chars > cur.chars().count() + 8 {
-            d.chars = cur.chars().count();
-        }
+        d.chars = (d.chars + dt * 26.0).min(cur.chars().count() as f32);
     }
     if let Some(d) = quests.side_dialog.as_mut() {
-        d.chars += (dt * 26.0) as usize;
         let cur = &d.lines[d.idx];
-        if d.chars > cur.chars().count() + 8 {
-            d.chars = cur.chars().count();
-        }
+        d.chars = (d.chars + dt * 26.0).min(cur.chars().count() as f32);
     }
     // 大字提示
     if let Some((t, s, dur)) = quests.announce.take() {
@@ -282,7 +277,7 @@ pub fn side_quest_system(
         return;
     }
     let cur = &d.lines[d.idx];
-    let fully_shown = d.chars >= cur.chars().count();
+    let fully_shown = d.chars >= cur.chars().count() as f32;
     let advance = if keys.just_pressed(KeyCode::KeyE) && !ui.locked() {
         if fully_shown {
             if d.idx + 1 < d.lines.len() {
@@ -333,7 +328,7 @@ pub fn side_quest_system(
     };
     if advance && let Some(d) = quests.side_dialog.as_mut() {
         d.idx += 1;
-        d.chars = 0;
+        d.chars = 0.0;
     }
 }
 
@@ -453,7 +448,7 @@ pub fn village_side_quest_system(
                     "再按一次 E 交付。".into(),
                 ],
                 idx: 0,
-                chars: 0,
+                chars: 0.0,
                 on_close: Some(DialogAction::SideReward),
             });
         }
@@ -462,7 +457,7 @@ pub fn village_side_quest_system(
                 name: "村民".into(),
                 lines: vec!["谢谢！".into(), "村庄永远不会忘记你。".into()],
                 idx: 0,
-                chars: 0,
+                chars: 0.0,
                 on_close: None,
             });
         }
@@ -476,7 +471,7 @@ pub fn village_side_quest_system(
                     "采够了再按一次 E 交付。".into(),
                 ],
                 idx: 0,
-                chars: 0,
+                chars: 0.0,
                 on_close: Some(DialogAction::SideReward),
             });
         }
@@ -520,6 +515,128 @@ mod tests {
         p.inv.add_item("sodium", 10);
         p.inv.add_item("stone", 20);
         p
+    }
+
+    fn dialog_test_app(fps: u32) -> App {
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f64(1.0 / fps as f64));
+        let mut app = App::new();
+        app.insert_resource(time)
+            .init_resource::<Quests>()
+            .init_resource::<crate::ui::Research>()
+            .add_message::<PlacedEvent>()
+            .add_message::<FlagEvent>()
+            .add_message::<BigMessageEvent>()
+            .add_systems(Update, quest_tick_system);
+        app
+    }
+
+    #[test]
+    fn dialog_typewriter_progresses_at_common_frame_rates() {
+        for fps in [15, 30, 60, 144] {
+            let mut app = dialog_test_app(fps);
+            let dialog = QuestDialog {
+                name: "村民".into(),
+                lines: vec!["星".repeat(80)],
+                idx: 0,
+                chars: Default::default(),
+                on_close: None,
+            };
+            {
+                let mut quests = app.world_mut().resource_mut::<Quests>();
+                quests.dialog = Some(dialog.clone());
+                quests.side_dialog = Some(dialog);
+            }
+            for _ in 0..fps {
+                app.update();
+            }
+            {
+                let quests = app.world().resource::<Quests>();
+                for dialog in [&quests.dialog, &quests.side_dialog] {
+                    let shown = dialog.as_ref().unwrap().chars as usize;
+                    assert!(
+                        (25..=26).contains(&shown),
+                        "{fps} FPS must reveal about 26 characters in one second, got {shown}"
+                    );
+                }
+            }
+            for _ in 0..fps * 3 {
+                app.update();
+            }
+            let quests = app.world().resource::<Quests>();
+            for dialog in [&quests.dialog, &quests.side_dialog] {
+                assert_eq!(dialog.as_ref().unwrap().chars as usize, 80);
+            }
+        }
+    }
+
+    #[test]
+    fn dialog_typewriter_allows_side_quest_completion_at_sixty_fps() {
+        let mut app = dialog_test_app(60);
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::ui::UiState>()
+            .insert_resource(crate::audio::Sfx::build(&mut Assets::default(), 0.0))
+            .add_systems(Update, side_quest_system.after(quest_tick_system));
+        let player = app.world_mut().spawn(test_player(false)).id();
+        {
+            let mut quests = app.world_mut().resource_mut::<Quests>();
+            quests.side = Some(SideQuest {
+                item: "carbon".into(),
+                need: 10,
+                reward: 150,
+                x: 0,
+                z: 0,
+                done: false,
+            });
+            quests.side_dialog = Some(QuestDialog {
+                name: "村民".into(),
+                lines: vec!["旅行者，请带来十块碳。".into(), "谢谢你的帮助！".into()],
+                idx: 0,
+                chars: Default::default(),
+                on_close: Some(DialogAction::SideReward),
+            });
+        }
+        for line in 0..2 {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyE);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset_all();
+            assert_eq!(
+                app.world()
+                    .resource::<Quests>()
+                    .side_dialog
+                    .as_ref()
+                    .unwrap()
+                    .idx,
+                line,
+                "E must wait for the current line to finish appearing"
+            );
+            for _ in 0..120 {
+                app.update();
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyE);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset_all();
+            if line == 0 {
+                let quests = app.world().resource::<Quests>();
+                let dialog = quests.side_dialog.as_ref().unwrap();
+                assert_eq!(dialog.idx, 1, "E must advance the completed first line");
+                assert_eq!(dialog.chars as usize, 0);
+            }
+        }
+        let quests = app.world().resource::<Quests>();
+        assert!(quests.side_dialog.is_none());
+        assert!(quests.side.as_ref().unwrap().done);
+        let player = app.world().get::<Player>(player).unwrap();
+        assert_eq!(player.inv.count_item("carbon"), 20);
+        assert_eq!(player.credits, 150);
     }
 
     #[test]
@@ -630,7 +747,7 @@ mod tests {
             name: "村民".into(),
             lines: vec!["交付".into()],
             idx: 0,
-            chars: 0,
+            chars: 0.0,
             on_close: Some(DialogAction::SideReward),
         });
         let before = p.inv.count_item("carbon");

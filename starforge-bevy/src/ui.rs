@@ -889,10 +889,20 @@ pub fn hud_system(
     if let Some(qs) = quests.as_ref() {
         if let Some(d) = &qs.dialog {
             let cur = &d.lines[d.idx];
-            dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
+            dialog = Some((
+                d.name.clone(),
+                cur.clone(),
+                d.chars as usize,
+                cur.chars().count(),
+            ));
         } else if let Some(d) = &qs.side_dialog {
             let cur = &d.lines[d.idx];
-            dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
+            dialog = Some((
+                d.name.clone(),
+                cur.clone(),
+                d.chars as usize,
+                cur.chars().count(),
+            ));
         }
     }
     if let Some((name, text, chars, total)) = dialog {

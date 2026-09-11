@@ -80,6 +80,8 @@ pub enum GameSet {
     LateSwitchSky,
     /// Cursor grab/visibility (player-owned).
     LateSwitchCursor,
+    /// Record all frame events before guild claims, HUD and save snapshots.
+    FrontierProgress,
     /// Build ghost preview.
     HudGhostUi,
     /// Laser beam + interact prompt.
@@ -154,6 +156,7 @@ pub fn configure(app: &mut App) {
                 GameSet::LateSwitchFlow,
                 GameSet::LateSwitchSky,
                 GameSet::LateSwitchCursor,
+                GameSet::FrontierProgress,
                 GameSet::HudGhostUi,
                 GameSet::HudGhostPlayer,
             )

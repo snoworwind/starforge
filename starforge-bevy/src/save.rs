@@ -252,6 +252,9 @@ pub struct WorldData {
     /// 当前村庄支线；对话本身是瞬时 UI，不进入存档。
     #[serde(default)]
     pub side_quest: Option<crate::quests::SideQuest>,
+    /// Guild progression belongs to the world and survives planet/galaxy travel.
+    #[serde(default)]
+    pub frontier: crate::frontier::Frontier,
     /// 当前活动星球的机器状态。
     #[serde(default)]
     pub machines: Vec<crate::factory::MachineSave>,
@@ -509,6 +512,7 @@ pub fn save_world_full(
     warp_lock: Option<&crate::space::WarpLock>,
     placed: &HashMap<String, i32>,
     side_quest: Option<&crate::quests::SideQuest>,
+    frontier: &crate::frontier::Frontier,
     machines: &[crate::factory::MachineSave],
     visited: &HashMap<usize, crate::space::PlanetArchive>,
     archives: &HashMap<u32, crate::space::GalaxyArchive>,
@@ -538,6 +542,7 @@ pub fn save_world_full(
         warp_lock: warp_lock.cloned(),
         placed: placed.clone(),
         side_quest: side_quest.cloned(),
+        frontier: frontier.clone(),
         machines: machines.to_vec(),
         visited: visited.clone(),
         archives: archives.clone(),
@@ -567,6 +572,7 @@ pub fn save_world(world: &World, name: &str, day_t: f32) -> bool {
         None,
         &HashMap::new(),
         None,
+        &crate::frontier::Frontier::default(),
         &[],
         &HashMap::new(),
         &HashMap::new(),
@@ -668,6 +674,7 @@ pub fn load_world(name: &str) -> Option<WorldData> {
             && quest.x.unsigned_abs() <= 1_000_000
             && quest.z.unsigned_abs() <= 1_000_000
     });
+    data.frontier.sanitize();
     data.machines.truncate(200_000);
     sanitize_planet_map(&mut data.visited);
     sanitize_creature_records(&mut data.creatures, &mut data.creature_cells);
@@ -1097,6 +1104,8 @@ mod tests {
         });
         let legacy: WorldData = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(legacy.world_in_current_galaxy, None);
+        assert_eq!(legacy.frontier.reputation, 0);
+        assert!(legacy.frontier.routes.is_empty());
         for owned in [false, true] {
             json["world_in_current_galaxy"] = owned.into();
             let saved: WorldData = serde_json::from_value(json.clone()).unwrap();
@@ -1104,6 +1113,29 @@ mod tests {
                 serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
             assert_eq!(restored.world_in_current_galaxy, Some(owned));
         }
+    }
+
+    #[test]
+    fn world_roundtrip_preserves_frontier_and_claimed_rewards() {
+        let mut saved: WorldData = serde_json::from_value(serde_json::json!({
+            "v": 5, "kind": "world", "name": "guild", "seed": 42,
+            "biome": "lush", "day_t": 0.3, "mods": {}
+        }))
+        .unwrap();
+        saved.frontier.accept(0, 42, &[]).unwrap();
+        saved
+            .frontier
+            .start_route("shelter", &HashMap::new())
+            .unwrap();
+        saved.frontier.reputation = 77;
+        saved.frontier.milestones.insert("first_order".into());
+        saved.frontier.record_event("pirateDefeated");
+        let restored: WorldData =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored.frontier).unwrap(),
+            serde_json::to_value(&saved.frontier).unwrap()
+        );
     }
 
     #[test]

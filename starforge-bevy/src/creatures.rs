@@ -1372,6 +1372,7 @@ pub fn creature_despawn_system(
     world: Res<World>,
     icons: Res<crate::ui::IconMaterials>,
     sfx: Res<crate::audio::Sfx>,
+    mut flags: MessageWriter<crate::quests::FlagEvent>,
 ) {
     for (e, c, tf) in &creatures {
         if c.hp > 0.0 {
@@ -1392,6 +1393,9 @@ pub fn creature_despawn_system(
             (tf.translation.x as u32).wrapping_mul(31) ^ (tf.translation.z as u32).wrapping_mul(57),
         );
         if c.kind == "sentinel" {
+            flags.write(crate::quests::FlagEvent {
+                flag: "sentinelDefeated".into(),
+            });
             // 遗迹守卫（JS）：电路板×1 + 装甲板×1(50%)
             spawn_drop(
                 &mut commands,

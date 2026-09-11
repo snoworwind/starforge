@@ -12,6 +12,8 @@ mod data;
 mod daynight;
 mod factory;
 mod feedback;
+mod frontier;
+mod frontier_ui;
 mod inventory;
 mod lod;
 mod materials;
@@ -128,9 +130,31 @@ fn smoke_exit(
     mut save_ev: MessageWriter<ui::SaveEvent>,
     chunks: Query<&Visibility, With<ChunkMesh>>,
     clear: Res<ClearColor>,
+    mut ui_state: ResMut<UiState>,
+    mut commands: Commands,
 ) {
     if let Some(mut f) = flag {
         f.frames += 1;
+        // Exercise every guild page inside the real egui/render schedule.
+        // Optional captures are useful for visual review without UI automation.
+        if [20, 40, 60, 80].contains(&f.frames) {
+            ui_state.panel = ui::Panel::Frontier;
+            ui_state.frontier_tab = ((f.frames - 20) / 20) as usize;
+            println!("SMOKE_FRONTIER tab={}", ui_state.frontier_tab);
+        }
+        if [30, 50, 70, 90].contains(&f.frames)
+            && let Ok(dir) = std::env::var("STARFORGE_SMOKE_CAPTURE")
+        {
+            use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+            let path =
+                std::path::Path::new(&dir).join(format!("frontier-{}.png", ui_state.frontier_tab));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
+        }
+        if f.frames == 100 {
+            ui_state.close_panel();
+        }
         // 自测第二阶段：120 帧后切换到太空，验证太空场景/飞行/相机管线。
         // 出球点取近赤道方向（Y≈0），使旧代码的"按玩家高度算太空因子"必然退化成大气色，
         // 以覆盖"太空背景变大气色"回归。
@@ -1356,6 +1380,7 @@ fn spawn_scene(
         game.archives = wd.archives.clone();
         quests.placed = wd.placed.clone();
         quests.side = wd.side_quest.clone();
+        quests.frontier = wd.frontier.clone();
         saved_ship_hp = wd
             .ship_state
             .as_ref()
@@ -1956,6 +1981,7 @@ fn save_system(
                 game.warp_lock.as_ref(),
                 &quests.placed,
                 quests.side.as_ref(),
+                &quests.frontier,
                 &machines_save,
                 &game.visited,
                 &game.archives,

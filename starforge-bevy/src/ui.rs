@@ -18,6 +18,7 @@ use std::collections::HashMap;
 #[derive(Resource, Default)]
 pub struct UiState {
     pub panel: Panel,
+    pub frontier_tab: usize,
     pub prompt: Option<String>,
     pub selected_inv: Option<usize>,
     /// 背包拖拽手持物品（JS cursorStack 移植）
@@ -60,6 +61,8 @@ pub enum Panel {
     Station,
     /// 空间站买船中心（停泊服务菜单进入）
     BuyShip,
+    /// 边疆公会（L）：委托、远征、调查、里程碑。
+    Frontier,
 }
 
 impl UiState {
@@ -585,7 +588,39 @@ pub fn hud_system(
                     }
                     ui.label(rt);
                 }
-                if let Some(sq) = &qs.side {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "L 边疆公会 · {}",
+                        crate::frontier::RANKS[qs.frontier.rank()].0
+                    ))
+                    .size(12.0),
+                );
+                if let Some(id) = qs.frontier.tracked.as_deref()
+                    && let Some(route) = crate::frontier::EXPEDITIONS.iter().find(|r| r.id == id)
+                    && let Some(progress) = qs.frontier.routes.get(id)
+                    && let Some(step) = route.steps.get(progress.stage)
+                {
+                    ui.label(
+                        egui::RichText::new(format!("▸ {} · {}/4", route.name, progress.stage + 1))
+                            .size(12.0),
+                    );
+                    let (have, need) =
+                        qs.frontier
+                            .route_progress(route, p, &qs.placed, &research.techs);
+                    ui.label(
+                        egui::RichText::new(format!("{} · {have}/{need}", step.title)).size(12.0),
+                    );
+                }
+                let orders = qs.frontier.active.iter().flatten().count();
+                if orders > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("补给委托：{orders}/3 进行中")).size(12.0),
+                    );
+                }
+                if let Some(sq) = &qs.side
+                    && !sq.done
+                {
                     ui.separator();
                     ui.label(
                         egui::RichText::new(format!(
@@ -3325,6 +3360,13 @@ pub fn panel_hotkeys_system(
     {
         ui_state.panel = Panel::Tech;
     }
+    if keys.just_pressed(KeyCode::KeyL) {
+        if ui_state.panel == Panel::Frontier {
+            ui_state.close_panel();
+        } else if !ui_state.locked() {
+            ui_state.panel = Panel::Frontier;
+        }
+    }
     // O：Bevy 原生联机面板
     if keys.just_pressed(KeyCode::KeyO) && !ui_state.locked() {
         ui_state.panel = Panel::Network;
@@ -3431,7 +3473,7 @@ pub fn scan_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<ScanState>,
     time: Res<Time>,
-    player: Query<&Player>,
+    mut player: Query<&mut Player>,
     ui: Res<UiState>,
     world: Res<World>,
     research: Res<Research>,
@@ -3442,10 +3484,13 @@ pub fn scan_system(
     mut markers: Query<(Entity, &mut ScanMarker, &Transform), Without<ScanRing>>,
     mut rings: Query<(Entity, &mut ScanRing, &mut Transform), Without<ScanMarker>>,
     sfx: Res<audio::Sfx>,
+    mut quests: ResMut<crate::quests::Quests>,
 ) {
     let dt = time.delta_secs();
     state.cd = (state.cd - dt).max(0.0);
-    let Ok(p) = player.single() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     // 扫描环动画：扩张 + 淡出（JS 同口径：r = t*480，1.4s 生命周期）
     for (e, mut ring, mut tf) in &mut rings {
         ring.t += dt;
@@ -3474,6 +3519,18 @@ pub fn scan_system(
             return;
         }
         state.cd = 6.0;
+        if !p.creative() && !p.dead {
+            let sample = crate::frontier::Sample {
+                seed: world.seed,
+                x: p.pos.x,
+                z: p.pos.z,
+            };
+            let biome = world.biome();
+            if quests.frontier.scan(biome.key, sample) {
+                let count = quests.frontier.samples[biome.key].len();
+                p.toast(format!("{} · 调查 {count}/3 · L 打开生态图鉴", biome.name));
+            }
+        }
         audio::play(&mut commands, sfx.pickup.clone(), 0.6, None);
         let range: i32 = if research.techs.iter().any(|t| t == "scan2") {
             80
@@ -4010,6 +4067,9 @@ pub fn station_services_panel_system(
                 .clicked()
             {
                 ui_state.panel = Panel::Garage;
+            }
+            if ui.button("边疆公会 · 委托与远征").clicked() {
+                ui_state.panel = Panel::Frontier;
             }
             ui.separator();
             ui.label(egui::RichText::new("Esc 关闭 · W 离站").size(12.0));
@@ -4827,7 +4887,12 @@ impl Plugin for UiPlugin {
                     pause_panel_system.in_set(GameSet::PanelPause),
                     trade_panel_system.in_set(GameSet::PanelTrade),
                     garage_panel_system.in_set(GameSet::PanelGarage),
-                    station_services_panel_system.in_set(GameSet::PanelStationServices),
+                    (
+                        station_services_panel_system,
+                        crate::frontier_ui::panel_system,
+                    )
+                        .chain()
+                        .in_set(GameSet::PanelStationServices),
                 )
                     .chain()
                     .run_if(in_state(GameState::Playing)),

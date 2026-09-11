@@ -1373,6 +1373,7 @@ pub fn creature_despawn_system(
     icons: Res<crate::ui::IconMaterials>,
     sfx: Res<crate::audio::Sfx>,
     mut flags: MessageWriter<crate::quests::FlagEvent>,
+    mut stats: ResMut<crate::achievements::PlayerStats>,
 ) {
     for (e, c, tf) in &creatures {
         if c.hp > 0.0 {
@@ -1477,6 +1478,12 @@ pub fn creature_despawn_system(
                 }
                 spawner.herds.remove(&nid);
             }
+            stats.add(crate::achievements::Metric::CreaturesKilled, 1.0);
+        }
+        // Sentinels count separately (the sentinel branch above is the first
+        // `if`, so detect the kind for the stat).
+        if c.kind == "sentinel" {
+            stats.add(crate::achievements::Metric::SentinelsKilled, 1.0);
         }
         commands.entity(e).despawn();
     }
@@ -1701,6 +1708,7 @@ pub fn drops_system(
     mut player: Query<&mut Player>,
     world: Res<World>,
     sfx: Res<crate::audio::Sfx>,
+    mut stats: ResMut<crate::achievements::PlayerStats>,
 ) {
     let dt = time.delta_secs();
     let Ok(mut p) = player.single_mut() else {
@@ -1860,6 +1868,7 @@ pub fn drops_system(
                     let take = d.n.min(room);
                     let added = p.inv.add_item(&d.item, take);
                     d.n -= added;
+                    stats.add(crate::achievements::Metric::ItemsPicked, added as f64);
                     if d.n <= 0 {
                         commands.entity(e).despawn();
                         pickup_sound = true;
@@ -1931,6 +1940,7 @@ mod tests {
         app.insert_resource(time)
             .insert_resource(World::new(42, "lush", 3))
             .insert_resource(crate::audio::Sfx::build(&mut Assets::default(), 0.0))
+            .init_resource::<crate::achievements::PlayerStats>()
             .add_systems(Update, drops_system);
         app
     }

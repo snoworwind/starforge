@@ -758,6 +758,7 @@ pub fn bolt_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut feedback: ResMut<crate::feedback::FeedbackAssets>,
+    mut feel: ResMut<crate::camera_fx::CameraFeel>,
     mut bolt_assets: Local<
         Option<(
             Handle<Mesh>,
@@ -817,6 +818,7 @@ pub fn bolt_system(
             _ => (0.22, &[-0.9, 0.9]),
         };
         ship.fire_cd = cooldown;
+        feel.add_trauma(crate::camera_fx::shake::WEAPON_FIRE);
         let (base_damage, smul) = weapon_spec(&ship_asset.data.cls);
         let dmg = base_damage
             * if data::tech_unlocked(&research.techs, "combat") {
@@ -1309,6 +1311,14 @@ fn move_visitor(transform: &mut Transform, target: Vec3, speed: f32, dt: f32) ->
 /// Visitor traffic: cruise between planets, claim one of three non-player
 /// hangar pads, fly the full approach, park, and later depart.
 #[allow(clippy::too_many_arguments)]
+/// Feedback handles used by space actors (kept as one SystemParam because the
+/// visitor system already sits at Bevy's parameter limit).
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct SpaceFeedback<'w> {
+    pub feel: ResMut<'w, crate::camera_fx::CameraFeel>,
+    pub screen: ResMut<'w, crate::screen_fx::ScreenFx>,
+}
+
 pub fn visitor_system(
     time: Res<Time>,
     mode: Res<FlightMode>,
@@ -1324,6 +1334,7 @@ pub fn visitor_system(
     mut big_ev: MessageWriter<BigMessageEvent>,
     mut respawn: ResMut<VisitorRespawn>,
     mut traffic: ResMut<VisitorTraffic>,
+    mut feedback: SpaceFeedback,
     mut visitors: Query<(Entity, &mut VisitorShip, &mut Transform)>,
 ) {
     if !matches!(*mode, FlightMode::Space | FlightMode::Station) {
@@ -1427,6 +1438,12 @@ pub fn visitor_system(
                     p.damage(damage);
                     p.toast(format!("遭到 {} 级掠夺者攻击", visitor.cls));
                 }
+                feedback
+                    .feel
+                    .add_trauma(crate::camera_fx::shake::SHIP_HIT * 0.7);
+                feedback
+                    .screen
+                    .ship_hit(transform.translation, ship.pos, 0.85);
                 crate::audio::play_spatial(
                     &mut commands,
                     sfx.laser_hit.clone(),
@@ -3517,6 +3534,7 @@ pub fn warp_system(
     mut big_ev: MessageWriter<BigMessageEvent>,
     mut arrive_ev: MessageWriter<WarpArriveEvent>,
     mut flight_cam: ResMut<FlightCamera>,
+    mut feel: ResMut<crate::camera_fx::CameraFeel>,
     world: Res<VoxelWorld>,
     machines: Query<(Entity, &factory::Machine, &factory::MachineState)>,
     spawner: Res<crate::creatures::CreatureSpawner>,
@@ -3530,6 +3548,14 @@ pub fn warp_system(
     }
     let dt = time.delta_secs();
     anim.t += dt;
+    // One hard kick on ignition, then a low continuous rumble while the drive
+    // is spinning up.
+    if anim.t < dt * 1.5 {
+        feel.add_trauma(crate::camera_fx::shake::WARP);
+    }
+    if anim.t < WARP_LAUNCH {
+        feel.add_trauma(0.004);
+    }
     let total = WARP_LAUNCH + WARP_RIDE;
     if anim.t < WARP_LAUNCH {
         let ak = (anim.t / (WARP_LAUNCH * 0.7)).clamp(0.0, 1.0);
@@ -3850,6 +3876,7 @@ pub fn atmoland_system(
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
     mut player: Query<&mut Player>,
+    mut ship_fx: crate::particles::ParticleSystem,
 ) {
     if *next_mode != FlightMode::AtmoLand {
         return;
@@ -3859,6 +3886,20 @@ pub fn atmoland_system(
     let t = land.t.min(1.0);
     let ease = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
     ship.pos = land.from.lerp(land.to, ease);
+    // Descent thruster plume follows the ship down.
+    let descent_dir = (land.to - land.from).normalize_or_zero();
+    if t < 0.95 {
+        ship_fx.emit(
+            crate::particles::ParticleStyle::Thruster,
+            ship.pos + descent_dir * 1.6,
+            crate::particles::EmitOptions::default()
+                .count(2)
+                .dir(-descent_dir)
+                .speed(4.0, 9.0)
+                .spread(0.4)
+                .size_scale(1.2),
+        );
+    }
     // 让地面玩家实体与降落中的飞船保持同一坐标；否则流式中心和相机在
     // AtmoLand → Seated 的交接帧仍使用登船前的旧位置。
     if let Ok(mut p) = player.single_mut() {
@@ -3889,6 +3930,71 @@ pub fn atmoland_system(
             dur: 2.2,
         });
         crate::audio::play(&mut commands, sfx.jump.clone(), 0.6, None);
+        ship_fx.landing(land.to, 0.85);
+    }
+}
+
+/// Engine exhaust, reentry sparks and in-flight rumble. Runs in the space
+/// presentation set so it always sees the final ship pose for the frame.
+pub fn ship_fx_system(
+    mode: Res<FlightMode>,
+    ship: Res<ShipState>,
+    ship_asset: Res<ShipAsset>,
+    mut feel: ResMut<crate::camera_fx::CameraFeel>,
+    mut fx: crate::particles::ParticleSystem,
+) {
+    if !matches!(
+        *mode,
+        FlightMode::Atmo | FlightMode::Space | FlightMode::AtmoLand
+    ) {
+        return;
+    }
+    let q = ship_quat(ship.yaw, ship.pitch, ship.roll);
+    let fwd = ship_forward(ship.yaw, ship.pitch);
+    let speed_ratio = (ship.speed.abs() / 130.0).clamp(0.0, 1.8);
+    let warm = ship.hp < ship.hp_max * 0.35;
+    if matches!(*mode, FlightMode::Atmo | FlightMode::Space) && (speed_ratio > 0.05 || ship.pulsing)
+    {
+        let nozzles: &[f32] = match ship_asset.data.cls.as_str() {
+            "A" => &[-0.8, 0.8],
+            "S" => &[0.0],
+            _ => &[-0.5, 0.5],
+        };
+        for offset in nozzles {
+            let base = ship.pos - fwd * 1.7 + q * Vec3::X * *offset;
+            let power = speed_ratio * 0.85 + if ship.pulsing { 0.7 } else { 0.0 };
+            fx.thruster(base, -fwd, power, warm);
+        }
+        // A light rumble keeps the cockpit feeling alive; pulse drive is
+        // noticeably stronger.
+        let rumble = 0.004 + speed_ratio * 0.012;
+        feel.add_trauma(rumble * if ship.pulsing { 2.4 } else { 1.0 });
+    }
+    if ship.reentry_t > 0.0 {
+        let strength = ship.reentry_t.min(1.0);
+        feel.add_trauma(0.22 * strength);
+        let side = q * Vec3::X;
+        let back = -fwd;
+        fx.emit(
+            crate::particles::ParticleStyle::Spark,
+            ship.pos + side * 1.4 + back * 1.2 + Vec3::Y * 0.3,
+            crate::particles::EmitOptions::default()
+                .count(2)
+                .dir(back)
+                .speed(3.0, 8.0)
+                .spread(1.2)
+                .size_scale(1.3),
+        );
+        fx.emit(
+            crate::particles::ParticleStyle::Spark,
+            ship.pos - side * 1.4 + back * 1.2 - Vec3::Y * 0.2,
+            crate::particles::EmitOptions::default()
+                .count(2)
+                .dir(back)
+                .speed(3.0, 8.0)
+                .spread(1.2)
+                .size_scale(1.3),
+        );
     }
 }
 
@@ -3913,19 +4019,57 @@ pub fn seated_camera_system(
 // ---------- 相机驱动 ----------
 
 /// 飞行相机（Atmo/Space/Warping/Station 由各自系统写 FlightCamera，本系统应用）。
+/// Smooths the ship camera so rigid-body flight reads as weight instead of
+/// teleporting. Snaps on mode changes to avoid cross-scene swoops.
+#[derive(Resource)]
+pub struct FlightCameraFeel {
+    pos: crate::tween::SpringVec3,
+    rot: Quat,
+    fov: f32,
+    last_mode: FlightMode,
+    initialized: bool,
+}
+
+impl Default for FlightCameraFeel {
+    fn default() -> Self {
+        Self {
+            pos: crate::tween::SpringVec3::new(Vec3::ZERO, 90.0, 0.95),
+            rot: Quat::IDENTITY,
+            fov: 75.0,
+            last_mode: FlightMode::Planet,
+            initialized: false,
+        }
+    }
+}
+
 pub fn flight_camera_system(
+    time: Res<Time>,
     mode: Res<FlightMode>,
     flight_cam: Res<FlightCamera>,
+    mut feel: ResMut<FlightCameraFeel>,
     mut cam: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<Player>)>,
 ) {
     if !mode.ship_cam() {
+        feel.initialized = false;
         return;
     }
+    let dt = time.delta_secs().clamp(0.0, 0.1);
+    if !feel.initialized || feel.last_mode != *mode {
+        feel.pos.jump(flight_cam.pos);
+        feel.rot = flight_cam.rot;
+        feel.fov = flight_cam.fov;
+        feel.initialized = true;
+    }
+    feel.last_mode = *mode;
+    let position = feel.pos.update(flight_cam.pos, dt);
+    let blend = 1.0 - (-16.0 * dt).exp();
+    feel.rot = feel.rot.slerp(flight_cam.rot, blend);
+    feel.fov += (flight_cam.fov - feel.fov) * blend;
     for (mut tf, mut proj) in &mut cam {
-        tf.translation = flight_cam.pos;
-        tf.rotation = flight_cam.rot;
+        tf.translation = position;
+        tf.rotation = feel.rot;
         *proj = Projection::Perspective(PerspectiveProjection {
-            fov: flight_cam.fov.to_radians(),
+            fov: feel.fov.to_radians(),
             far: CAM_FAR,
             ..default()
         });
@@ -4175,6 +4319,7 @@ impl Plugin for SpacePlugin {
             .insert_resource(ShipRecall::default())
             .insert_resource(SpaceInput::default())
             .insert_resource(FlightCamera::default())
+            .init_resource::<FlightCameraFeel>()
             .insert_resource(ShipCam::default())
             .insert_resource(WarpAnim::default())
             .insert_resource(WarpVisuals::default())
@@ -4236,6 +4381,7 @@ impl Plugin for SpacePlugin {
                     sphere_fade_system,
                     engine_loop_system,
                     ship_sync_system,
+                    ship_fx_system,
                     flight_camera_system,
                     space_stars_follow_system,
                 )
@@ -4278,6 +4424,7 @@ mod tests {
                     .insert_resource(VoxelWorld::new(42, "lush", 3))
                     .insert_resource(FlightMode::Planet)
                     .insert_resource(ShipState::default())
+                    .init_resource::<crate::achievements::PlayerStats>()
                     .add_message::<FlagEvent>()
                     .add_message::<BigMessageEvent>()
                     .add_systems(

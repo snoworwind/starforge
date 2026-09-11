@@ -14,6 +14,8 @@ cargo run -- --smoke
 
 See [`starforge-bevy/README.md`](starforge-bevy/README.md) for the feature list, controls, asset licenses, and test commands.
 
+New in this revision: a **procedural real-time soundtrack** (separate soundscapes per planet, cave, space, station and warp, adaptive to combat and day/night), synthesized ambience beds, weather events (thunderstorms, auroras, sandstorms, meteor showers), 20+ particle presets, camera shake and first-person feel, voxel ambient occlusion, exoskeleton abilities, a discovery codex (**K**), 40+ achievements (**J**), a minimap (**N**), photo mode (**F2**) and contextual onboarding.
+
 The **Frontier Guild expansion** adds 30 renewable supply contracts, six expeditions with 24 stages, surveys for all 16 biomes, 12 milestones, and repeatable village requests. Press **L** to open the terminal and **C** on the ground to collect survey records. Existing saves are supported. See the [expansion and review notes](starforge-bevy/FRONTIER_EXPANSION.md) (Chinese).
 
 ## Legacy web archive

@@ -5,8 +5,12 @@
 // Bevy systems naturally expose their resources and queries as function parameters.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+mod achievements;
 mod audio;
+mod blueprint;
+mod camera_fx;
 mod char;
+mod codex;
 mod creatures;
 mod data;
 mod daynight;
@@ -16,19 +20,30 @@ mod frontier;
 mod frontier_ui;
 mod inventory;
 mod lod;
+mod machine_fx;
 mod materials;
+mod minimap;
+mod music;
 mod network;
+mod particles;
+mod photo;
 mod planet_scale;
 mod player;
 mod quests;
 mod rng;
 mod save;
 mod schedule;
+mod screen_fx;
 mod space;
 mod station;
+mod storms;
+mod suit;
 mod textures;
+mod tutorial;
+mod tween;
 mod ui;
 mod weather;
+mod wildlife;
 mod world;
 
 use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
@@ -249,11 +264,22 @@ impl PluginGroup for StarForgePlugins {
             .add(inventory::InventoryPlugin)
             .add(save::SaveSettingsPlugin(self.settings))
             .add(audio::GameAudioPlugin)
+            .add(music::MusicPlugin)
             .add(textures::TexturePlugin)
             .add(feedback::FeedbackPlugin)
+            .add(particles::ParticlePlugin)
+            .add(camera_fx::CameraFxPlugin)
             .add(ui::UiPlugin)
+            .add(codex::CodexPlugin)
+            .add(achievements::AchievementsPlugin)
+            .add(blueprint::BlueprintPlugin)
+            .add(tutorial::TutorialPlugin)
+            .add(minimap::MinimapPlugin)
+            .add(photo::PhotoPlugin)
+            .add(screen_fx::ScreenFxPlugin)
             .add(quests::QuestsPlugin)
             .add(char::CharPlugin)
+            .add(suit::SuitPlugin)
             .add(materials::MaterialsPlugin)
             .add(daynight::DayNightPlugin {
                 lighting: self.lighting_tuning,
@@ -263,8 +289,11 @@ impl PluginGroup for StarForgePlugins {
             })
             .add(player::PlayerPlugin)
             .add(creatures::CreaturesPlugin)
+            .add(wildlife::WildlifePlugin)
             .add(factory::FactoryPlugin)
+            .add(machine_fx::MachineFxPlugin)
             .add(station::StationPlugin)
+            .add(storms::StormPlugin)
             .add(space::SpacePlugin)
             .add(network::NetworkPlugin)
             .add(lod::LodPlugin)

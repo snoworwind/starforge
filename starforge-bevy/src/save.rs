@@ -957,6 +957,14 @@ pub struct Settings {
     pub lod_mode: LodMode,
     pub mouse_sens: f32,
     pub volume: f32,
+    /// 程序化背景音乐开关与音量。
+    #[serde(default = "default_enabled")]
+    pub music: bool,
+    #[serde(default = "default_music_volume")]
+    pub music_volume: f32,
+    /// 环境氛围音（风/洞穴/海浪/火山/森林）音量。
+    #[serde(default = "default_ambience_volume")]
+    pub ambience_volume: f32,
     pub show_fps: bool,
     #[serde(default)]
     pub pixelated: bool,
@@ -982,6 +990,14 @@ pub struct Settings {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_music_volume() -> f32 {
+    0.7
+}
+
+fn default_ambience_volume() -> f32 {
+    0.6
 }
 
 fn default_cloud_coverage() -> f32 {
@@ -1011,6 +1027,9 @@ impl Default for Settings {
             lod_mode: LodMode::Hierarchical,
             mouse_sens: 1.0,
             volume: 0.8,
+            music: true,
+            music_volume: default_music_volume(),
+            ambience_volume: default_ambience_volume(),
             show_fps: false,
             pixelated: false,
             clouds: true,
@@ -1046,6 +1065,19 @@ fn sanitize_cloud_settings(settings: &mut Settings) {
     }
 }
 
+fn sanitize_audio_settings(settings: &mut Settings) {
+    settings.music_volume = if settings.music_volume.is_finite() {
+        settings.music_volume.clamp(0.0, 1.0)
+    } else {
+        default_music_volume()
+    };
+    settings.ambience_volume = if settings.ambience_volume.is_finite() {
+        settings.ambience_volume.clamp(0.0, 1.0)
+    } else {
+        default_ambience_volume()
+    };
+}
+
 pub fn load_settings() -> Settings {
     let mut settings: Settings = read_json(&saves_dir().join("settings.json")).unwrap_or_default();
     settings.view_dist = settings.view_dist.clamp(3, 32);
@@ -1061,6 +1093,7 @@ pub fn load_settings() -> Settings {
     };
     settings.lighting.sanitize();
     sanitize_cloud_settings(&mut settings);
+    sanitize_audio_settings(&mut settings);
     settings
 }
 
@@ -1079,6 +1112,7 @@ pub fn save_settings(s: &Settings) -> bool {
     };
     safe.lighting.sanitize();
     sanitize_cloud_settings(&mut safe);
+    sanitize_audio_settings(&mut safe);
     write_json(&saves_dir().join("settings.json"), &safe)
 }
 

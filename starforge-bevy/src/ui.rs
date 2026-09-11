@@ -63,6 +63,12 @@ pub enum Panel {
     BuyShip,
     /// 边疆公会（L）：委托、远征、调查、里程碑。
     Frontier,
+    /// 星际图鉴（K）：方块/物品/生态/生物/机器收录。
+    Codex,
+    /// 成就（J）。
+    Achievements,
+    /// 摄影模式（F2）。
+    Photo,
 }
 
 impl UiState {
@@ -259,6 +265,7 @@ pub fn research_system(
     mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
+    mut screen: Option<ResMut<crate::screen_fx::ScreenFx>>,
 ) {
     let mut completed: Option<String> = None;
     if let Some((id, prog)) = research.active.as_mut() {
@@ -282,6 +289,9 @@ pub fn research_system(
             audio::play(&mut commands, sfx.craft.clone(), 0.6, None);
             if let Ok(mut p) = player.single_mut() {
                 p.toast(format!("科技解锁：{}", tech.name));
+            }
+            if let Some(screen) = screen.as_deref_mut() {
+                screen.level_up();
             }
         }
     }
@@ -3162,6 +3172,25 @@ pub fn pause_panel_system(
                     let _ = crate::save::save_settings(&settings);
                 }
             });
+            let mut audio_changed = false;
+            audio_changed |= ui.checkbox(&mut settings.music, "程序化音乐").changed();
+            ui.add_enabled_ui(settings.music, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("音乐音量");
+                    audio_changed |= ui
+                        .add(egui::Slider::new(&mut settings.music_volume, 0.0..=1.0))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("环境氛围");
+                    audio_changed |= ui
+                        .add(egui::Slider::new(&mut settings.ambience_volume, 0.0..=1.0))
+                        .changed();
+                });
+            });
+            if audio_changed {
+                let _ = crate::save::save_settings(&settings);
+            }
             ui.checkbox(&mut settings.show_fps, "显示 FPS");
             if ui
                 .checkbox(&mut settings.pixelated, "像素风渲染（重启生效）")
@@ -3485,6 +3514,7 @@ pub fn scan_system(
     mut rings: Query<(Entity, &mut ScanRing, &mut Transform), Without<ScanMarker>>,
     sfx: Res<audio::Sfx>,
     mut quests: ResMut<crate::quests::Quests>,
+    mut screen: Option<ResMut<crate::screen_fx::ScreenFx>>,
 ) {
     let dt = time.delta_secs();
     state.cd = (state.cd - dt).max(0.0);
@@ -3514,7 +3544,8 @@ pub fn scan_system(
             commands.entity(e).despawn();
         }
     }
-    if keys.just_pressed(KeyCode::KeyC) && !ui.locked() {
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if keys.just_pressed(KeyCode::KeyC) && !ui.locked() && !ctrl_held {
         if state.cd > 0.0 {
             return;
         }
@@ -3532,6 +3563,9 @@ pub fn scan_system(
             }
         }
         audio::play(&mut commands, sfx.pickup.clone(), 0.6, None);
+        if let Some(screen) = screen.as_deref_mut() {
+            screen.scanned();
+        }
         let range: i32 = if research.techs.iter().any(|t| t == "scan2") {
             80
         } else if research.techs.iter().any(|t| t == "scan1") {

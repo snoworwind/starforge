@@ -74,6 +74,8 @@ pub enum GameSet {
     LateSpaceActors,
     /// Ship/camera/visual/audio transforms that consume the completed simulation state.
     LateSpacePresentation,
+    /// Screen shake and camera feel layered on top of every camera writer.
+    CameraFx,
     /// Planet switch + ground-scene visibility (flow-owned).
     LateSwitchFlow,
     /// Space-mode sky sync (daynight-owned).
@@ -153,6 +155,7 @@ pub fn configure(app: &mut App) {
                 GameSet::LateSpaceScene,
                 GameSet::LateSpaceActors,
                 GameSet::LateSpacePresentation,
+                GameSet::CameraFx,
                 GameSet::LateSwitchFlow,
                 GameSet::LateSwitchSky,
                 GameSet::LateSwitchCursor,

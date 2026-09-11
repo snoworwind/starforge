@@ -1573,7 +1573,37 @@ pub fn build_chunk_meshes(
                         }
                         emit_quad_col(&mut water, corners, uv, cols, dir.map(|v| v as f32));
                     } else {
-                        emit_quad(&mut solid, corners, uv, shade, dir.map(|v| v as f32));
+                        // Per-vertex ambient occlusion: sample the three voxels
+                        // touching each corner in the neighbouring layer. This
+                        // is what makes stacked blocks read as solid geometry
+                        // instead of flat tiles.
+                        let (tangent_a, tangent_b) = face_tangents(f);
+                        let center = [wx as f32 + 0.5, y as f32 + lb * 0.5, wz as f32 + 0.5];
+                        let mut cols = [[0f32; 4]; 4];
+                        for (i, corner) in corners.iter().enumerate() {
+                            let side_a = if corner_dot(corner, &center, tangent_a) > 0.0 {
+                                1
+                            } else {
+                                -1
+                            };
+                            let side_b = if corner_dot(corner, &center, tangent_b) > 0.0 {
+                                1
+                            } else {
+                                -1
+                            };
+                            let ao = corner_ao(
+                                world,
+                                [wx, y, wz],
+                                dir,
+                                tangent_a,
+                                tangent_b,
+                                side_a,
+                                side_b,
+                            );
+                            let value = shade * ao;
+                            cols[i] = [value, value, value, 1.0];
+                        }
+                        emit_quad_col(&mut solid, corners, uv, cols, dir.map(|v| v as f32));
                     }
                 }
             }
@@ -1625,6 +1655,60 @@ fn face_uvs(face: usize, rect: [f32; 4]) -> [[f32; 2]; 4] {
         3 => [[u0, v0], [u1, v0], [u0, v1], [u1, v1]],
         _ => [[u0, v1], [u1, v1], [u0, v0], [u1, v0]],
     }
+}
+
+/// Brightness multipliers for ambient occlusion levels 0 (fully occluded
+/// corner) through 3 (open corner).
+const AO_LEVELS: [f32; 4] = [0.5, 0.68, 0.85, 1.0];
+
+/// The two in-plane axes of a face used for AO sampling.
+fn face_tangents(face: usize) -> ([i32; 3], [i32; 3]) {
+    match face {
+        0 | 1 => ([0, 1, 0], [0, 0, 1]), // ±X spans Y/Z
+        2 | 3 => ([1, 0, 0], [0, 0, 1]), // ±Y spans X/Z
+        _ => ([1, 0, 0], [0, 1, 0]),     // ±Z spans X/Y
+    }
+}
+
+fn corner_dot(corner: &(f32, f32, f32), center: &[f32; 3], axis: [i32; 3]) -> f32 {
+    (corner.0 - center[0]) * axis[0] as f32
+        + (corner.1 - center[1]) * axis[1] as f32
+        + (corner.2 - center[2]) * axis[2] as f32
+}
+
+/// Classic voxel ambient occlusion: counts the two edge neighbours and the
+/// diagonal neighbour around a corner. Solid, non-transparent, non-cross
+/// blocks occlude; everything else lets light through.
+fn corner_ao(
+    world: &World,
+    cell: [i32; 3],
+    normal: [i32; 3],
+    axis_a: [i32; 3],
+    axis_b: [i32; 3],
+    side_a: i32,
+    side_b: i32,
+) -> f32 {
+    let occludes = |dx: i32, dy: i32, dz: i32| -> i32 {
+        let id = world.get(
+            cell[0] + normal[0] + dx,
+            cell[1] + normal[1] + dy,
+            cell[2] + normal[2] + dz,
+        );
+        let def = data::block_by_id(id);
+        (def.solid && !def.transparent && !def.cross) as i32
+    };
+    let a = occludes(axis_a[0] * side_a, axis_a[1] * side_a, axis_a[2] * side_a);
+    let b = occludes(axis_b[0] * side_b, axis_b[1] * side_b, axis_b[2] * side_b);
+    if a == 1 && b == 1 {
+        return AO_LEVELS[0];
+    }
+    let diagonal = occludes(
+        axis_a[0] * side_a + axis_b[0] * side_b,
+        axis_a[1] * side_a + axis_b[1] * side_b,
+        axis_a[2] * side_a + axis_b[2] * side_b,
+    );
+    let level = (3 - a - b - diagonal).clamp(0, 3) as usize;
+    AO_LEVELS[level]
 }
 
 fn emit_quad(
@@ -2236,6 +2320,51 @@ mod tests {
                 "y {:?} outside world height",
                 p
             );
+        }
+    }
+
+    #[test]
+    fn ambient_occlusion_darkens_enclosed_corners() {
+        use data::ids;
+        let mut w = World::new(7, "lush", 3);
+        // A simple pillar: the floor around it must get AO-darkened corners.
+        for y in 40..46 {
+            w.set(8, y, 8, ids::GRASS);
+            w.set(8, y, 9, ids::GRASS);
+        }
+        let c = w.get_chunk(0, 0).expect("chunk generated");
+        let (solid, _) = build_chunk_meshes(&w, c, &crate::textures::Atlas::build());
+        let mesh = solid.expect("mesh exists");
+        // Fully lit vertices use the face shade (<=1.0); occluded ones drop to
+        // 50% of it, so the minimum channel over the mesh must be clearly below
+        // the maximum.
+        let min = mesh
+            .colors
+            .iter()
+            .map(|c| c[0].min(c[1]).min(c[2]))
+            .fold(f32::MAX, f32::min);
+        let max = mesh
+            .colors
+            .iter()
+            .map(|c| c[0].max(c[1]).max(c[2]))
+            .fold(f32::MIN, f32::max);
+        assert!(
+            min < max * 0.9,
+            "AO did not darken any corner (min {min}, max {max})"
+        );
+        // AO levels stay inside the configured band.
+        assert!(min >= 0.0);
+    }
+
+    #[test]
+    fn face_tangents_are_perpendicular_to_normals() {
+        for (face, normal) in FACE_DIRS.iter().enumerate() {
+            let n = *normal;
+            let (a, b) = face_tangents(face);
+            let dot = |x: [i32; 3], y: [i32; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+            assert_eq!(dot(n, a), 0, "face {face}");
+            assert_eq!(dot(n, b), 0, "face {face}");
+            assert_eq!(dot(a, b), 0, "face {face}");
         }
     }
 }

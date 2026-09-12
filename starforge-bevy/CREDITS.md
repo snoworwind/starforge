@@ -12,9 +12,9 @@
 
 | 组件 | 来源 | 版本 | 许可证 | 版权/署名 |
 |---|---|---|---|---|
-| 体积云渲染插件 `bevy-volumetric-clouds` | [evroon/bevy-volumetric-clouds](https://github.com/evroon/bevy-volumetric-clouds) | 0.2.0（本地 vendored，含 Starforge 兼容性修改） | MIT | Copyright (c) 2025 evroon |
+| 体积云渲染 | 本项目自研（`assets/shaders/cloud_shell.wgsl` + `src/weather/mod.rs::CloudShellMaterial`） | — | MIT（项目代码） | 无第三方署名 |
 
-上游许可证原文随源码保留在 `vendor/bevy-volumetric-clouds/LICENSE`。该目录中的源代码、着色器和文档继续按照 MIT 许可证的署名与许可证通知要求分发。
+> 说明：仓库当前不存在 `vendor/` 目录，也未使用 `bevy-volumetric-clouds` 等外部云渲染库；体积云密度场、HG 相函数、深度截断与预乘 alpha 均为本项目实现。若未来重新引入第三方渲染代码，必须在此登记并随仓库保留其许可证原文。
 
 ## 音效（32 条 Sonniss WAV + 迁移前脚步 OGG）
 

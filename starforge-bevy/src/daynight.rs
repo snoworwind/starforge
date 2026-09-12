@@ -3,6 +3,7 @@
 use crate::player::Player;
 use crate::space::FlightMode;
 use crate::world::World;
+use bevy::camera::Exposure;
 use bevy::light::{
     Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
     SunDisk, VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
@@ -39,7 +40,7 @@ const GROUND_AMBIENT_BASE: f32 = 0.75;
 /// Runtime lighting controls exposed by the in-game F3 panel. These are
 /// deliberately kept separate from the physical scene setup so artists can
 /// tune the presentation without recompiling the renderer.
-#[derive(Resource, Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LightingTuning {
     /// Multiplier for direct sunlight at full day.
@@ -95,24 +96,9 @@ impl LightingTuning {
     }
 
     pub fn sanitize(&mut self) {
-        self.sunlight_boost = finite_clamp(self.sunlight_boost, 0.0, 150.0, DIRECT_SUNLIGHT_BOOST);
-        self.sun_disk_intensity = finite_clamp(self.sun_disk_intensity, 0.0, 200.0, 1.0);
-        self.atmosphere_fill = finite_clamp(self.atmosphere_fill, 0.0, 2.0, 1.0);
-        self.ambient_multiplier = finite_clamp(self.ambient_multiplier, 0.0, 10.0, 1.0);
-        self.space_atmosphere_fill = finite_clamp(self.space_atmosphere_fill, 0.0, 2.0, 1.0);
-        self.bloom_intensity = finite_clamp(self.bloom_intensity, 0.0, 8.0, 0.12);
-        self.bloom_threshold = finite_clamp(self.bloom_threshold, 0.0, 50.0, 1.5);
-        self.bloom_threshold_softness = finite_clamp(self.bloom_threshold_softness, 0.0, 1.0, 0.2);
-        self.bloom_low_frequency_boost =
-            finite_clamp(self.bloom_low_frequency_boost, 0.0, 5.0, 0.35);
-    }
-}
-
-fn finite_clamp(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        fallback
+        // A05: ranges/defaults come from the shared settings registry instead
+        // of a second copy in this file.
+        crate::visual::sanitize_lighting_tuning(self, None);
     }
 }
 
@@ -172,6 +158,21 @@ fn sun_travel_direction(day_time: f32, daylight: f32) -> Vec3 {
     )
 }
 
+/// D01 QA helper: per-channel scales for sun / ambient / environment fill.
+/// `Full` is the shipping look; the other two modes let the visual QA matrix
+/// store paired "sun only" and "ambient only" frames for exposure review.
+fn probe_scales(mode: crate::rendering::LightingProbeMode) -> (f32, f32, f32) {
+    use crate::rendering::LightingProbeMode as Mode;
+    match mode {
+        Mode::Full => (1.0, 1.0, 1.0),
+        Mode::SunOnly => (1.0, 0.0, 0.0),
+        Mode::AmbientOnly => (0.0, 1.0, 1.0),
+        // B04 overcast: dim hard sun, lift the sky/environment fill so
+        // roughness is judged by broad reflection instead of a key light.
+        Mode::Overcast => (0.35, 1.15, 1.0),
+    }
+}
+
 pub fn daynight_system(
     time: Res<Time>,
     mut day: ResMut<DayTime>,
@@ -187,23 +188,35 @@ pub fn daynight_system(
     >,
     mut stars: Query<&mut Visibility, (With<Star>, Without<Sun>)>,
     mut ground_atmosphere: Query<&mut Transform, (With<GroundAtmosphere>, Without<Sun>)>,
-    visual_frame: Res<crate::planet_scale::PlanetVisualFrame>,
-    player: Query<&Player>,
+    frame: Res<crate::visual::VisualFrame>,
+    mut celestial: ResMut<crate::visual::CelestialLighting>,
     mut clear: ResMut<ClearColor>,
     world: Option<Res<World>>,
     mut ambient: ResMut<GlobalAmbientLight>,
-    mut atmosphere_fill_q: Query<&mut AtmosphereEnvironmentMapLight, With<Camera3d>>,
-    mut bloom_q: Query<&mut Bloom, With<Camera3d>>,
+    // One bundled query keeps the system within Bevy's 16-parameter limit while
+    // still owning every per-camera presentation component.
+    mut cameras: Query<
+        (
+            &mut AtmosphereEnvironmentMapLight,
+            &mut Bloom,
+            &mut DistanceFog,
+            Option<&Exposure>,
+        ),
+        (With<Camera3d>, Without<Player>),
+    >,
     mut space: ResMut<SpaceFactor>,
     mode: Res<FlightMode>,
     tuning: Res<LightingTuning>,
-    mut fog_q: Query<&mut DistanceFog, (With<Camera3d>, Without<Player>)>,
+    probe: Option<Res<crate::rendering::LightingProbe>>,
 ) {
     day.0 = (day.0 + time.delta_secs() / 480.0) % 1.0; // JS DAY_LEN=480s 全周期
     let f = day_factor(day.0);
 
-    let Ok(p) = player.single() else { return };
     let sun_direction = sun_travel_direction(day.0, f);
+    // D01 QA matrix: one-effect-at-a-time scales. `Full` is the shipping look;
+    // the probe never touches `Settings` or the save file.
+    let (sun_scale, ambient_scale, environment_scale) =
+        probe_scales(probe.as_deref().map(|probe| probe.mode).unwrap_or_default());
 
     let sunlight_boost = tuning.sunlight_boost.max(0.0);
     let daylight_boost = 1.0 + f * (sunlight_boost - 1.0);
@@ -212,11 +225,16 @@ pub fn daynight_system(
         // beam or disk. The orbital sun remains visible because it is outside
         // the day/night horizon model.
         let ground_daylight = ground_sun.is_some();
-        disk.intensity = tuning.sun_disk_intensity.max(0.0) * if ground_daylight { f } else { 1.0 };
+        let probe_ambient_only = sun_scale <= 0.0;
+        disk.intensity = if probe_ambient_only {
+            0.0
+        } else {
+            tuning.sun_disk_intensity.max(0.0) * if ground_daylight { f } else { 1.0 }
+        };
         if ground_sun.is_none() {
             // The orbital sun is a separate directional-light entity, but it
             // uses the same live direct-light control as the ground sun.
-            light.illuminance = lux::RAW_SUNLIGHT * sunlight_boost;
+            light.illuminance = lux::RAW_SUNLIGHT * sunlight_boost * sun_scale;
             // There must be exactly one direct sun in the ground scene. The
             // orbital light otherwise fills every cast shadow from a second
             // direction and makes the ground look shadowless.
@@ -237,7 +255,8 @@ pub fn daynight_system(
         // aggressively. This affects direct sunlight only, not ambient fill.
         // A 2% night floor is still bright enough to turn the raymarched
         // atmosphere blue. Keep only a tiny residual for moonless ambience.
-        let sun_illuminance = lux::RAW_SUNLIGHT * (0.0001 + f * 0.9999) * daylight_boost.max(0.0);
+        let sun_illuminance =
+            lux::RAW_SUNLIGHT * (0.0001 + f * 0.9999) * daylight_boost.max(0.0) * sun_scale;
         light.illuminance = sun_illuminance;
         // 日出/日落（f≈0.5，太阳贴近地平线）阳光是暖橙红色，正午（f=1）
         // 是暖白，夜间（f<0.5）是冷蓝。旧曲线方向反了：f=0.5 处给冷色、
@@ -253,6 +272,16 @@ pub fn daynight_system(
             // 午夜 → 日出：冷蓝 → 暖橙（夜间光照本就接近零，颜色影响很小）
             lerp_color(night, sunrise, f * 2.0)
         };
+        // A02: publish the same numbers other presentation systems consume.
+        // Cloud shading previously re-queried this light and recomputed the
+        // energy; keeping one source avoids divergent units (R043).
+        celestial.daylight = f;
+        celestial.travel_direction = sun_direction;
+        celestial.to_sun_direction = -sun_direction;
+        celestial.sun_color = light.color.to_linear();
+        celestial.sun_illuminance_lux = sun_illuminance;
+        celestial.sun_disk_intensity = disk.intensity;
+        celestial.ground_sun_visible = true;
         *visibility = if mode.space_scene() {
             Visibility::Hidden
         } else {
@@ -265,7 +294,7 @@ pub fn daynight_system(
     // without consulting Visibility, so moving this proxy far away is the
     // lightweight way to switch between the local and orbital shells.
     let atmosphere_center = if mode.ground_scene() {
-        visual_frame.center
+        frame.planet.center
     } else {
         Vec3::new(0.0, 1.0e9, 0.0)
     };
@@ -273,8 +302,8 @@ pub fn daynight_system(
         transform.translation = atmosphere_center;
     }
 
-    // space factor from altitude
-    let cam_y = p.eye().y;
+    // space factor from altitude (finalized camera snapshot)
+    let cam_y = frame.eye.y;
     // 太空/曲速/空间站模式强制 1：Bevy 单相机 ClearColor 全屏共享，而太空态玩家坐标
     // 已被镜像到星球球面坐标系（赤道附近 Y≈0），按高度计算会退化成星球大气色
     // （JS 原版太空为独立场景固定底色，不存在此问题）。
@@ -309,7 +338,18 @@ pub fn daynight_system(
     // roughly 120 units at exit and produced a visibly raised fog horizon.
     let atmosphere_thin = crate::planet_scale::smoothstep(600.0, 2_400.0, cam_y);
     let fog_color = lerp_color(sky, Color::WHITE, 0.15 * f * (1.0 - sf));
-    for mut fog in &mut fog_q {
+
+    // Keep these as scene-wide artist controls. Occlusion must be evaluated by
+    // the shadow/occlusion passes per surface; changing them from camera roof
+    // detection would incorrectly darken outdoor objects visible through a
+    // doorway or window.
+    let atmosphere_fill = if mode.space_scene() {
+        tuning.space_atmosphere_fill.max(0.0)
+    } else {
+        GROUND_ATMOSPHERE_FILL_BASE * tuning.atmosphere_fill.max(0.0)
+    } * environment_scale;
+    let mut exposure_ev100 = 13.0;
+    for (mut fill, mut bloom, mut fog, exposure) in &mut cameras {
         if mode.space_scene() {
             fog.falloff = FogFalloff::Linear {
                 start: 1e9,
@@ -321,25 +361,14 @@ pub fn daynight_system(
             fog.falloff = FogFalloff::Linear { start, end };
             fog.color = fog_color;
         }
-    }
-
-    // Keep these as scene-wide artist controls. Occlusion must be evaluated by
-    // the shadow/occlusion passes per surface; changing them from camera roof
-    // detection would incorrectly darken outdoor objects visible through a
-    // doorway or window.
-    let atmosphere_fill = if mode.space_scene() {
-        tuning.space_atmosphere_fill.max(0.0)
-    } else {
-        GROUND_ATMOSPHERE_FILL_BASE * tuning.atmosphere_fill.max(0.0)
-    };
-    for mut fill in &mut atmosphere_fill_q {
         fill.intensity = atmosphere_fill;
-    }
-    for mut bloom in &mut bloom_q {
         bloom.intensity = tuning.bloom_intensity.max(0.0);
         bloom.low_frequency_boost = tuning.bloom_low_frequency_boost.max(0.0);
         bloom.prefilter.threshold = tuning.bloom_threshold.max(0.0);
         bloom.prefilter.threshold_softness = tuning.bloom_threshold_softness.clamp(0.0, 1.0);
+        if let Some(exposure) = exposure {
+            exposure_ev100 = exposure.ev100;
+        }
     }
 
     let day_amb = Color::srgb(0.75, 0.8, 0.9);
@@ -348,8 +377,15 @@ pub fn daynight_system(
     // 保留夜间暗部层次，同时把默认环境光降低 25%，让实时方向光阴影在
     // 地形顶面可读。体素侧/底面的 FACE_SHADE 也同步抬高，避免降低补光后
     // 背光面重新变成纯黑；F3 ambient_multiplier 仍可整体缩放。
-    ambient.brightness =
-        (12.0 + f * 68.0) * GROUND_AMBIENT_BASE * tuning.ambient_multiplier.max(0.0);
+    ambient.brightness = (12.0 + f * 68.0)
+        * GROUND_AMBIENT_BASE
+        * tuning.ambient_multiplier.max(0.0)
+        * ambient_scale;
+
+    celestial.ambient_color = ambient.color.to_linear();
+    celestial.ambient_brightness = ambient.brightness;
+    celestial.environment_fill = atmosphere_fill;
+    celestial.exposure_ev100 = exposure_ev100;
 
     for mut vis in &mut stars {
         *vis = if sf > 0.6 {
@@ -524,4 +560,22 @@ fn space_sky_sync_system(
 
 fn stars_ok() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rendering::LightingProbeMode;
+
+    #[test]
+    fn lighting_probe_scales_isolate_one_source_at_a_time() {
+        assert_eq!(probe_scales(LightingProbeMode::Full), (1.0, 1.0, 1.0));
+        assert_eq!(probe_scales(LightingProbeMode::SunOnly), (1.0, 0.0, 0.0));
+        assert_eq!(
+            probe_scales(LightingProbeMode::AmbientOnly),
+            (0.0, 1.0, 1.0)
+        );
+        let (sun, ambient, environment) = probe_scales(LightingProbeMode::Overcast);
+        assert!(sun < 0.5 && ambient > 1.0 && environment == 1.0);
+    }
 }

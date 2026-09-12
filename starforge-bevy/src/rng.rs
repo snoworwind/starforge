@@ -180,10 +180,17 @@ pub fn vnoise3(x: f32, y: f32, z: f32, salt: u32, seed: u32) -> f32 {
 
 /// Deterministic per-column / per-chunk RNG — port of `hash2`.
 pub fn hash2(x: i32, z: i32, salt: u32, seed: u32) -> Rng {
+    Rng::new(hash2_state(x, z, salt, seed))
+}
+
+/// The raw mixed state behind [`hash2`]. G01 uses this to derive labeled
+/// random streams for one structure plan without changing the legacy layout
+/// stream (`hash2` and `Rng::new(hash2_state(..))` produce the same sequence).
+pub fn hash2_state(x: i32, z: i32, salt: u32, seed: u32) -> u32 {
     let mut h: i32 = (seed ^ salt) as i32;
     h = imul(h ^ x, 374_761_393);
     h = imul(h ^ z, 668_265_263);
-    Rng::new((h ^ ((h as u32 >> 13) as i32)) as u32)
+    (h ^ ((h as u32 >> 13) as i32)) as u32
 }
 
 /// JS creatures.js `batchSeedOf`：24m 网格生物批次种子（世界生成式掷骰，跨客户端确定性一致）。

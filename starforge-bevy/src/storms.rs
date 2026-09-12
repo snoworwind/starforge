@@ -12,10 +12,10 @@ use bevy::prelude::*;
 use crate::daynight::DayTime;
 use crate::particles::{EmitOptions, ParticleStyle, ParticleSystem};
 use crate::player::Player;
-use crate::save::Settings;
 use crate::schedule::{GameState, ground_scene_mode};
 use crate::space::FlightMode;
 use crate::tween::exp_approach;
+use crate::visual::ResolvedQuality;
 use crate::world::World;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -143,7 +143,7 @@ pub fn choose_event(biome: &str, night: f32, rng: &mut crate::rng::Rng) -> (Stor
 #[allow(clippy::too_many_arguments)]
 pub fn storm_director_system(
     time: Res<Time>,
-    settings: Res<Settings>,
+    quality: Res<ResolvedQuality>,
     mode: Res<FlightMode>,
     world: Option<Res<World>>,
     day: Option<Res<DayTime>>,
@@ -156,7 +156,7 @@ pub fn storm_director_system(
     mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
-    if !settings.weather || mode.space_scene() {
+    if !quality.weather.effective || mode.space_scene() {
         if state.kind != StormKind::None {
             end_event(&mut state, &mut commands);
         }

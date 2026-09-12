@@ -986,6 +986,10 @@ pub struct Settings {
     /// compatible and deserialize this whole group from `Default`.
     #[serde(default)]
     pub lighting: crate::daynight::LightingTuning,
+    /// A05 diagnostics/tuning knobs (task capacity, resource warning limits).
+    /// Nested for the same forward/backward compatibility as `lighting`.
+    #[serde(default)]
+    pub visual: crate::visual::VisualSettings,
 }
 
 fn default_enabled() -> bool {
@@ -1040,79 +1044,48 @@ impl Default for Settings {
             cloud_render_width: default_cloud_render_width(),
             cloud_render_height: default_cloud_render_height(),
             lighting: crate::daynight::LightingTuning::default(),
+            visual: crate::visual::VisualSettings::default(),
         }
     }
 }
 
-fn sanitize_cloud_settings(settings: &mut Settings) {
-    settings.cloud_coverage = if settings.cloud_coverage.is_finite() {
-        settings.cloud_coverage.clamp(0.0, 1.0)
-    } else {
-        default_cloud_coverage()
+/// Read + validate persisted settings, keeping the A05 report that says which
+/// values were repaired. `load_settings` is the convenience wrapper for
+/// callers that only need the effective values.
+pub fn load_settings_reported() -> (Settings, crate::visual::SettingsLoadReport) {
+    let path = saves_dir().join("settings.json");
+    let mut report = crate::visual::SettingsLoadReport::default();
+    let mut settings: Settings = match read_json(&path) {
+        Some(settings) => settings,
+        None => {
+            // Missing file is a normal first launch; an existing-but-unreadable
+            // file is a real fallback and must be visible to diagnostics.
+            report.fallback_to_defaults = path.exists();
+            Settings::default()
+        }
     };
-    settings.cloud_density = if settings.cloud_density.is_finite() {
-        settings.cloud_density.clamp(0.0, 1.0)
-    } else {
-        default_cloud_density()
-    };
-    settings.cloud_raymarch_steps = settings.cloud_raymarch_steps.clamp(4, 64);
-    if !matches!(
-        (settings.cloud_render_width, settings.cloud_render_height),
-        (1280, 720) | (1536, 864) | (1920, 1080) | (2560, 1600)
-    ) {
-        settings.cloud_render_width = default_cloud_render_width();
-        settings.cloud_render_height = default_cloud_render_height();
-    }
-}
-
-fn sanitize_audio_settings(settings: &mut Settings) {
-    settings.music_volume = if settings.music_volume.is_finite() {
-        settings.music_volume.clamp(0.0, 1.0)
-    } else {
-        default_music_volume()
-    };
-    settings.ambience_volume = if settings.ambience_volume.is_finite() {
-        settings.ambience_volume.clamp(0.0, 1.0)
-    } else {
-        default_ambience_volume()
-    };
+    let sanitize = crate::visual::sanitize_settings(&mut settings);
+    report.corrections = sanitize.corrections;
+    (settings, report)
 }
 
 pub fn load_settings() -> Settings {
-    let mut settings: Settings = read_json(&saves_dir().join("settings.json")).unwrap_or_default();
-    settings.view_dist = settings.view_dist.clamp(3, 32);
-    settings.mouse_sens = if settings.mouse_sens.is_finite() {
-        settings.mouse_sens.clamp(0.05, 5.0)
-    } else {
-        1.0
-    };
-    settings.volume = if settings.volume.is_finite() {
-        settings.volume.clamp(0.0, 1.0)
-    } else {
-        0.8
-    };
-    settings.lighting.sanitize();
-    sanitize_cloud_settings(&mut settings);
-    sanitize_audio_settings(&mut settings);
-    settings
+    load_settings_reported().0
 }
 
 pub fn save_settings(s: &Settings) -> bool {
     let mut safe = s.clone();
-    safe.view_dist = safe.view_dist.clamp(3, 32);
-    safe.mouse_sens = if safe.mouse_sens.is_finite() {
-        safe.mouse_sens.clamp(0.05, 5.0)
-    } else {
-        1.0
-    };
-    safe.volume = if safe.volume.is_finite() {
-        safe.volume.clamp(0.0, 1.0)
-    } else {
-        0.8
-    };
-    safe.lighting.sanitize();
-    sanitize_cloud_settings(&mut safe);
-    sanitize_audio_settings(&mut safe);
+    let report = crate::visual::sanitize_settings(&mut safe);
+    for correction in &report.corrections {
+        let previous = correction
+            .previous
+            .map(|value| format!("{value}"))
+            .unwrap_or_else(|| "non-finite".to_string());
+        warn!(
+            "settings sanitize: {} {} → {} ({:?})",
+            correction.key, previous, correction.corrected, correction.reason
+        );
+    }
     write_json(&saves_dir().join("settings.json"), &safe)
 }
 

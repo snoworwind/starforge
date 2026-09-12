@@ -61,6 +61,10 @@ pub struct TerrainMaterials {
     /// separate from `far` avoids transparent-section sorting seams.
     pub lod: Handle<CurvedTerrainMaterial>,
     pub atlas_image: Handle<Image>,
+    /// B04 ORM atlas (R=occlusion 255, G=roughness, B=metallic), aligned with
+    /// the albedo UV rects. Linear data, Nearest sampling so cells cannot
+    /// bleed into each other.
+    pub orm_atlas: Handle<Image>,
 }
 
 impl TerrainMaterials {
@@ -68,7 +72,7 @@ impl TerrainMaterials {
         materials: &mut Assets<StandardMaterial>,
         curved_materials: &mut Assets<CurvedTerrainMaterial>,
         images: &mut Assets<Image>,
-        atlas_bytes: Vec<u8>,
+        atlas: &crate::textures::Atlas,
         water_tint: u32,
     ) -> Self {
         let mut image = Image::new(
@@ -78,7 +82,7 @@ impl TerrainMaterials {
                 depth_or_array_layers: 1,
             },
             bevy::render::render_resource::TextureDimension::D2,
-            atlas_bytes,
+            atlas.to_image(),
             bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
             bevy::asset::RenderAssetUsages::RENDER_WORLD,
         );
@@ -90,8 +94,34 @@ impl TerrainMaterials {
         image.sampler = sampler;
         let atlas_image = images.add(image);
 
+        // B04: per-surface roughness/metallic. Occlusion stays 255 so the
+        // vertex AO remains the single AO source (R040).
+        let mut orm = Image::new(
+            bevy::render::render_resource::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            bevy::render::render_resource::TextureDimension::D2,
+            crate::art::pbr::build_orm_atlas(atlas),
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        let mut orm_sampler = ImageSampler::default();
+        let d = orm_sampler.get_or_init_descriptor();
+        d.mag_filter = ImageFilterMode::Nearest;
+        d.min_filter = ImageFilterMode::Nearest;
+        d.mipmap_filter = ImageFilterMode::Nearest;
+        orm.sampler = orm_sampler;
+        let orm_atlas = images.add(orm);
+
         let solid = materials.add(StandardMaterial {
             base_color_texture: Some(atlas_image.clone()),
+            // `metallic`/`perceptual_roughness` multiply the ORM channels, so
+            // the factors stay at 1.0 and the atlas carries the values.
+            metallic_roughness_texture: Some(orm_atlas.clone()),
+            metallic: 1.0,
+            perceptual_roughness: 1.0,
             double_sided: true,
             cull_mode: None,
             // Leaves and cross-shaped plants share this mesh/material and
@@ -145,6 +175,7 @@ impl TerrainMaterials {
             far,
             lod,
             atlas_image,
+            orm_atlas,
         }
     }
 }

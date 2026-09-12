@@ -126,7 +126,19 @@ pub fn spawn_humanoid(
     let idx = ((pos.x as i32).wrapping_mul(31) ^ (pos.z as i32).wrapping_mul(57)).unsigned_abs()
         as usize
         % NPC_MODELS.len();
-    let model = NPC_MODELS[idx];
+    spawn_humanoid_model(commands, asset_server, NPC_MODELS[idx], pos, yaw)
+}
+
+/// Spawn one specific NPC model. Gameplay keeps the position-hash choice in
+/// [`spawn_humanoid`]; `--visual-qa` B01 uses this to place a known lineup so
+/// the style calibration compares fixed assets.
+pub fn spawn_humanoid_model(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    model: &'static str,
+    pos: Vec3,
+    yaw: f32,
+) -> HumanoidParts {
     let (scale, y_off) = npc_scale(model);
     let root = commands
         .spawn((

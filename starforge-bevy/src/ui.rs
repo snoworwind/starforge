@@ -3091,11 +3091,73 @@ pub fn setup_egui(
 
 // ---------- Pause menu ----------
 
+/// Checkbox bound to the resolved quality: unsupported features are disabled,
+/// show the effective (off) value and explain the reason on hover.
+fn resolved_checkbox(
+    ui: &mut egui::Ui,
+    label: &str,
+    requested: &mut bool,
+    resolution: &crate::visual::FeatureResolution,
+) -> bool {
+    let enabled = resolution.supported;
+    let response = ui.add_enabled(enabled, egui::Checkbox::new(requested, label));
+    if !enabled {
+        response.on_hover_text(
+            resolution
+                .reason
+                .clone()
+                .unwrap_or_else(|| "设备不支持".to_string()),
+        );
+        ui.label(
+            egui::RichText::new("设备不支持，已按关闭生效")
+                .size(10.0)
+                .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+        );
+        return false;
+    }
+    response.changed()
+}
+
+/// A05: slider range/label come from the one settings registry, so the UI can
+/// never show a different range than the sanitizer accepts.
+fn setting_slider_f32(key: &str) -> std::ops::RangeInclusive<f32> {
+    crate::visual::spec(key)
+        .map(|spec| spec.slider_range())
+        .unwrap_or(0.0..=1.0)
+}
+
+fn setting_slider_i32(key: &str) -> std::ops::RangeInclusive<i32> {
+    crate::visual::spec(key)
+        .map(|spec| spec.min as i32..=spec.max as i32)
+        .unwrap_or(0..=1)
+}
+
+fn setting_slider_u32(key: &str) -> std::ops::RangeInclusive<u32> {
+    crate::visual::spec(key)
+        .map(|spec| spec.min as u32..=spec.max as u32)
+        .unwrap_or(0..=1)
+}
+
+fn setting_label(key: &str) -> String {
+    crate::visual::spec(key)
+        .map(|spec| {
+            if spec.unit.is_empty() {
+                spec.label.to_string()
+            } else {
+                format!("{} ({})", spec.label, spec.unit)
+            }
+        })
+        .unwrap_or_else(|| key.to_string())
+}
+
 pub fn pause_panel_system(
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UiState>,
     mut settings: ResMut<Settings>,
     mut cloud_tuning: ResMut<crate::weather::CloudTuning>,
+    mut lighting: ResMut<crate::daynight::LightingTuning>,
+    quality: Res<crate::visual::ResolvedQuality>,
+    diagnostics: Res<crate::visual::VisualDiagnostics>,
     world: Option<ResMut<World>>,
     player: Query<&Player>,
     research: Res<Research>,
@@ -3136,16 +3198,58 @@ pub fn pause_panel_system(
                 do_save = true;
             }
             ui.add_space(8.0);
+            let mut view_dist_changed = false;
             ui.horizontal(|ui| {
-                ui.label("渲染距离 (区块)");
+                ui.label(setting_label("view_dist"));
                 if ui
-                    .add(egui::Slider::new(&mut settings.view_dist, 3..=16))
+                    .add(egui::Slider::new(
+                        &mut settings.view_dist,
+                        setting_slider_i32("view_dist"),
+                    ))
                     .changed()
-                    && let Some(mut w) = world
                 {
-                    w.view_dist = settings.view_dist;
+                    view_dist_changed = true;
                 }
             });
+            let mut preset = crate::visual::detect_visual_preset(&settings);
+            ui.horizontal(|ui| {
+                ui.label("画质预设");
+                egui::ComboBox::from_id_salt("visual_preset")
+                    .selected_text(preset.label())
+                    .show_ui(ui, |ui| {
+                        for option in crate::visual::VisualPreset::SELECTABLE {
+                            if ui
+                                .selectable_label(preset == option, option.label())
+                                .clicked()
+                            {
+                                crate::visual::apply_visual_preset(&mut settings, option);
+                                *cloud_tuning =
+                                    crate::weather::CloudTuning::from_settings(&settings);
+                                view_dist_changed = true;
+                                preset = option;
+                                let _ = crate::save::save_settings(&settings);
+                            }
+                        }
+                    });
+                if preset == crate::visual::VisualPreset::Custom {
+                    ui.label(
+                        egui::RichText::new("手动调整")
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+            if ui
+                .button("恢复默认画质")
+                .on_hover_text("重置渲染距离/云/光照调参，保留音量与灵敏度")
+                .clicked()
+            {
+                crate::visual::reset_visual_settings(&mut settings);
+                *cloud_tuning = crate::weather::CloudTuning::from_settings(&settings);
+                *lighting = settings.lighting;
+                view_dist_changed = true;
+                let _ = crate::save::save_settings(&settings);
+            }
             let mut hierarchical = settings.lod_mode == crate::save::LodMode::Hierarchical;
             if ui
                 .checkbox(&mut hierarchical, "层级体素远景（Voxy 模式）")
@@ -3159,13 +3263,19 @@ pub fn pause_panel_system(
                 let _ = crate::save::save_settings(&settings);
             }
             ui.horizontal(|ui| {
-                ui.label("鼠标灵敏度");
-                ui.add(egui::Slider::new(&mut settings.mouse_sens, 0.3..=2.5));
+                ui.label(setting_label("mouse_sens"));
+                ui.add(egui::Slider::new(
+                    &mut settings.mouse_sens,
+                    setting_slider_f32("mouse_sens"),
+                ));
             });
             ui.horizontal(|ui| {
                 ui.label("音量");
                 if ui
-                    .add(egui::Slider::new(&mut settings.volume, 0.0..=1.0))
+                    .add(egui::Slider::new(
+                        &mut settings.volume,
+                        setting_slider_f32("volume"),
+                    ))
                     .changed()
                 {
                     crate::audio::set_master_volume(settings.volume);
@@ -3176,15 +3286,21 @@ pub fn pause_panel_system(
             audio_changed |= ui.checkbox(&mut settings.music, "程序化音乐").changed();
             ui.add_enabled_ui(settings.music, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("音乐音量");
+                    ui.label(setting_label("music_volume"));
                     audio_changed |= ui
-                        .add(egui::Slider::new(&mut settings.music_volume, 0.0..=1.0))
+                        .add(egui::Slider::new(
+                            &mut settings.music_volume,
+                            setting_slider_f32("music_volume"),
+                        ))
                         .changed();
                 });
                 ui.horizontal(|ui| {
-                    ui.label("环境氛围");
+                    ui.label(setting_label("ambience_volume"));
                     audio_changed |= ui
-                        .add(egui::Slider::new(&mut settings.ambience_volume, 0.0..=1.0))
+                        .add(egui::Slider::new(
+                            &mut settings.ambience_volume,
+                            setting_slider_f32("ambience_volume"),
+                        ))
                         .changed();
                 });
             });
@@ -3198,42 +3314,106 @@ pub fn pause_panel_system(
             {
                 let _ = crate::save::save_settings(&settings);
             }
+            // A03: toggles show the resolved state, not the raw request. An
+            // unsupported feature is disabled and explains the fallback.
             let mut climate_changed = false;
-            climate_changed |= ui.checkbox(&mut settings.clouds, "体积云层").changed();
-            climate_changed |= ui.checkbox(&mut settings.weather, "生态天气粒子").changed();
+            climate_changed |=
+                resolved_checkbox(ui, "体积云层", &mut settings.clouds, &quality.clouds);
+            climate_changed |=
+                resolved_checkbox(ui, "生态天气粒子", &mut settings.weather, &quality.weather);
             if climate_changed {
                 let _ = crate::save::save_settings(&settings);
+            }
+            if quality.has_downgrades() {
+                ui.collapsing("⚙ 设备画质降级", |ui| {
+                    for reason in &quality.downgrades {
+                        ui.label(
+                            egui::RichText::new(reason)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+                        );
+                    }
+                });
+            }
+            // A05: advanced counters stay collapsed so the product UI does not
+            // leak type names or shader paths (04 §UI), while QA can see the
+            // same numbers that the unified diagnostics export contains.
+            ui.collapsing("🛠 高级诊断", |ui| {
+                let tasks = &diagnostics.lifecycle.tasks;
+                let rejected = tasks.rejected_queue_full
+                    + tasks.rejected_unknown
+                    + tasks.rejected_stale_epoch
+                    + tasks.rejected_stale_revision;
+                ui.label(format!(
+                    "视觉任务 {}/{} · 拒绝旧结果 {} · epoch {}",
+                    tasks.pending, tasks.capacity, rejected, diagnostics.lifecycle.world_epoch
+                ));
+                ui.label(format!(
+                    "资产 mesh {} / image {} / 材质 {} · 历史重置 {}",
+                    diagnostics.lifecycle.assets.meshes,
+                    diagnostics.lifecycle.assets.images,
+                    diagnostics.lifecycle.assets.standard_materials
+                        + diagnostics.lifecycle.assets.curved_materials
+                        + diagnostics.lifecycle.assets.cloud_materials,
+                    diagnostics.lifecycle.history_resets
+                ));
+                for warning in &diagnostics.warnings {
+                    ui.label(
+                        egui::RichText::new(warning)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+                    );
+                }
+                for inert in &diagnostics.inert_settings {
+                    ui.label(
+                        egui::RichText::new(inert)
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+            if view_dist_changed && let Some(mut w) = world {
+                w.view_dist = settings.view_dist;
             }
             ui.separator();
             let mut cloud_changed = false;
             ui.collapsing("☁ 体积云实时参数", |ui| {
                 ui.horizontal(|ui| {
                     let value = cloud_tuning.coverage;
-                    ui.label("覆盖率");
+                    ui.label(setting_label("cloud_coverage"));
                     cloud_changed |= ui
                         .add(
-                            egui::Slider::new(&mut cloud_tuning.coverage, 0.0..=1.0)
-                                .text(format!("{value:.2}")),
+                            egui::Slider::new(
+                                &mut cloud_tuning.coverage,
+                                setting_slider_f32("cloud_coverage"),
+                            )
+                            .text(format!("{value:.2}")),
                         )
                         .changed();
                 });
                 ui.horizontal(|ui| {
                     let value = cloud_tuning.density;
-                    ui.label("体积密度");
+                    ui.label(setting_label("cloud_density"));
                     cloud_changed |= ui
                         .add(
-                            egui::Slider::new(&mut cloud_tuning.density, 0.0..=1.0)
-                                .text(format!("{value:.2}")),
+                            egui::Slider::new(
+                                &mut cloud_tuning.density,
+                                setting_slider_f32("cloud_density"),
+                            )
+                            .text(format!("{value:.2}")),
                         )
                         .changed();
                 });
                 ui.horizontal(|ui| {
                     let value = cloud_tuning.raymarch_steps;
-                    ui.label("主 Raymarch");
+                    ui.label(setting_label("cloud_raymarch_steps"));
                     cloud_changed |= ui
                         .add(
-                            egui::Slider::new(&mut cloud_tuning.raymarch_steps, 4..=64)
-                                .text(format!("{value} 步")),
+                            egui::Slider::new(
+                                &mut cloud_tuning.raymarch_steps,
+                                setting_slider_u32("cloud_raymarch_steps"),
+                            )
+                            .text(format!("{value} 步")),
                         )
                         .changed();
                 });
@@ -4856,6 +5036,14 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
+        // A06 single-pass guard: this plugin owns the only manual egui pass
+        // (`egui_manual_pass` + `egui_begin_pass`/`egui_end_pass`). Registering
+        // the UI without its context would leave a dangling pass owner, and a
+        // second EguiPlugin would fight over the same contexts.
+        assert!(
+            app.is_plugin_added::<bevy_egui::EguiPlugin>(),
+            "UiPlugin requires exactly one EguiPlugin registered before it"
+        );
         app.add_message::<SaveEvent>()
             .add_message::<QuitToMenuEvent>()
             .init_resource::<UiState>()

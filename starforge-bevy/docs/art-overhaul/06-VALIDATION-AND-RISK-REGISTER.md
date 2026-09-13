@@ -300,6 +300,11 @@ target/visual-qa/<commit>/<scene>/<run>/   # 大图/视频/日志，本地或CI�
 docs/art-overhaul/progress/<ID>.md       # 受版本控制的状态/摘要/工件引用
 ```
 
+K01 已实现运行根目录的 `<run>-acceptance.json`，其 v1 JSON Schema 位于
+[`schemas/acceptance-report-v1.schema.json`](schemas/acceptance-report-v1.schema.json)，受版本控制的混合状态示例位于
+[`examples/K01-acceptance-report-v1.json`](examples/K01-acceptance-report-v1.json)。`execution_status` 只表示本次
+visual-QA 是否完成；`release_status` 聚合所有发布必需检查，任何 `fail`、`skipped` 或 `not_run` 都不会被计为通过。
+
 工件若不入git，提供可复现命令、内容hash和团队可访问存储位置；单独本地绝对路径不能作为其他agent唯一依据。黄金图大小可控时选少量版本化，完整视频留工件，不把数GB输出提交仓库。
 
 最终发布检查：

@@ -25,7 +25,7 @@ cargo run -- --smoke   # 冒烟自测：自动建世界 → 地面游玩 → 进
 
 | 参数 | 作用 |
 |---|---|
-| `--visual-qa` | 运行确定性视觉 QA（默认 S01 材料庭院 / S02 封闭屋 / S06 流式路线），报告写到 `target/visual-qa/<commit7>/...` |
+| `--visual-qa` | 运行确定性视觉 QA（默认 S01 材料庭院 / S02 封闭屋 / S06 流式路线），报告写到 `target/visual-qa/<commit7>/...`；K01 同时生成 `<run>-acceptance.json`，把本轮执行结果与发布门槛分开，并显式记录 `pass/fail/skipped/not_run` |
 | `--visual-qa-scene S01,S06` | 选择场景；`S01`/`S02`/`S06` 已实现，`B01` 风格/尺度校准架，`B04` PBR 家族庭院（13 家族 × 5 形态，正午/阴天/夕阳/夜灯/室内 9 机位），`D01` 灰卡曝光与通道矩阵（full/no_post/sun_only/ambient_only/probe_stops/probe_zebra 配对帧），`E01` 云壳诊断矩阵 |
 | `--visual-qa-seed 1337` `--visual-qa-biome frozen` `--visual-qa-day 0.75` | 固定种子/生态/日时；默认 seed 11、lush、day 0.5 |
 | `--visual-qa-route-frames 240` `--visual-qa-run name` `--visual-qa-out dir` | 路线帧数/运行标签/输出根目录 |

@@ -737,14 +737,14 @@
     },
     {
       "id": "K01",
-      "status": "planned",
+      "status": "review",
       "rust_net_physical_lines_budget": 250,
       "dependencies": [
         "A01"
       ],
       "deliverable": "验收manifest/报告schema",
       "instructions": "05-EXECUTION-BACKLOG.md",
-      "owner": null
+      "owner": "codex"
     },
     {
       "id": "K02",

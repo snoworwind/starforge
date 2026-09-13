@@ -12,6 +12,7 @@
 //! `docs/art-overhaul/06-VALIDATION-AND-RISK-REGISTER.md` (6.1/6.8).
 
 mod baseline;
+mod report;
 mod scene;
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ use crate::visual::{
 };
 use crate::weather::{CloudDebug, CloudDebugMode, CloudDiagnostics};
 use crate::world::{ChunkMesh, World};
+use report::{AcceptanceCheck, AcceptanceReport, CheckStatus, EvidenceRef};
 
 pub use scene::{BuiltScene, SCENE_VERSION, SceneId, ScenePose};
 
@@ -1043,6 +1045,262 @@ fn write_rendering_report(
     write_json(&path, &report);
 }
 
+/// K01 evidence index. This intentionally keeps a successful scene run
+/// separate from release readiness: K02/K03/K04/K05 remain explicit
+/// `not_run`/`skipped` checks until their own evidence exists.
+fn write_acceptance_report(
+    run: &VisualQaRun,
+    capabilities: &RenderCapabilities,
+    rendering_inventory_present: bool,
+) {
+    let mut checks = Vec::new();
+    let execution_status = if run.exit_code == 0 {
+        CheckStatus::Pass
+    } else {
+        CheckStatus::Fail
+    };
+    checks.push(AcceptanceCheck::new(
+        "run.visual_qa",
+        "requested visual-QA run",
+        true,
+        execution_status,
+        run.failure.clone(),
+        vec![EvidenceRef::new(
+            format!("{}-summary.json", run.config.run_label),
+            "run_summary",
+        )],
+    ));
+
+    for scene in &run.config.scenes {
+        let result = run
+            .results
+            .iter()
+            .find(|result| result.scene_id == scene.key());
+        let scene_prefix = format!("{}/{}/", scene.key(), run.config.run_label);
+        let (status, reason, evidence) = match result {
+            Some(result) => {
+                let manifest = run.scene_dir(*scene).join(&result.manifest);
+                let metrics = result
+                    .metrics
+                    .as_deref()
+                    .map(|name| run.scene_dir(*scene).join(name));
+                let files_present =
+                    manifest.is_file() && metrics.as_ref().is_some_and(|path| path.is_file());
+                let passed = result.status == "ok" && files_present;
+                (
+                    if passed {
+                        CheckStatus::Pass
+                    } else {
+                        CheckStatus::Fail
+                    },
+                    (!passed).then(|| {
+                        if !files_present {
+                            "scene manifest or metrics file is missing".into()
+                        } else {
+                            format!("scene reported status {}", result.status)
+                        }
+                    }),
+                    vec![
+                        EvidenceRef::new(
+                            format!("{scene_prefix}{}", result.manifest),
+                            "scene_manifest",
+                        ),
+                        EvidenceRef::new(
+                            format!(
+                                "{scene_prefix}{}",
+                                result.metrics.as_deref().unwrap_or("metrics.json")
+                            ),
+                            "scene_metrics",
+                        ),
+                    ],
+                )
+            }
+            None => (
+                CheckStatus::NotRun,
+                Some(
+                    run.failure
+                        .clone()
+                        .unwrap_or_else(|| "requested scene did not produce a result".into()),
+                ),
+                vec![],
+            ),
+        };
+        checks.push(AcceptanceCheck::new(
+            format!("scene.{}.execution", scene.key()),
+            format!("{} scene execution", scene.key()),
+            true,
+            status,
+            reason,
+            evidence,
+        ));
+
+        let (capture_status, capture_reason) = if !run.config.capture {
+            (
+                CheckStatus::Skipped,
+                Some("capture disabled by --visual-qa-no-capture".into()),
+            )
+        } else if let Some(result) = result {
+            if result.captures > 0 {
+                (CheckStatus::Pass, None)
+            } else {
+                (
+                    CheckStatus::Fail,
+                    Some("capture was enabled but the scene produced no frames".into()),
+                )
+            }
+        } else {
+            (
+                CheckStatus::NotRun,
+                Some("scene did not reach its capture stage".into()),
+            )
+        };
+        checks.push(AcceptanceCheck::new(
+            format!("scene.{}.captures", scene.key()),
+            format!("{} raw capture evidence", scene.key()),
+            true,
+            capture_status,
+            capture_reason,
+            if capture_status == CheckStatus::Pass {
+                vec![EvidenceRef::new(
+                    format!("{scene_prefix}raw-frames/"),
+                    "raw_frames",
+                )]
+            } else {
+                vec![]
+            },
+        ));
+    }
+
+    let cpu_ok = !run.results.is_empty()
+        && run.results.iter().all(|result| {
+            result.metrics.is_some() && result.measured_frames > 0 && result.p99_ms.is_finite()
+        });
+    checks.push(AcceptanceCheck::new(
+        "metrics.cpu_frame_time",
+        "CPU frame-time samples",
+        true,
+        if cpu_ok {
+            CheckStatus::Pass
+        } else if run.exit_code == 0 {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::NotRun
+        },
+        (!cpu_ok).then(|| "no complete finite CPU frame-time sample set".into()),
+        run.results
+            .iter()
+            .filter_map(|result| {
+                result.metrics.as_ref().map(|metrics| {
+                    EvidenceRef::new(
+                        format!("{}/{}/{}", result.scene_id, run.config.run_label, metrics),
+                        "scene_metrics",
+                    )
+                })
+            })
+            .collect(),
+    ));
+
+    for (id, label, suffix, kind) in [
+        (
+            "metadata.capabilities",
+            "renderer capabilities",
+            "capabilities",
+            "capabilities",
+        ),
+        (
+            "metadata.diagnostics",
+            "visual diagnostics",
+            "diagnostics",
+            "diagnostics",
+        ),
+        (
+            "metadata.rendering",
+            "render pass inventory",
+            "rendering",
+            "render_inventory",
+        ),
+    ] {
+        let file = format!("{}-{suffix}.json", run.config.run_label);
+        let present = run.run_root().join(&file).is_file()
+            && (id != "metadata.rendering" || rendering_inventory_present);
+        checks.push(AcceptanceCheck::new(
+            id,
+            label,
+            true,
+            if present {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            (!present).then(|| "required metadata was not collected".into()),
+            vec![EvidenceRef::new(file, kind)],
+        ));
+    }
+
+    checks.push(AcceptanceCheck::new(
+        "metrics.gpu_pass_time",
+        "per-pass GPU timing",
+        true,
+        if capabilities.features.timestamp_query {
+            CheckStatus::NotRun
+        } else {
+            CheckStatus::Skipped
+        },
+        Some(if capabilities.features.timestamp_query {
+            "device supports timestamps, but K03 GPU timing is not implemented".into()
+        } else {
+            "device does not expose timestamp queries; an alternate K03 measurement is required"
+                .into()
+        }),
+        vec![EvidenceRef::new(
+            format!("{}-rendering.json", run.config.run_label),
+            "render_inventory",
+        )],
+    ));
+    for (id, label, reason) in [
+        (
+            "regression.integration",
+            "save/network/gameplay integration",
+            "K02 integration runner has not been run",
+        ),
+        (
+            "package.cold_install",
+            "cold-install and license audit",
+            "K04 package validation has not been run",
+        ),
+        (
+            "review.human_visual",
+            "paired human visual review",
+            "K05 human review has not been run",
+        ),
+    ] {
+        checks.push(AcceptanceCheck::new(
+            id,
+            label,
+            true,
+            CheckStatus::NotRun,
+            Some(reason.into()),
+            vec![],
+        ));
+    }
+
+    let report = AcceptanceReport::new(
+        run.config.run_label.clone(),
+        run.baseline.commit.clone(),
+        execution_status,
+        checks,
+    );
+    let issues = report.validate();
+    if !issues.is_empty() {
+        eprintln!("visual-qa: K01 acceptance report invalid: {issues:?}");
+    }
+    write_json(
+        &run.run_root()
+            .join(format!("{}-acceptance.json", run.config.run_label)),
+        &report,
+    );
+}
+
 fn visual_qa_on_play(
     mut run: ResMut<VisualQaRun>,
     mut day: ResMut<DayTime>,
@@ -1387,6 +1645,7 @@ fn visual_qa_driver(
                     &capabilities,
                     &probe_status,
                 );
+                write_acceptance_report(&run, &capabilities, pass_inventory.is_some());
             }
             run.stage_frame = run.stage_frame.saturating_add(1);
             if run.stage_frame == DRAIN_FRAMES + 30 && !run.config.keep_open {

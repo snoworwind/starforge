@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "report_kind": "starforge.visual_acceptance",
+  "run_label": "k01-example",
+  "commit": "000000000000",
+  "execution_status": "pass",
+  "release_status": "not_run",
+  "counts": {
+    "pass": 2,
+    "fail": 0,
+    "skipped": 2,
+    "not_run": 1
+  },
+  "checks": [
+    {
+      "id": "run.visual_qa",
+      "label": "requested visual-QA run",
+      "required_for_release": true,
+      "status": "pass",
+      "evidence": [
+        {
+          "path": "k01-example-summary.json",
+          "kind": "run_summary"
+        }
+      ]
+    },
+    {
+      "id": "scene.S01.execution",
+      "label": "S01 scene execution",
+      "required_for_release": true,
+      "status": "pass",
+      "evidence": [
+        {
+          "path": "S01/k01-example/manifest.json",
+          "kind": "scene_manifest"
+        },
+        {
+          "path": "S01/k01-example/metrics.json",
+          "kind": "scene_metrics"
+        }
+      ]
+    },
+    {
+      "id": "scene.S01.captures",
+      "label": "S01 raw capture evidence",
+      "required_for_release": true,
+      "status": "skipped",
+      "reason": "capture disabled by --visual-qa-no-capture",
+      "evidence": []
+    },
+    {
+      "id": "metrics.gpu_pass_time",
+      "label": "per-pass GPU timing",
+      "required_for_release": true,
+      "status": "skipped",
+      "reason": "device does not expose timestamp queries; an alternate K03 measurement is required",
+      "evidence": [
+        {
+          "path": "k01-example-rendering.json",
+          "kind": "render_inventory"
+        }
+      ]
+    },
+    {
+      "id": "review.human_visual",
+      "label": "paired human visual review",
+      "required_for_release": true,
+      "status": "not_run",
+      "reason": "K05 human review has not been run",
+      "evidence": []
+    }
+  ],
+  "notes": [
+    "execution_status only describes this visual-QA invocation; it is not release approval",
+    "a skipped or not_run check is never counted as pass",
+    "paths are relative to the visual-QA run root"
+  ]
+}

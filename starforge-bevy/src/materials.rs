@@ -53,6 +53,10 @@ pub type CurvedTerrainMaterial = ExtendedMaterial<StandardMaterial, PlanetCurveE
 #[derive(Resource, Clone)]
 pub struct TerrainMaterials {
     pub solid: Handle<StandardMaterial>,
+    pub cutout: Handle<StandardMaterial>,
+    pub transparent: Handle<StandardMaterial>,
+    pub emissive: Handle<StandardMaterial>,
+    pub special: Handle<StandardMaterial>,
     pub water: Handle<StandardMaterial>,
     /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）。
     /// Vertex alpha is rewritten on the CPU every frame for the far-hole ring.
@@ -65,6 +69,9 @@ pub struct TerrainMaterials {
     /// the albedo UV rects. Linear data, Nearest sampling so cells cannot
     /// bleed into each other.
     pub orm_atlas: Handle<Image>,
+    /// B04 tangent-space normal atlas; C02 binds it once chunk meshes carry
+    /// valid tangents for every face orientation.
+    pub normal_atlas: Handle<Image>,
 }
 
 impl TerrainMaterials {
@@ -115,21 +122,55 @@ impl TerrainMaterials {
         orm.sampler = orm_sampler;
         let orm_atlas = images.add(orm);
 
-        let solid = materials.add(StandardMaterial {
+        let mut normal = Image::new(
+            bevy::render::render_resource::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            bevy::render::render_resource::TextureDimension::D2,
+            crate::art::pbr::build_normal_atlas(atlas),
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        let mut normal_sampler = ImageSampler::default();
+        let d = normal_sampler.get_or_init_descriptor();
+        d.mag_filter = ImageFilterMode::Nearest;
+        d.min_filter = ImageFilterMode::Nearest;
+        d.mipmap_filter = ImageFilterMode::Nearest;
+        normal.sampler = normal_sampler;
+        let normal_atlas = images.add(normal);
+
+        let opaque_material = StandardMaterial {
             base_color_texture: Some(atlas_image.clone()),
             // `metallic`/`perceptual_roughness` multiply the ORM channels, so
             // the factors stay at 1.0 and the atlas carries the values.
             metallic_roughness_texture: Some(orm_atlas.clone()),
+            normal_map_texture: Some(normal_atlas.clone()),
             metallic: 1.0,
             perceptual_roughness: 1.0,
+            double_sided: false,
+            cull_mode: Some(bevy::render::render_resource::Face::Back),
+            ..default()
+        };
+        let solid = materials.add(opaque_material.clone());
+        let cutout = materials.add(StandardMaterial {
+            alpha_mode: AlphaMode::Mask(0.4),
             double_sided: true,
             cull_mode: None,
-            // Leaves and cross-shaped plants share this mesh/material and
-            // contain transparent atlas texels. Keep alpha cutout so the
-            // visible silhouette and its shadow use the same coverage.
-            alpha_mode: AlphaMode::Mask(0.4),
-            ..default()
+            ..opaque_material.clone()
         });
+        let transparent = materials.add(StandardMaterial {
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            ..opaque_material.clone()
+        });
+        // C02 gives glowing blocks an independent render bucket, but retains
+        // the established vertex-brightness path. D04/H04 own HDR emission
+        // intensity and bloom coordination, avoiding double amplification.
+        let emissive = materials.add(opaque_material.clone());
+        let special = materials.add(opaque_material);
         let (tr, tg, tb) = (
             ((water_tint >> 16) & 0xFF) as f32 / 255.0,
             ((water_tint >> 8) & 0xFF) as f32 / 255.0,
@@ -171,11 +212,16 @@ impl TerrainMaterials {
         });
         Self {
             solid,
+            cutout,
+            transparent,
+            emissive,
+            special,
             water,
             far,
             lod,
             atlas_image,
             orm_atlas,
+            normal_atlas,
         }
     }
 }

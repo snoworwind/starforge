@@ -1071,11 +1071,26 @@ pub struct Chunk {
     pub dirty: bool,
     pub modified: bool,
     pub mesh: Option<bevy::prelude::Entity>,
+    pub cutout_mesh: Option<bevy::prelude::Entity>,
+    pub transparent_mesh: Option<bevy::prelude::Entity>,
+    pub emissive_mesh: Option<bevy::prelude::Entity>,
+    pub special_mesh: Option<bevy::prelude::Entity>,
     pub water_mesh: Option<bevy::prelude::Entity>,
     pub from_save: bool,
     /// Newly materialized chunks need one voxel scan to rebuild machine state.
     pub machine_scan: bool,
     pub need_save: bool,
+}
+
+impl Chunk {
+    pub(crate) fn has_render_mesh(&self) -> bool {
+        self.mesh.is_some()
+            || self.cutout_mesh.is_some()
+            || self.transparent_mesh.is_some()
+            || self.emissive_mesh.is_some()
+            || self.special_mesh.is_some()
+            || self.water_mesh.is_some()
+    }
 }
 
 #[derive(Resource)]
@@ -1147,16 +1162,21 @@ impl World {
                     dirty: true,
                     modified: false,
                     mesh: None,
+                    cutout_mesh: None,
+                    transparent_mesh: None,
+                    emissive_mesh: None,
+                    special_mesh: None,
                     water_mesh: None,
                     from_save,
                     machine_scan: true,
                     need_save: false,
                 },
             );
-            // JS markNeighborsDirty：新块生成后，已网格化的 4 邻需重算边界面
-            for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+            // AO samples corner voxels, so a newly materialized halo can
+            // change diagonal neighbours as well as the four face neighbours.
+            for (nx, nz) in chunk_neighbours(cx, cz) {
                 if let Some(c) = self.chunks.get_mut(&ckey(nx, nz))
-                    && (c.mesh.is_some() || c.water_mesh.is_some())
+                    && c.has_render_mesh()
                 {
                     c.dirty = true;
                     self.stream_dirty = true;
@@ -1204,17 +1224,22 @@ impl World {
         c.need_save = true;
         c.dirty = true;
         self.stream_dirty = true;
-        if lx == 0 {
-            self.mark_dirty(cx - 1, cz);
-        }
-        if lx == CHUNK - 1 {
-            self.mark_dirty(cx + 1, cz);
-        }
-        if lz == 0 {
-            self.mark_dirty(cx, cz - 1);
-        }
-        if lz == CHUNK - 1 {
-            self.mark_dirty(cx, cz + 1);
+        let x_offsets: &[i32] = match lx {
+            0 => &[-1, 0],
+            x if x == CHUNK - 1 => &[0, 1],
+            _ => &[0],
+        };
+        let z_offsets: &[i32] = match lz {
+            0 => &[-1, 0],
+            z if z == CHUNK - 1 => &[0, 1],
+            _ => &[0],
+        };
+        for &dx in x_offsets {
+            for &dz in z_offsets {
+                if dx != 0 || dz != 0 {
+                    self.mark_dirty(cx + dx, cz + dz);
+                }
+            }
         }
     }
 
@@ -1456,29 +1481,61 @@ impl World {
     }
 }
 
+fn chunk_neighbours(cx: i32, cz: i32) -> impl Iterator<Item = (i32, i32)> {
+    (-1..=1).flat_map(move |dz| {
+        (-1..=1)
+            .filter(move |&dx| dx != 0 || dz != 0)
+            .map(move |dx| (cx + dx, cz + dz))
+    })
+}
+
 // ===================== Mesh building =====================
 
+pub const VOXEL_AO_ATTRIBUTE: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Voxel_Ao",
+        10,
+        bevy::render::render_resource::VertexFormat::Float32,
+    );
+pub const VOXEL_MATERIAL_ATTRIBUTE: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Voxel_Material_Id",
+        11,
+        bevy::render::render_resource::VertexFormat::Uint32,
+    );
+
+#[derive(Default)]
 pub struct VoxelMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub tangents: Vec<[f32; 4]>,
     pub uvs: Vec<[f32; 2]>,
+    pub aos: Vec<f32>,
+    pub material_ids: Vec<u32>,
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
 impl VoxelMesh {
     fn new() -> Self {
-        Self {
-            positions: Vec::new(),
-            normals: Vec::new(),
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            indices: Vec::new(),
-        }
+        Self::default()
     }
 
     fn is_empty(&self) -> bool {
         self.positions.is_empty()
+    }
+
+    fn append(&mut self, mut other: Self) {
+        let base = self.positions.len() as u32;
+        self.positions.append(&mut other.positions);
+        self.normals.append(&mut other.normals);
+        self.tangents.append(&mut other.tangents);
+        self.uvs.append(&mut other.uvs);
+        self.aos.append(&mut other.aos);
+        self.material_ids.append(&mut other.material_ids);
+        self.colors.append(&mut other.colors);
+        self.indices
+            .extend(other.indices.into_iter().map(|index| index + base));
     }
 
     /// Deterministic FNV-1a signature over the full vertex/index stream. C01
@@ -1505,10 +1562,21 @@ impl VoxelMesh {
                 write(&mut hash, &value.to_bits().to_le_bytes());
             }
         }
+        for tangent in &self.tangents {
+            for value in tangent {
+                write(&mut hash, &value.to_bits().to_le_bytes());
+            }
+        }
         for uv in &self.uvs {
             for value in uv {
                 write(&mut hash, &value.to_bits().to_le_bytes());
             }
+        }
+        for ao in &self.aos {
+            write(&mut hash, &ao.to_bits().to_le_bytes());
+        }
+        for material_id in &self.material_ids {
+            write(&mut hash, &material_id.to_le_bytes());
         }
         for color in &self.colors {
             for value in color {
@@ -1519,6 +1587,80 @@ impl VoxelMesh {
             write(&mut hash, &index.to_le_bytes());
         }
         hash
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeshBucket {
+    Opaque,
+    Cutout,
+    Transparent,
+    Emissive,
+    Special,
+    Liquid,
+}
+
+fn mesh_bucket(def: &data::Block) -> MeshBucket {
+    if def.liquid {
+        MeshBucket::Liquid
+    } else if def.cross || (def.transparent && def.fancy) {
+        MeshBucket::Cutout
+    } else if def.transparent {
+        MeshBucket::Transparent
+    } else if def.glow {
+        MeshBucket::Emissive
+    } else if def.machine.is_some() || def.lowbox.is_some() {
+        MeshBucket::Special
+    } else {
+        MeshBucket::Opaque
+    }
+}
+
+fn should_emit_face(
+    id: u8,
+    def: &data::Block,
+    neighbor_id: u8,
+    neighbor: &data::Block,
+    face: usize,
+) -> bool {
+    if def.liquid {
+        return !(neighbor_id == id || (neighbor.solid && !neighbor.transparent));
+    }
+    if def.lowbox.is_some() && face == 3 {
+        return !(neighbor.solid && !neighbor.transparent);
+    }
+    if def.transparent {
+        return !(neighbor.solid && !neighbor.transparent) && neighbor_id != id;
+    }
+    !(neighbor.solid && !neighbor.transparent && !neighbor.cross && neighbor.lowbox.is_none())
+}
+
+#[derive(Default)]
+pub struct ChunkMeshBuckets {
+    pub opaque: Option<VoxelMesh>,
+    pub cutout: Option<VoxelMesh>,
+    pub transparent: Option<VoxelMesh>,
+    pub emissive: Option<VoxelMesh>,
+    pub special: Option<VoxelMesh>,
+    pub liquid: Option<VoxelMesh>,
+}
+
+impl ChunkMeshBuckets {
+    fn combined_solid(self) -> Option<VoxelMesh> {
+        let mut combined = VoxelMesh::new();
+        for mesh in [
+            self.opaque,
+            self.cutout,
+            self.transparent,
+            self.emissive,
+            self.special,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            combined.append(mesh);
+        }
+        (!combined.is_empty()).then_some(combined)
     }
 }
 
@@ -1545,16 +1687,17 @@ fn surface_uv(atlas: &crate::textures::Atlas, material: SurfaceMaterialId) -> [f
         .unwrap_or_else(|| atlas.uv_rect(catalog::FALLBACK_TILE))
 }
 
-/// C01 MeshBuilder entry. The builder owns the output buffers plus the
-/// world/chunk/atlas inputs for one chunk; [`build_chunk_meshes`] stays the
-/// stable thin wrapper. C02+ grows buckets, UV/tangent/AO and greedy merging
-/// inside [`ChunkMeshBuilder::build`] without touching call sites.
+/// C01 MeshBuilder entry, expanded by C02 into render-compatible buckets.
 pub struct ChunkMeshBuilder<'a> {
     world: &'a World,
     chunk: &'a Chunk,
     atlas: &'a crate::textures::Atlas,
-    solid: VoxelMesh,
-    water: VoxelMesh,
+    opaque: VoxelMesh,
+    cutout: VoxelMesh,
+    transparent: VoxelMesh,
+    emissive: VoxelMesh,
+    special: VoxelMesh,
+    liquid: VoxelMesh,
 }
 
 impl<'a> ChunkMeshBuilder<'a> {
@@ -1563,17 +1706,19 @@ impl<'a> ChunkMeshBuilder<'a> {
             world,
             chunk,
             atlas,
-            solid: VoxelMesh::new(),
-            water: VoxelMesh::new(),
+            opaque: VoxelMesh::new(),
+            cutout: VoxelMesh::new(),
+            transparent: VoxelMesh::new(),
+            emissive: VoxelMesh::new(),
+            special: VoxelMesh::new(),
+            liquid: VoxelMesh::new(),
         }
     }
 
-    pub fn build(mut self) -> (Option<VoxelMesh>, Option<VoxelMesh>) {
+    pub fn build(mut self) -> ChunkMeshBuckets {
         let world = self.world;
         let c = self.chunk;
         let atlas = self.atlas;
-        let solid = &mut self.solid;
-        let water = &mut self.water;
         let cx = c.cx;
         let cz = c.cz;
         let x0 = cx * CHUNK;
@@ -1593,11 +1738,13 @@ impl<'a> ChunkMeshBuilder<'a> {
                         continue;
                     }
                     let def = data::block_by_id(id);
+                    let bucket = mesh_bucket(def);
                     let wx = x0 + lx;
                     let wz = z0 + lz;
                     if def.cross {
                         // two diagonal quads
-                        let [u0, v0, u1, v1] = surface_uv(atlas, catalog::cross_material(id));
+                        let material = catalog::cross_material(id);
+                        let [u0, v0, u1, v1] = surface_uv(atlas, material);
                         let bright = if def.glow { 1.7 } else { 1.0 };
                         let (x, z) = (wx as f32, wz as f32);
                         let (y0, y1) = (y as f32, y as f32 + 1.0);
@@ -1617,7 +1764,8 @@ impl<'a> ChunkMeshBuilder<'a> {
                         ];
                         let uv = [[u0, v1], [u1, v1], [u0, v0], [u1, v0]];
                         for q in quads {
-                            emit_quad(solid, q, uv, bright, [0.0, 1.0, 0.0]);
+                            let normal = quad_normal(q);
+                            emit_quad(&mut self.cutout, q, uv, bright, normal, material);
                         }
                         continue;
                     }
@@ -1630,21 +1778,12 @@ impl<'a> ChunkMeshBuilder<'a> {
                         let nz = wz + dir[2];
                         let n_id = world.get(nx, ny, nz);
                         let n_def = data::block_by_id(n_id);
-                        let emit = if def.liquid {
-                            !(n_id == id || (n_def.solid && !n_def.transparent))
-                        } else if def.lowbox.is_some() && f == 3 {
-                            !(n_def.solid && !n_def.transparent)
-                        } else {
-                            !(n_def.solid
-                                && !n_def.transparent
-                                && !n_def.cross
-                                && n_def.machine.is_none())
-                                && !(n_id == id && def.transparent && !def.fancy)
-                        };
+                        let emit = should_emit_face(id, def, n_id, n_def, f);
                         if !emit {
                             continue;
                         }
-                        let [u0, v0, u1, v1] = surface_uv(atlas, catalog::face_material(id, f));
+                        let material = catalog::face_material(id, f);
+                        let [u0, v0, u1, v1] = surface_uv(atlas, material);
                         let shade = if def.liquid {
                             0.72 + FACE_SHADE[f] * 0.28
                         } else if def.glow {
@@ -1662,7 +1801,15 @@ impl<'a> ChunkMeshBuilder<'a> {
                                 // 作为 base_color 参与 Blend，水面保持半透明
                                 *col = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 0.72];
                             }
-                            emit_quad_col(water, corners, uv, cols, dir.map(|v| v as f32));
+                            emit_quad_col(
+                                &mut self.liquid,
+                                corners,
+                                uv,
+                                cols,
+                                [1.0; 4],
+                                dir.map(|v| v as f32),
+                                material,
+                            );
                         } else {
                             // Per-vertex ambient occlusion: sample the three voxels
                             // touching each corner in the neighbouring layer. This
@@ -1671,6 +1818,7 @@ impl<'a> ChunkMeshBuilder<'a> {
                             let (tangent_a, tangent_b) = face_tangents(f);
                             let center = [wx as f32 + 0.5, y as f32 + lb * 0.5, wz as f32 + 0.5];
                             let mut cols = [[0f32; 4]; 4];
+                            let mut aos = [1.0f32; 4];
                             for (i, corner) in corners.iter().enumerate() {
                                 let side_a = if corner_dot(corner, &center, tangent_a) > 0.0 {
                                     1
@@ -1692,27 +1840,48 @@ impl<'a> ChunkMeshBuilder<'a> {
                                     side_b,
                                 );
                                 let value = shade * ao;
+                                aos[i] = ao;
                                 cols[i] = [value, value, value, 1.0];
                             }
-                            emit_quad_col(solid, corners, uv, cols, dir.map(|v| v as f32));
+                            let target = match bucket {
+                                MeshBucket::Opaque => &mut self.opaque,
+                                MeshBucket::Cutout => &mut self.cutout,
+                                MeshBucket::Transparent => &mut self.transparent,
+                                MeshBucket::Emissive => &mut self.emissive,
+                                MeshBucket::Special => &mut self.special,
+                                MeshBucket::Liquid => unreachable!("liquids handled above"),
+                            };
+                            emit_quad_col(
+                                target,
+                                corners,
+                                uv,
+                                cols,
+                                aos,
+                                dir.map(|v| v as f32),
+                                material,
+                            );
                         }
                     }
                 }
             }
         }
-        (
-            if self.solid.is_empty() {
-                None
-            } else {
-                Some(self.solid)
-            },
-            if self.water.is_empty() {
-                None
-            } else {
-                Some(self.water)
-            },
-        )
+        ChunkMeshBuckets {
+            opaque: (!self.opaque.is_empty()).then_some(self.opaque),
+            cutout: (!self.cutout.is_empty()).then_some(self.cutout),
+            transparent: (!self.transparent.is_empty()).then_some(self.transparent),
+            emissive: (!self.emissive.is_empty()).then_some(self.emissive),
+            special: (!self.special.is_empty()).then_some(self.special),
+            liquid: (!self.liquid.is_empty()).then_some(self.liquid),
+        }
     }
+}
+
+pub fn build_chunk_mesh_buckets(
+    world: &World,
+    c: &Chunk,
+    atlas: &crate::textures::Atlas,
+) -> ChunkMeshBuckets {
+    ChunkMeshBuilder::new(world, c, atlas).build()
 }
 
 /// Build solid + water meshes for one chunk. Neighbors must exist.
@@ -1721,7 +1890,9 @@ pub fn build_chunk_meshes(
     c: &Chunk,
     atlas: &crate::textures::Atlas,
 ) -> (Option<VoxelMesh>, Option<VoxelMesh>) {
-    ChunkMeshBuilder::new(world, c, atlas).build()
+    let mut buckets = build_chunk_mesh_buckets(world, c, atlas);
+    let liquid = buckets.liquid.take();
+    (buckets.combined_solid(), liquid)
 }
 
 /// Corners for a face (4 positions). y0/y1 already account for lowbox height.
@@ -1826,20 +1997,17 @@ fn emit_quad(
     uv: [[f32; 2]; 4],
     bright: f32,
     n: [f32; 3],
+    material: SurfaceMaterialId,
 ) {
-    let base = m.positions.len() as u32;
-    for i in 0..4 {
-        m.positions.push([q[i].0, q[i].1, q[i].2]);
-        m.normals.push(n);
-        m.colors.push([bright, bright, bright, 1.0]);
-        m.uvs.push(uv[i]);
-    }
-    m.indices.push(base);
-    m.indices.push(base + 1);
-    m.indices.push(base + 2);
-    m.indices.push(base + 2);
-    m.indices.push(base + 1);
-    m.indices.push(base + 3);
+    emit_quad_col(
+        m,
+        q,
+        uv,
+        [[bright, bright, bright, 1.0]; 4],
+        [1.0; 4],
+        n,
+        material,
+    );
 }
 
 fn emit_quad_col(
@@ -1847,21 +2015,63 @@ fn emit_quad_col(
     q: [(f32, f32, f32); 4],
     uv: [[f32; 2]; 4],
     cols: [[f32; 4]; 4],
+    aos: [f32; 4],
     n: [f32; 3],
+    material: SurfaceMaterialId,
 ) {
     let base = m.positions.len() as u32;
+    let tangent = quad_tangent(q, uv, n);
     for i in 0..4 {
         m.positions.push([q[i].0, q[i].1, q[i].2]);
         m.normals.push(n);
+        m.tangents.push(tangent);
         m.uvs.push(uv[i]);
+        m.aos.push(aos[i]);
+        m.material_ids.push(u32::from(material.raw()));
         m.colors.push(cols[i]);
     }
-    m.indices.push(base);
-    m.indices.push(base + 1);
-    m.indices.push(base + 2);
-    m.indices.push(base + 2);
-    m.indices.push(base + 1);
-    m.indices.push(base + 3);
+    // `face_corners` is ordered for UV continuity rather than uniform
+    // winding. Choose the index direction from the declared normal so every
+    // bucket can safely use back-face culling where appropriate.
+    let geometric = Vec3::new(q[1].0 - q[0].0, q[1].1 - q[0].1, q[1].2 - q[0].2).cross(Vec3::new(
+        q[2].0 - q[0].0,
+        q[2].1 - q[0].1,
+        q[2].2 - q[0].2,
+    ));
+    if geometric.dot(Vec3::from_array(n)) >= 0.0 {
+        m.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    } else {
+        m.indices
+            .extend_from_slice(&[base, base + 2, base + 1, base + 2, base + 3, base + 1]);
+    }
+}
+
+fn quad_normal(q: [(f32, f32, f32); 4]) -> [f32; 3] {
+    let a = Vec3::new(q[1].0 - q[0].0, q[1].1 - q[0].1, q[1].2 - q[0].2);
+    let b = Vec3::new(q[2].0 - q[0].0, q[2].1 - q[0].1, q[2].2 - q[0].2);
+    let normal = a.cross(b).normalize_or_zero();
+    normal.to_array()
+}
+
+fn quad_tangent(q: [(f32, f32, f32); 4], uv: [[f32; 2]; 4], normal: [f32; 3]) -> [f32; 4] {
+    let edge_a = Vec3::new(q[1].0 - q[0].0, q[1].1 - q[0].1, q[1].2 - q[0].2);
+    let edge_b = Vec3::new(q[2].0 - q[0].0, q[2].1 - q[0].1, q[2].2 - q[0].2);
+    let duv_a = Vec2::new(uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]);
+    let duv_b = Vec2::new(uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
+    let determinant = duv_a.x * duv_b.y - duv_a.y * duv_b.x;
+    if determinant.abs() <= f32::EPSILON {
+        return [1.0, 0.0, 0.0, 1.0];
+    }
+    let inverse = determinant.recip();
+    let tangent = ((edge_a * duv_b.y - edge_b * duv_a.y) * inverse).normalize_or_zero();
+    let bitangent = ((edge_b * duv_a.x - edge_a * duv_b.x) * inverse).normalize_or_zero();
+    let handedness = if Vec3::from_array(normal).cross(tangent).dot(bitangent) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    [tangent.x, tangent.y, tangent.z, handedness]
 }
 
 // ---------- 远景模拟地形（JS ensureFarMesh / tickFar 移植） ----------
@@ -2674,9 +2884,162 @@ mod tests {
         }
     }
 
+    #[test]
+    fn face_winding_matches_declared_outward_normals() {
+        for (face, expected) in FACE_DIRS.iter().enumerate() {
+            let q = face_corners(0.0, 0.0, 0.0, 1.0, face);
+            let declared = Vec3::from_array(expected.map(|value| value as f32));
+            let mut mesh = VoxelMesh::new();
+            emit_quad(
+                &mut mesh,
+                q,
+                face_uvs(face, [0.0, 0.0, 1.0, 1.0]),
+                1.0,
+                declared.to_array(),
+                catalog::face_material(ids::GRASS, face),
+            );
+            let [a, b, c] = [
+                mesh.indices[0] as usize,
+                mesh.indices[1] as usize,
+                mesh.indices[2] as usize,
+            ];
+            let pa = Vec3::from_array(mesh.positions[a]);
+            let pb = Vec3::from_array(mesh.positions[b]);
+            let pc = Vec3::from_array(mesh.positions[c]);
+            let winding_normal = (pb - pa).cross(pc - pa).normalize();
+            assert!(winding_normal.dot(declared) > 0.999, "face {face}");
+        }
+    }
+
+    #[test]
+    fn c02_bucket_classification_is_render_compatible() {
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::GRASS)),
+            MeshBucket::Opaque
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::LEAVES)),
+            MeshBucket::Cutout
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::GLASS)),
+            MeshBucket::Transparent
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::LAMP)),
+            MeshBucket::Emissive
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::BELT)),
+            MeshBucket::Special
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::WATER)),
+            MeshBucket::Liquid
+        );
+
+        let glass = data::block_by_id(ids::GLASS);
+        assert!(!should_emit_face(ids::GLASS, glass, ids::GLASS, glass, 0));
+        assert!(should_emit_face(
+            ids::GLASS,
+            glass,
+            ids::AIR,
+            data::block_by_id(ids::AIR),
+            0,
+        ));
+    }
+
+    #[test]
+    fn c02_vertex_streams_are_aligned_and_tangent_ready() {
+        let atlas = crate::textures::Atlas::build();
+        let mut w = World::new(19, "lush", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        for (x, id) in [
+            (2, ids::LEAVES),
+            (4, ids::GLASS),
+            (6, ids::LAMP),
+            (8, ids::BELT),
+            (10, ids::WATER),
+        ] {
+            w.set(x, WORLD_H - 1, 8, id);
+        }
+        let chunk = w.get_chunk(0, 0).expect("chunk");
+        let buckets = build_chunk_mesh_buckets(&w, chunk, &atlas);
+        assert!(buckets.opaque.is_some());
+        assert!(buckets.cutout.is_some());
+        assert!(buckets.transparent.is_some());
+        assert!(buckets.emissive.is_some());
+        assert!(buckets.special.is_some());
+        assert!(buckets.liquid.is_some());
+
+        for mesh in [
+            buckets.opaque,
+            buckets.cutout,
+            buckets.transparent,
+            buckets.emissive,
+            buckets.special,
+            buckets.liquid,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let vertex_count = mesh.positions.len();
+            assert_eq!(mesh.normals.len(), vertex_count);
+            assert_eq!(mesh.tangents.len(), vertex_count);
+            assert_eq!(mesh.uvs.len(), vertex_count);
+            assert_eq!(mesh.aos.len(), vertex_count);
+            assert_eq!(mesh.material_ids.len(), vertex_count);
+            assert_eq!(mesh.colors.len(), vertex_count);
+            for ((normal, tangent), material_id) in mesh
+                .normals
+                .iter()
+                .zip(&mesh.tangents)
+                .zip(&mesh.material_ids)
+            {
+                let n = Vec3::from_array(*normal);
+                let t = Vec3::from_array([tangent[0], tangent[1], tangent[2]]);
+                assert!((n.length() - 1.0).abs() < 1.0e-5);
+                assert!((t.length() - 1.0).abs() < 1.0e-5);
+                assert!(n.dot(t).abs() < 1.0e-5);
+                assert!(SurfaceMaterialId::new(*material_id as u16).is_known());
+            }
+            assert!(mesh.aos.iter().all(|ao| (0.5..=1.0).contains(ao)));
+        }
+    }
+
+    #[test]
+    fn corner_edits_dirty_the_diagonal_ao_neighbor() {
+        let mut w = World::new(23, "lush", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        for chunk in w.chunks.values_mut() {
+            chunk.dirty = false;
+        }
+        let old = w.get(0, WORLD_H - 1, 0);
+        let replacement = if old == ids::CONCRETE {
+            ids::GLASS
+        } else {
+            ids::CONCRETE
+        };
+        w.set(0, WORLD_H - 1, 0, replacement);
+        assert!(w.get_chunk(0, 0).unwrap().dirty);
+        assert!(w.get_chunk(-1, 0).unwrap().dirty);
+        assert!(w.get_chunk(0, -1).unwrap().dirty);
+        assert!(w.get_chunk(-1, -1).unwrap().dirty);
+        assert!(!w.get_chunk(1, 1).unwrap().dirty);
+    }
+
     /// C01 golden regression: the MeshBuilder refactor must not change the
     /// vertex/index stream for a fixed seed, biome and chunk. The hash covers
-    /// absolute positions, normals, UVs, AO colors and winding order. Re-run
+    /// absolute positions, normals, tangents, UVs, explicit AO/material data,
+    /// colors and winding order. Re-run
     /// this test after every meshing change; if it fails on purpose, update the
     /// constant in the same commit as the visual review evidence.
     #[test]
@@ -2700,8 +3063,8 @@ mod tests {
             water_sig,
             water_verts,
         );
-        assert_eq!(solid.signature(), 0x8c94_ec55_2c4e_d9ca);
-        assert_eq!(solid.positions.len(), 6576);
+        assert_eq!(solid.signature(), 0xbb38_a232_d823_adb3);
+        assert_eq!(solid.positions.len(), 6340);
         assert_eq!(water_sig, 0);
     }
 
@@ -2725,7 +3088,7 @@ mod tests {
             water.signature(),
             water.positions.len(),
         );
-        assert_eq!(water.signature(), 0x8ac2_bf21_7cc7_75ad);
+        assert_eq!(water.signature(), 0xee78_6d53_d2a6_87cd);
         assert_eq!(water.positions.len(), 1248);
     }
 
@@ -2820,18 +3183,21 @@ pub fn stream_world_step(
                 let Some(c) = world.chunks.get(&key) else {
                     continue;
                 };
-                if (c.mesh.is_some() || c.water_mesh.is_some()) && !c.dirty {
+                if c.has_render_mesh() && !c.dirty {
                     continue;
                 }
-                let neighbors_exist = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
-                    .iter()
-                    .all(|(nx, nz)| world.get_chunk(*nx, *nz).is_some());
+                let neighbors_exist =
+                    chunk_neighbours(cx, cz).all(|(nx, nz)| world.get_chunk(nx, nz).is_some());
                 if !neighbors_exist {
                     continue;
                 }
                 let old_solid = c.mesh;
+                let old_cutout = c.cutout_mesh;
+                let old_transparent = c.transparent_mesh;
+                let old_emissive = c.emissive_mesh;
+                let old_special = c.special_mesh;
                 let old_water = c.water_mesh;
-                let (solid_m, water_m) = build_chunk_meshes(world, c, atlas);
+                let buckets = build_chunk_mesh_buckets(world, c, atlas);
                 // Conservative per-chunk AABB: static meshes with the full
                 // height range, so frustum culling never drops a chunk that
                 // is actually visible.
@@ -2843,8 +3209,52 @@ pub fn stream_world_step(
                     cx,
                     cz,
                     world.seed,
-                    solid_m,
+                    buckets.opaque,
                     mats.solid.clone(),
+                    y_min,
+                );
+                let cutout_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_cutout,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.cutout,
+                    mats.cutout.clone(),
+                    y_min,
+                );
+                let transparent_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_transparent,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.transparent,
+                    mats.transparent.clone(),
+                    y_min,
+                );
+                let emissive_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_emissive,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.emissive,
+                    mats.emissive.clone(),
+                    y_min,
+                );
+                let special_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_special,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.special,
+                    mats.special.clone(),
                     y_min,
                 );
                 let water_entity = upsert_chunk_mesh(
@@ -2854,12 +3264,16 @@ pub fn stream_world_step(
                     cx,
                     cz,
                     world.seed,
-                    water_m,
+                    buckets.liquid,
                     mats.water.clone(),
                     y_min,
                 );
                 let c = world.chunks.get_mut(&key).unwrap();
                 c.mesh = solid_entity;
+                c.cutout_mesh = cutout_entity;
+                c.transparent_mesh = transparent_entity;
+                c.emissive_mesh = emissive_entity;
+                c.special_mesh = special_entity;
                 c.water_mesh = water_entity;
                 c.dirty = false;
                 mesh_left -= 1;
@@ -2871,10 +3285,20 @@ pub fn stream_world_step(
     }
     // unload far meshes (keep data)
     for c in world.chunks.values_mut() {
-        if (c.mesh.is_some() || c.water_mesh.is_some())
-            && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 3
-        {
+        if c.has_render_mesh() && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 3 {
             if let Some(e) = c.mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.cutout_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.transparent_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.emissive_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.special_mesh.take() {
                 commands.entity(e).despawn();
             }
             if let Some(e) = c.water_mesh.take() {
@@ -2885,8 +3309,7 @@ pub fn stream_world_step(
     }
     // data eviction
     world.chunks.retain(|_, c| {
-        !(c.mesh.is_none()
-            && c.water_mesh.is_none()
+        !(!c.has_render_mesh()
             && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 9
             && !c.modified)
     });
@@ -2901,7 +3324,7 @@ pub fn stream_world_step(
                 }
                 match world.get_chunk(cx, cz) {
                     Some(c) => {
-                        if (c.mesh.is_none() && c.water_mesh.is_none()) || c.dirty {
+                        if !c.has_render_mesh() || c.dirty {
                             ok = false;
                         }
                     }
@@ -2939,7 +3362,10 @@ fn upsert_chunk_mesh(
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vm.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vm.normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, vm.tangents);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vm.uvs);
+    mesh.insert_attribute(VOXEL_AO_ATTRIBUTE, vm.aos);
+    mesh.insert_attribute(VOXEL_MATERIAL_ATTRIBUTE, vm.material_ids);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vm.colors);
     mesh.insert_indices(Indices::U32(vm.indices));
     let handle = meshes.add(mesh);

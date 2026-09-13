@@ -12,7 +12,7 @@ use crate::player::Player;
 use crate::visual::WorldEpoch;
 use crate::world::{self, ChunkMesh, FarMesh, World};
 
-pub const TERRAIN_DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
+pub const TERRAIN_DIAGNOSTICS_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct NearCoverage {
@@ -26,6 +26,10 @@ pub struct NearCoverage {
     pub mesh_radius_meters: f32,
     pub resident_chunks: usize,
     pub solid_meshes: usize,
+    pub cutout_meshes: usize,
+    pub transparent_meshes: usize,
+    pub emissive_meshes: usize,
+    pub special_meshes: usize,
     pub water_meshes: usize,
     pub mesh_entities: usize,
     /// Chunks inside `view_dist` with no mesh or a dirty mesh.
@@ -121,6 +125,10 @@ impl Default for NearCoverage {
             mesh_radius_meters: 9.0 * CHUNK as f32,
             resident_chunks: 0,
             solid_meshes: 0,
+            cutout_meshes: 0,
+            transparent_meshes: 0,
+            emissive_meshes: 0,
+            special_meshes: 0,
             water_meshes: 0,
             mesh_entities: 0,
             missing_view_chunks: 0,
@@ -230,6 +238,18 @@ pub fn collect_terrain_diagnostics(
         if chunk.mesh.is_some() {
             near.solid_meshes += 1;
         }
+        if chunk.cutout_mesh.is_some() {
+            near.cutout_meshes += 1;
+        }
+        if chunk.transparent_mesh.is_some() {
+            near.transparent_meshes += 1;
+        }
+        if chunk.emissive_mesh.is_some() {
+            near.emissive_meshes += 1;
+        }
+        if chunk.special_mesh.is_some() {
+            near.special_meshes += 1;
+        }
         if chunk.water_mesh.is_some() {
             near.water_meshes += 1;
         }
@@ -248,7 +268,7 @@ pub fn collect_terrain_diagnostics(
         for cz in pcz - view_dist..=pcz + view_dist {
             for cx in pcx - view_dist..=pcx + view_dist {
                 if let Some(chunk) = world.get_chunk(cx, cz) {
-                    if (chunk.mesh.is_none() && chunk.water_mesh.is_none()) || chunk.dirty {
+                    if !chunk.has_render_mesh() || chunk.dirty {
                         near.missing_view_chunks += 1;
                     }
                 } else {

@@ -161,7 +161,7 @@
     },
     {
       "id": "C02",
-      "status": "planned",
+      "status": "active",
       "rust_net_physical_lines_budget": 1200,
       "dependencies": [
         "C01",
@@ -169,7 +169,7 @@
       ],
       "deliverable": "分桶/UV/tangent/AO/边界mesh",
       "instructions": "05-EXECUTION-BACKLOG.md",
-      "owner": null
+      "owner": "codex"
     },
     {
       "id": "C03",

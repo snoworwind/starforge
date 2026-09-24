@@ -53,6 +53,10 @@ pub type CurvedTerrainMaterial = ExtendedMaterial<StandardMaterial, PlanetCurveE
 #[derive(Resource, Clone)]
 pub struct TerrainMaterials {
     pub solid: Handle<StandardMaterial>,
+    pub cutout: Handle<StandardMaterial>,
+    pub transparent: Handle<StandardMaterial>,
+    pub emissive: Handle<StandardMaterial>,
+    pub special: Handle<StandardMaterial>,
     pub water: Handle<StandardMaterial>,
     /// 远景模拟地形（顶点色直接作为地表色，无图集纹理——JS farMesh 同口径）。
     /// Vertex alpha is rewritten on the CPU every frame for the far-hole ring.
@@ -61,6 +65,13 @@ pub struct TerrainMaterials {
     /// separate from `far` avoids transparent-section sorting seams.
     pub lod: Handle<CurvedTerrainMaterial>,
     pub atlas_image: Handle<Image>,
+    /// B04 ORM atlas (R=occlusion 255, G=roughness, B=metallic), aligned with
+    /// the albedo UV rects. Linear data, Nearest sampling so cells cannot
+    /// bleed into each other.
+    pub orm_atlas: Handle<Image>,
+    /// B04 tangent-space normal atlas; C02 binds it once chunk meshes carry
+    /// valid tangents for every face orientation.
+    pub normal_atlas: Handle<Image>,
 }
 
 impl TerrainMaterials {
@@ -68,8 +79,8 @@ impl TerrainMaterials {
         materials: &mut Assets<StandardMaterial>,
         curved_materials: &mut Assets<CurvedTerrainMaterial>,
         images: &mut Assets<Image>,
-        atlas_bytes: Vec<u8>,
-        water_tint: u32,
+        atlas: &crate::textures::Atlas,
+        _water_tint: u32,
     ) -> Self {
         let mut image = Image::new(
             bevy::render::render_resource::Extent3d {
@@ -78,7 +89,7 @@ impl TerrainMaterials {
                 depth_or_array_layers: 1,
             },
             bevy::render::render_resource::TextureDimension::D2,
-            atlas_bytes,
+            atlas.to_image(),
             bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
             bevy::asset::RenderAssetUsages::RENDER_WORLD,
         );
@@ -90,25 +101,81 @@ impl TerrainMaterials {
         image.sampler = sampler;
         let atlas_image = images.add(image);
 
-        let solid = materials.add(StandardMaterial {
+        // B04: per-surface roughness/metallic. Occlusion stays 255 so the
+        // vertex AO remains the single AO source (R040).
+        let mut orm = Image::new(
+            bevy::render::render_resource::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            bevy::render::render_resource::TextureDimension::D2,
+            crate::art::pbr::build_orm_atlas(atlas),
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        let mut orm_sampler = ImageSampler::default();
+        let d = orm_sampler.get_or_init_descriptor();
+        d.mag_filter = ImageFilterMode::Nearest;
+        d.min_filter = ImageFilterMode::Nearest;
+        d.mipmap_filter = ImageFilterMode::Nearest;
+        orm.sampler = orm_sampler;
+        let orm_atlas = images.add(orm);
+
+        let mut normal = Image::new(
+            bevy::render::render_resource::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            bevy::render::render_resource::TextureDimension::D2,
+            crate::art::pbr::build_normal_atlas(atlas),
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        let mut normal_sampler = ImageSampler::default();
+        let d = normal_sampler.get_or_init_descriptor();
+        d.mag_filter = ImageFilterMode::Nearest;
+        d.min_filter = ImageFilterMode::Nearest;
+        d.mipmap_filter = ImageFilterMode::Nearest;
+        normal.sampler = normal_sampler;
+        let normal_atlas = images.add(normal);
+
+        let opaque_material = StandardMaterial {
             base_color_texture: Some(atlas_image.clone()),
+            // `metallic`/`perceptual_roughness` multiply the ORM channels, so
+            // the factors stay at 1.0 and the atlas carries the values.
+            metallic_roughness_texture: Some(orm_atlas.clone()),
+            normal_map_texture: Some(normal_atlas.clone()),
+            metallic: 1.0,
+            perceptual_roughness: 1.0,
+            double_sided: false,
+            cull_mode: Some(bevy::render::render_resource::Face::Back),
+            ..default()
+        };
+        let solid = materials.add(opaque_material.clone());
+        let cutout = materials.add(StandardMaterial {
+            alpha_mode: AlphaMode::Mask(0.4),
             double_sided: true,
             cull_mode: None,
-            // Leaves and cross-shaped plants share this mesh/material and
-            // contain transparent atlas texels. Keep alpha cutout so the
-            // visible silhouette and its shadow use the same coverage.
-            alpha_mode: AlphaMode::Mask(0.4),
-            ..default()
+            ..opaque_material.clone()
         });
-        let (tr, tg, tb) = (
-            ((water_tint >> 16) & 0xFF) as f32 / 255.0,
-            ((water_tint >> 8) & 0xFF) as f32 / 255.0,
-            (water_tint & 0xFF) as f32 / 255.0,
-        );
+        let transparent = materials.add(StandardMaterial {
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            ..opaque_material.clone()
+        });
+        // C02 gives glowing blocks an independent render bucket, but retains
+        // the established vertex-brightness path. D04/H04 own HDR emission
+        // intensity and bloom coordination, avoiding double amplification.
+        let emissive = materials.add(opaque_material.clone());
+        let special = materials.add(opaque_material);
         let water = materials.add(StandardMaterial {
-            // The tint is applied per-vertex in the water mesh (COLOR attribute,
-            // alpha 0.72); the material color is just a fallback.
-            base_color: Color::srgba(tr, tg, tb, 0.72),
+            // The biome tint and alpha already live in the water mesh's vertex
+            // colors. StandardMaterial multiplies them by base_color, so a
+            // second tint here made pools almost black and halved their alpha.
+            base_color: Color::WHITE,
             base_color_texture: Some(atlas_image.clone()),
             double_sided: true,
             cull_mode: None,
@@ -141,10 +208,16 @@ impl TerrainMaterials {
         });
         Self {
             solid,
+            cutout,
+            transparent,
+            emissive,
+            special,
             water,
             far,
             lod,
             atlas_image,
+            orm_atlas,
+            normal_atlas,
         }
     }
 }
@@ -215,7 +288,21 @@ pub fn lamp_pool_system(
             }
         }
     }
-    found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // A built lamp must retain a point-light slot when nearby natural glow
+    // blocks fill the six-light pool. Otherwise a visibly bright fixture can
+    // leave its room almost black.
+    found.sort_by(|a, b| {
+        let rank = |entry: &(f32, [i32; 3], u8)| {
+            if entry.0 < 1_600.0 && crate::data::block_by_id(entry.2).key == "lamp" {
+                0
+            } else {
+                1
+            }
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
     let glow_color = |key: &str| match key {
         "crystal" => (0x7f as f32, 0xe8 as f32, 0xe0 as f32),
         "glow_shroom" => (0x4e as f32, 0xe8 as f32, 0xb8 as f32),
@@ -227,17 +314,30 @@ pub fn lamp_pool_system(
         };
         if let Some((_, cell, id)) = found.get(i) {
             // JS: l.position.set(x+0.5, y+0.9, z+0.5) —— 光必须跟随灯块
+            // A ceiling fixture needs to shine from below its block, into the
+            // room. Ground and exposed fixtures keep the source near center.
+            let hanging = world.get(cell[0], cell[1] + 1, cell[2]) != crate::data::ids::AIR
+                && world.get(cell[0], cell[1] - 1, cell[2]) == crate::data::ids::AIR;
             tf.translation = Vec3::new(
                 cell[0] as f32 + 0.5,
-                cell[1] as f32 + 0.9,
+                cell[1] as f32 + if hanging { -0.15 } else { 0.5 },
                 cell[2] as f32 + 0.5,
             );
-            let (r, g, b) = glow_color(crate::data::block_by_id(*id).key);
+            let key = crate::data::block_by_id(*id).key;
+            let (r, g, b) = glow_color(key);
             l.color = Color::srgb(r / 255.0, g / 255.0, b / 255.0);
-            l.intensity = 220.0;
-            l.range = 11.0;
+            l.intensity = match key {
+                "lamp" => 12_000.0,
+                "crystal" => 6_000.0,
+                _ => 2_500.0,
+            };
+            l.range = 9.0;
+            // Keep local fixtures from lighting the far side of walls. Only
+            // the two nearest lamps need cubemap shadows around the player.
+            l.shadow_maps_enabled = key == "lamp" && i < 2;
         } else {
             l.intensity = 0.0;
+            l.shadow_maps_enabled = false;
         }
     }
 }

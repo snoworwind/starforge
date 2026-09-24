@@ -12,9 +12,9 @@
 
 | 组件 | 来源 | 版本 | 许可证 | 版权/署名 |
 |---|---|---|---|---|
-| 体积云渲染插件 `bevy-volumetric-clouds` | [evroon/bevy-volumetric-clouds](https://github.com/evroon/bevy-volumetric-clouds) | 0.2.0（本地 vendored，含 Starforge 兼容性修改） | MIT | Copyright (c) 2025 evroon |
+| 体积云渲染 | 本项目自研（`assets/shaders/cloud_shell.wgsl` + `src/weather/mod.rs::CloudShellMaterial`） | — | MIT（项目代码） | 无第三方署名 |
 
-上游许可证原文随源码保留在 `vendor/bevy-volumetric-clouds/LICENSE`。该目录中的源代码、着色器和文档继续按照 MIT 许可证的署名与许可证通知要求分发。
+> 说明：仓库当前不存在 `vendor/` 目录，也未使用 `bevy-volumetric-clouds` 等外部云渲染库；体积云密度场、HG 相函数、深度截断与预乘 alpha 均为本项目实现。若未来重新引入第三方渲染代码，必须在此登记并随仓库保留其许可证原文。
 
 ## 音效（32 条 Sonniss WAV + 迁移前脚步 OGG）
 
@@ -116,7 +116,7 @@
 
 - 程序化贴图（方块/物品图标）与程序化星球/空间站几何属于原版 1:1 移植的一部分，保持程序生成。
 - 被动生物使用 Quaternius 的带骨骼动画 glTF（CC0）；生物 AI 状态会在 Idle 与 Walk 之间切换，模型自带四肢、尾巴和头部动作随动画播放。
-- 旧版 Poly Pizza 生物文件仍保留在仓库中，但不再作为当前被动生物的默认模型；玩家飞船与访客飞船模型来自 Kenney Space Kit（CC0）；哨兵（sentinel）来自 KayKit Skeletons（CC0）；冒险者 NPC 来自 KayKit Adventurers（CC0）。
+- 旧版 Poly Pizza 生物文件仍保留在仓库中，但不再作为当前被动生物的默认模型；玩家飞船与访客飞船模型来自 Kenney Space Kit（CC0）；哨兵（sentinel）来自 KayKit Skeletons（CC0）。旧 NPC 角色模型保留为备用；当前村民与联机角色使用项目自制体素模型。
 - 素材进入仓库前已做轻量清洗：移除 Kenney GLB 根节点平移、修正 blob 节点缩放（100 倍）造成的渲染尺寸偏差；仅修改变换，未改动任何网格/材质/动画数据。
 
 ## 发行与署名要求

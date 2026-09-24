@@ -21,12 +21,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:17889";
-const PROTOCOL_VERSION: u16 = 3;
+const PROTOCOL_VERSION: u16 = 4;
 const MAX_PACKET: usize = 60_000;
 const MAX_PLAYERS: usize = 32;
 const MAX_BLOCK_LOG: usize = 100_000;
-const MAX_PENDING_BLOCKS: usize = 20_000;
+const MAX_PENDING_BLOCKS: usize = MAX_BLOCK_LOG;
 const MAX_BLOCKS_PER_SECOND: usize = 1_000;
+const WORLD_DELTA_PAGE_SIZE: usize = 8;
+const WORLD_DELTA_WINDOW: usize = 32;
+const MAX_UNACKED_LIVE_BLOCKS: usize = 4_096;
+const BLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(300);
+const WORLD_DELTA_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,6 +78,13 @@ enum ClientPacket {
     Block {
         update: BlockUpdate,
     },
+    BlockAck {
+        seq: u64,
+    },
+    WorldDeltaAck {
+        transfer_id: u64,
+        page: usize,
+    },
     Ping,
     Disconnect,
 }
@@ -80,13 +92,33 @@ enum ClientPacket {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ServerPacket {
-    Welcome { id: u64, host_name: String },
-    Reject { reason: String },
-    Snapshot { seq: u64, players: Vec<NetPlayer> },
-    Chat { name: String, text: String },
-    Notice { text: String },
-    Block { update: BlockUpdate },
-    WorldDelta { blocks: Vec<BlockUpdate> },
+    Welcome {
+        id: u64,
+        host_name: String,
+    },
+    Reject {
+        reason: String,
+    },
+    Snapshot {
+        seq: u64,
+        players: Vec<NetPlayer>,
+    },
+    Chat {
+        name: String,
+        text: String,
+    },
+    Notice {
+        text: String,
+    },
+    Block {
+        update: BlockUpdate,
+    },
+    WorldDelta {
+        transfer_id: u64,
+        page: usize,
+        page_count: usize,
+        blocks: Vec<BlockUpdate>,
+    },
     Pong,
 }
 
@@ -154,6 +186,7 @@ pub struct NetworkState {
     server_stop: Option<Sender<()>>,
     remote_entities: HashMap<u64, Entity>,
     pending_blocks: HashMap<(u32, usize), Vec<BlockUpdate>>,
+    pending_block_count: usize,
     block_versions: HashMap<(u32, usize, i32, i32, i32), u64>,
     snapshot_seq: u64,
     send_acc: f32,
@@ -177,6 +210,7 @@ impl Default for NetworkState {
             server_stop: None,
             remote_entities: HashMap::new(),
             pending_blocks: HashMap::new(),
+            pending_block_count: 0,
             block_versions: HashMap::new(),
             snapshot_seq: 0,
             send_acc: 0.0,
@@ -206,6 +240,7 @@ impl NetworkState {
         self.role = ConnectionRole::Offline;
         self.players.clear();
         self.pending_blocks.clear();
+        self.pending_block_count = 0;
         self.block_versions.clear();
         self.snapshot_seq = 0;
         self.status = "未连接".to_string();
@@ -219,7 +254,6 @@ impl NetworkState {
     }
 }
 
-#[derive(Clone)]
 struct ServerClient {
     id: u64,
     name: String,
@@ -227,6 +261,24 @@ struct ServerClient {
     state: Option<NetPlayer>,
     block_window: Instant,
     block_count: usize,
+    unacked_blocks: HashMap<u64, PendingLiveBlock>,
+    live_retry_cursor: u64,
+    world_delta: Option<WorldDeltaTransfer>,
+}
+
+struct PendingLiveBlock {
+    update: BlockUpdate,
+    sent_at: Instant,
+}
+
+struct WorldDeltaTransfer {
+    id: u64,
+    updates: Vec<BlockUpdate>,
+    sent_at: Vec<Option<Instant>>,
+    acknowledged: Vec<bool>,
+    next_page: usize,
+    in_flight_pages: Vec<usize>,
+    retry_cursor: usize,
 }
 
 fn clean_name(name: &str) -> String {
@@ -329,7 +381,9 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
             let mut next_id = 1u64;
             let mut block_seq = 0u64;
             let mut snapshot_seq = 0u64;
+            let mut next_transfer_id = 1u64;
             let mut last_snapshot = Instant::now();
+            let mut last_live_retry = Instant::now();
             let mut buf = [0u8; MAX_PACKET];
             loop {
                 if stop_rx.try_recv().is_ok() {
@@ -385,23 +439,46 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                                 );
                                 continue;
                             }
-                            let final_name = unique_name(&clients, &name);
-                            let id = clients.get(&addr).map(|c| c.id).unwrap_or_else(|| {
+                            let (id, final_name, joined) = if let Some(client) =
+                                clients.get_mut(&addr)
+                            {
+                                // Hello is retried until Welcome arrives. Keep the active player,
+                                // transfer cursor, and assigned name when that retry is received.
+                                client.last_seen = Instant::now();
+                                (client.id, client.name.clone(), false)
+                            } else {
+                                let final_name = unique_name(&clients, &name);
                                 let id = next_id;
                                 next_id = next_id.wrapping_add(1).max(1);
-                                id
-                            });
-                            clients.insert(
-                                addr,
-                                ServerClient {
-                                    id,
-                                    name: final_name.clone(),
-                                    last_seen: Instant::now(),
-                                    state: None,
-                                    block_window: Instant::now(),
-                                    block_count: 0,
-                                },
-                            );
+                                let transfer_id = next_transfer_id;
+                                next_transfer_id = next_transfer_id.wrapping_add(1).max(1);
+                                let delta: Vec<BlockUpdate> = block_log.values().cloned().collect();
+                                let page_count = delta.len().div_ceil(WORLD_DELTA_PAGE_SIZE);
+                                let world_delta = (page_count > 0).then(|| WorldDeltaTransfer {
+                                    id: transfer_id,
+                                    sent_at: vec![None; page_count],
+                                    acknowledged: vec![false; page_count],
+                                    updates: delta,
+                                    next_page: 0,
+                                    in_flight_pages: Vec::with_capacity(WORLD_DELTA_WINDOW),
+                                    retry_cursor: 0,
+                                });
+                                clients.insert(
+                                    addr,
+                                    ServerClient {
+                                        id,
+                                        name: final_name.clone(),
+                                        last_seen: Instant::now(),
+                                        state: None,
+                                        block_window: Instant::now(),
+                                        block_count: 0,
+                                        unacked_blocks: HashMap::new(),
+                                        live_retry_cursor: 0,
+                                        world_delta,
+                                    },
+                                );
+                                (id, final_name, true)
+                            };
                             send_to(
                                 &socket,
                                 addr,
@@ -410,28 +487,47 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                                     host_name: host_name.clone(),
                                 },
                             );
-                            let delta: Vec<BlockUpdate> = block_log.values().cloned().collect();
-                            for chunk in delta.chunks(400) {
-                                send_to(
+                            if joined {
+                                broadcast(
                                     &socket,
-                                    addr,
-                                    &ServerPacket::WorldDelta {
-                                        blocks: chunk.to_vec(),
+                                    &clients,
+                                    &ServerPacket::Notice {
+                                        text: format!("✦ {final_name} 加入了游戏"),
                                     },
                                 );
                             }
-                            broadcast(
-                                &socket,
-                                &clients,
-                                &ServerPacket::Notice {
-                                    text: format!("✦ {final_name} 加入了游戏"),
-                                },
-                            );
                         }
                         ClientPacket::Ping => {
                             if let Some(client) = clients.get_mut(&addr) {
                                 client.last_seen = Instant::now();
                                 send_to(&socket, addr, &ServerPacket::Pong);
+                            }
+                        }
+                        ClientPacket::BlockAck { seq } => {
+                            if let Some(client) = clients.get_mut(&addr) {
+                                client.unacked_blocks.remove(&seq);
+                                client.last_seen = Instant::now();
+                            }
+                        }
+                        ClientPacket::WorldDeltaAck { transfer_id, page } => {
+                            if let Some(client) = clients.get_mut(&addr) {
+                                if let Some(transfer) = client.world_delta.as_mut()
+                                    && transfer.id == transfer_id
+                                    && page < transfer.acknowledged.len()
+                                {
+                                    if !transfer.acknowledged[page] {
+                                        transfer
+                                            .in_flight_pages
+                                            .retain(|&in_flight| in_flight != page);
+                                    }
+                                    transfer.acknowledged[page] = true;
+                                    client.last_seen = Instant::now();
+                                }
+                                if client.world_delta.as_ref().is_some_and(|transfer| {
+                                    transfer.acknowledged.iter().all(|ack| *ack)
+                                }) {
+                                    client.world_delta = None;
+                                }
                             }
                         }
                         ClientPacket::State { mut player } => {
@@ -489,6 +585,44 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                             block_seq = block_seq.wrapping_add(1).max(1);
                             update.seq = block_seq;
                             block_log.insert(key, update.clone());
+                            let now = Instant::now();
+                            let slow_clients: Vec<SocketAddr> = clients
+                                .iter()
+                                .filter_map(|(addr, client)| {
+                                    (client.unacked_blocks.len() >= MAX_UNACKED_LIVE_BLOCKS)
+                                        .then_some(*addr)
+                                })
+                                .collect();
+                            for slow_addr in slow_clients {
+                                if let Some(slow_client) = clients.remove(&slow_addr) {
+                                    send_to(
+                                        &socket,
+                                        slow_addr,
+                                        &ServerPacket::Reject {
+                                            reason: "方块同步确认超时，已断开连接".to_string(),
+                                        },
+                                    );
+                                    broadcast(
+                                        &socket,
+                                        &clients,
+                                        &ServerPacket::Notice {
+                                            text: format!(
+                                                "{} 因同步超时离开了游戏",
+                                                slow_client.name
+                                            ),
+                                        },
+                                    );
+                                }
+                            }
+                            for client in clients.values_mut() {
+                                client.unacked_blocks.insert(
+                                    update.seq,
+                                    PendingLiveBlock {
+                                        update: update.clone(),
+                                        sent_at: now,
+                                    },
+                                );
+                            }
                             broadcast(&socket, &clients, &ServerPacket::Block { update });
                         }
                         ClientPacket::Disconnect => {
@@ -514,6 +648,92 @@ fn start_server(address: SocketAddr, host_name: String) -> Result<Sender<()>, St
                     .collect();
                 for addr in expired {
                     clients.remove(&addr);
+                }
+                if now.duration_since(last_live_retry) >= Duration::from_millis(50) {
+                    last_live_retry = now;
+                    for (addr, client) in &mut clients {
+                        let mut due: Vec<u64> = client
+                            .unacked_blocks
+                            .iter()
+                            .filter_map(|(&seq, pending)| {
+                                (pending.sent_at.elapsed() >= BLOCK_RETRY_INTERVAL).then_some(seq)
+                            })
+                            .collect();
+                        due.sort_unstable();
+                        if !due.is_empty() {
+                            let start = due.partition_point(|&seq| seq <= client.live_retry_cursor);
+                            due.rotate_left(start);
+                            for seq in due.into_iter().take(32) {
+                                if let Some(pending) = client.unacked_blocks.get_mut(&seq) {
+                                    send_to(
+                                        &socket,
+                                        *addr,
+                                        &ServerPacket::Block {
+                                            update: pending.update.clone(),
+                                        },
+                                    );
+                                    pending.sent_at = Instant::now();
+                                    client.live_retry_cursor = seq;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (addr, client) in &mut clients {
+                    if let Some(transfer) = client.world_delta.as_mut() {
+                        let page_count = transfer.acknowledged.len();
+                        let mut sent_this_tick = 0;
+                        let retry_count = transfer.in_flight_pages.len();
+                        let mut examined = 0;
+                        while examined < retry_count && sent_this_tick < 8 {
+                            let index = transfer.retry_cursor % transfer.in_flight_pages.len();
+                            let page = transfer.in_flight_pages[index];
+                            transfer.retry_cursor = (index + 1) % transfer.in_flight_pages.len();
+                            examined += 1;
+                            if transfer.sent_at[page].is_some_and(|sent_at| {
+                                sent_at.elapsed() >= WORLD_DELTA_RETRY_INTERVAL
+                            }) {
+                                let start = page * WORLD_DELTA_PAGE_SIZE;
+                                let end =
+                                    (start + WORLD_DELTA_PAGE_SIZE).min(transfer.updates.len());
+                                send_to(
+                                    &socket,
+                                    *addr,
+                                    &ServerPacket::WorldDelta {
+                                        transfer_id: transfer.id,
+                                        page,
+                                        page_count,
+                                        blocks: transfer.updates[start..end].to_vec(),
+                                    },
+                                );
+                                transfer.sent_at[page] = Some(Instant::now());
+                                sent_this_tick += 1;
+                            }
+                        }
+                        while sent_this_tick < 8
+                            && transfer.in_flight_pages.len() < WORLD_DELTA_WINDOW
+                            && transfer.next_page < page_count
+                        {
+                            let page = transfer.next_page;
+                            transfer.next_page += 1;
+                            let start = page * WORLD_DELTA_PAGE_SIZE;
+                            let end = (start + WORLD_DELTA_PAGE_SIZE).min(transfer.updates.len());
+                            send_to(
+                                &socket,
+                                *addr,
+                                &ServerPacket::WorldDelta {
+                                    transfer_id: transfer.id,
+                                    page,
+                                    page_count,
+                                    blocks: transfer.updates[start..end].to_vec(),
+                                },
+                            );
+                            transfer.sent_at[page] = Some(Instant::now());
+                            transfer.in_flight_pages.push(page);
+                            sent_this_tick += 1;
+                        }
+                    }
                 }
                 if now.duration_since(last_snapshot) >= Duration::from_millis(100) {
                     last_snapshot = now;
@@ -563,6 +783,8 @@ fn start_client(
             let mut buf = [0u8; MAX_PACKET];
             let mut last_receive = Instant::now();
             let mut last_ping = Instant::now();
+            let mut last_hello = Instant::now();
+            let mut welcomed = false;
             loop {
                 loop {
                     match command_rx.try_recv() {
@@ -581,6 +803,10 @@ fn start_client(
                             last_receive = Instant::now();
                             if let Ok(packet) = serde_json::from_slice::<ServerPacket>(&buf[..len])
                             {
+                                if matches!(&packet, ServerPacket::Welcome { .. }) {
+                                    welcomed = true;
+                                    last_ping = Instant::now();
+                                }
                                 let _ = event_tx.send(ClientEvent::Packet(packet));
                             }
                         }
@@ -591,7 +817,12 @@ fn start_client(
                         }
                     }
                 }
-                if last_ping.elapsed() >= Duration::from_secs(2) {
+                if !welcomed && last_hello.elapsed() >= Duration::from_secs(1) {
+                    last_hello = Instant::now();
+                    if let Some(bytes) = encode(&hello) {
+                        let _ = socket.send(&bytes);
+                    }
+                } else if welcomed && last_ping.elapsed() >= Duration::from_secs(2) {
                     last_ping = Instant::now();
                     if let Some(bytes) = encode(&ClientPacket::Ping) {
                         let _ = socket.send(&bytes);
@@ -697,9 +928,9 @@ fn apply_block(
     }
 }
 
-fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
+fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) -> bool {
     if !valid_block(&update) {
-        return;
+        return false;
     }
     let version_key = (update.galaxy, update.planet, update.x, update.y, update.z);
     if update.seq == 0
@@ -708,42 +939,38 @@ fn queue_pending_block(net: &mut NetworkState, update: BlockUpdate) {
             .get(&version_key)
             .is_some_and(|known| update.seq <= *known)
     {
-        return;
+        return true;
     }
     if !net.block_versions.contains_key(&version_key) && net.block_versions.len() >= MAX_BLOCK_LOG {
-        return;
+        return false;
     }
-    net.block_versions.insert(version_key, update.seq);
-    if let Some(existing) = net
-        .pending_blocks
-        .entry((update.galaxy, update.planet))
-        .or_default()
-        .iter_mut()
-        .find(|pending| pending.x == update.x && pending.y == update.y && pending.z == update.z)
-    {
+    let group_key = (update.galaxy, update.planet);
+    let existing = net.pending_blocks.get_mut(&group_key).and_then(|updates| {
+        updates
+            .iter_mut()
+            .find(|pending| pending.x == update.x && pending.y == update.y && pending.z == update.z)
+    });
+    if let Some(existing) = existing {
         // Several UDP updates for one cell can arrive before the next Bevy
         // frame. Only the newest state matters; applying every intermediate
         // replacement against a deferred Commands queue can spawn duplicate
         // logical machine entities.
-        *existing = update;
-        return;
+        *existing = update.clone();
+        net.block_versions.insert(version_key, update.seq);
+        return true;
     }
-    let pending = net.pending_blocks.values().map(Vec::len).sum::<usize>();
-    if pending >= MAX_PENDING_BLOCKS {
-        // Drop the oldest available batch entry. UDP is lossy by design; a
-        // bounded client is preferable to an unbounded memory queue.
-        if let Some((_, updates)) = net
-            .pending_blocks
-            .iter_mut()
-            .find(|(_, updates)| !updates.is_empty())
-        {
-            updates.remove(0);
-        }
+    if net.pending_block_count >= MAX_PENDING_BLOCKS {
+        // Leave the update unacknowledged so the host retries it after the
+        // destination world drains its queued changes.
+        return false;
     }
+    net.block_versions.insert(version_key, update.seq);
     net.pending_blocks
-        .entry((update.galaxy, update.planet))
+        .entry(group_key)
         .or_default()
         .push(update);
+    net.pending_block_count += 1;
+    true
 }
 
 fn clear_remote_entities(net: &mut NetworkState, commands: &mut Commands) {
@@ -757,7 +984,8 @@ pub fn network_system(
     time: Res<Time>,
     mut net: ResMut<NetworkState>,
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    npc_art: Res<crate::char::NpcArt>,
+    mut npc_materials: ResMut<Assets<StandardMaterial>>,
     player: Query<&Player>,
     ship: Res<ShipState>,
     mode: Res<FlightMode>,
@@ -827,11 +1055,32 @@ pub fn network_system(
                     }
                 }
                 ServerPacket::Block { update } => {
-                    queue_pending_block(&mut net, update);
+                    let seq = update.seq;
+                    if queue_pending_block(&mut net, update) && seq != 0 {
+                        net.send(ClientPacket::BlockAck { seq });
+                    }
                 }
-                ServerPacket::WorldDelta { blocks } => {
+                ServerPacket::WorldDelta {
+                    transfer_id,
+                    page,
+                    page_count,
+                    blocks,
+                } => {
+                    let max_pages = MAX_BLOCK_LOG.div_ceil(WORLD_DELTA_PAGE_SIZE);
+                    if transfer_id == 0
+                        || page_count == 0
+                        || page_count > max_pages
+                        || page >= page_count
+                        || blocks.len() > WORLD_DELTA_PAGE_SIZE
+                    {
+                        continue;
+                    }
+                    let mut accepted = true;
                     for update in blocks {
-                        queue_pending_block(&mut net, update);
+                        accepted &= queue_pending_block(&mut net, update);
+                    }
+                    if accepted {
+                        net.send(ClientPacket::WorldDeltaAck { transfer_id, page });
                     }
                 }
                 ServerPacket::Pong => {}
@@ -865,10 +1114,12 @@ pub fn network_system(
                 let appearance = crate::save::Appearance::random(remote.id as u32);
                 let parts = crate::char::spawn_humanoid(
                     &mut commands,
-                    &asset_server,
+                    &npc_art,
+                    &mut npc_materials,
                     &appearance,
                     Vec3::from(remote.pos),
                     remote.yaw,
+                    crate::char::NpcRole::Traveler,
                 );
                 commands.entity(parts.root).insert(RemoteAvatar {
                     id: remote.id,
@@ -914,6 +1165,7 @@ pub fn network_system(
             .pending_blocks
             .remove(&(game.galaxy.seed, current_planet))
     {
+        net.pending_block_count = net.pending_block_count.saturating_sub(updates.len());
         for update in updates {
             apply_block(&update, &mut world, &mut commands, &mut machines);
         }

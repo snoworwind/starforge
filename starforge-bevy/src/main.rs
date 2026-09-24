@@ -5,44 +5,58 @@
 // Bevy systems naturally expose their resources and queries as function parameters.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+mod achievements;
+mod app;
+mod art;
 mod audio;
+mod blueprint;
+mod camera_fx;
 mod char;
+mod codex;
 mod creatures;
 mod data;
 mod daynight;
 mod factory;
 mod feedback;
+mod frontier;
+mod frontier_ui;
 mod inventory;
 mod lod;
+mod machine_fx;
 mod materials;
+mod minimap;
+mod music;
 mod network;
+mod particles;
+mod photo;
 mod planet_scale;
 mod player;
 mod quests;
+mod rendering;
 mod rng;
 mod save;
 mod schedule;
+mod screen_fx;
 mod space;
 mod station;
+mod storms;
+mod structures;
+mod suit;
+mod terrain;
 mod textures;
+mod tutorial;
+mod tween;
 mod ui;
+mod visual;
+mod visual_qa;
 mod weather;
+mod wildlife;
 mod world;
 
-use bevy::camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget};
-use bevy::core_pipeline::prepass::DepthPrepass;
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::light::{
-    AtmosphereEnvironmentMapLight, DirectionalLightShadowMap, atmosphere::ScatteringMedium,
-};
-use bevy::pbr::{
-    AtmosphereMode, AtmosphereSettings, ContactShadows, DistanceFog, FogFalloff,
-    ScreenSpaceAmbientOcclusion,
-};
-use bevy::post_process::bloom::{Bloom, BloomPrefilter};
+use bevy::light::atmosphere::ScatteringMedium;
 use bevy::prelude::*;
-use bevy::window::{CursorOptions, PresentMode};
-use bevy_egui::{EguiContexts, EguiPlugin, egui};
+use bevy::window::CursorOptions;
+use bevy_egui::{EguiContexts, egui};
 use materials::TerrainMaterials;
 use player::{Beam, Player};
 pub use schedule::{
@@ -113,13 +127,6 @@ struct SmokeFlag {
     frames: u32,
 }
 
-/// 像素风渲染目标（设置开启时在 startup 创建）。
-#[derive(Resource)]
-struct PixelTarget(pub Handle<Image>);
-
-#[derive(Component)]
-struct PixelUpscale;
-
 fn smoke_exit(
     flag: Option<ResMut<SmokeFlag>>,
     mut mode: ResMut<FlightMode>,
@@ -128,9 +135,31 @@ fn smoke_exit(
     mut save_ev: MessageWriter<ui::SaveEvent>,
     chunks: Query<&Visibility, With<ChunkMesh>>,
     clear: Res<ClearColor>,
+    mut ui_state: ResMut<UiState>,
+    mut commands: Commands,
 ) {
     if let Some(mut f) = flag {
         f.frames += 1;
+        // Exercise every guild page inside the real egui/render schedule.
+        // Optional captures are useful for visual review without UI automation.
+        if [20, 40, 60, 80].contains(&f.frames) {
+            ui_state.panel = ui::Panel::Frontier;
+            ui_state.frontier_tab = ((f.frames - 20) / 20) as usize;
+            println!("SMOKE_FRONTIER tab={}", ui_state.frontier_tab);
+        }
+        if [30, 50, 70, 90].contains(&f.frames)
+            && let Ok(dir) = std::env::var("STARFORGE_SMOKE_CAPTURE")
+        {
+            use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+            let path =
+                std::path::Path::new(&dir).join(format!("frontier-{}.png", ui_state.frontier_tab));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
+        }
+        if f.frames == 100 {
+            ui_state.close_panel();
+        }
         // 自测第二阶段：120 帧后切换到太空，验证太空场景/飞行/相机管线。
         // 出球点取近赤道方向（Y≈0），使旧代码的"按玩家高度算太空因子"必然退化成大气色，
         // 以覆盖"太空背景变大气色"回归。
@@ -192,393 +221,8 @@ fn smoke_boot(req: Option<Res<WorldRequest>>, mut next: ResMut<NextState<GameSta
     }
 }
 
-// ---------- Plugin composition ----------
-
-/// 全部游戏模块插件的装配顺序（依赖序）。
-pub struct StarForgePlugins {
-    settings: save::Settings,
-    cloud_tuning: weather::CloudTuning,
-    lighting_tuning: daynight::LightingTuning,
-}
-
-impl StarForgePlugins {
-    pub fn new(
-        settings: save::Settings,
-        cloud_tuning: weather::CloudTuning,
-        lighting_tuning: daynight::LightingTuning,
-    ) -> Self {
-        Self {
-            settings,
-            cloud_tuning,
-            lighting_tuning,
-        }
-    }
-}
-
-impl PluginGroup for StarForgePlugins {
-    fn build(self) -> bevy::app::PluginGroupBuilder {
-        use bevy::app::PluginGroupBuilder;
-        PluginGroupBuilder::start::<Self>()
-            .add(rng::RngPlugin)
-            .add(data::DataPlugin)
-            .add(planet_scale::PlanetScalePlugin)
-            .add(inventory::InventoryPlugin)
-            .add(save::SaveSettingsPlugin(self.settings))
-            .add(audio::GameAudioPlugin)
-            .add(textures::TexturePlugin)
-            .add(feedback::FeedbackPlugin)
-            .add(ui::UiPlugin)
-            .add(quests::QuestsPlugin)
-            .add(char::CharPlugin)
-            .add(materials::MaterialsPlugin)
-            .add(daynight::DayNightPlugin {
-                lighting: self.lighting_tuning,
-            })
-            .add(weather::WeatherPlugin {
-                cloud: self.cloud_tuning,
-            })
-            .add(player::PlayerPlugin)
-            .add(creatures::CreaturesPlugin)
-            .add(factory::FactoryPlugin)
-            .add(station::StationPlugin)
-            .add(space::SpacePlugin)
-            .add(network::NetworkPlugin)
-            .add(lod::LodPlugin)
-            .add(world::WorldPlugin)
-    }
-}
-
-/// 游戏流程插件：状态机、菜单/加载、进驻清理与调度契约配置。
-pub struct GameFlowPlugin;
-
-impl Plugin for GameFlowPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_state::<GameState>()
-            .add_systems(Startup, startup)
-            .add_systems(OnEnter(GameState::Loading), on_enter_loading)
-            .add_systems(OnExit(GameState::Loading), on_exit_loading)
-            .add_systems(
-                Update,
-                (
-                    (smoke_boot, menu_system)
-                        .chain()
-                        .in_set(GameSet::Menu)
-                        .run_if(in_state(GameState::Menu)),
-                    loading_system
-                        .in_set(GameSet::Loading)
-                        .run_if(in_state(GameState::Loading)),
-                ),
-            )
-            // playing 后段：星球切换/可见性（天空同步归 daynight 插件）
-            .add_systems(
-                Update,
-                ((planet_switch_system, ground_scene_visibility_system)
-                    .chain()
-                    .in_set(GameSet::LateSwitchFlow)
-                    .run_if(in_state(GameState::Playing)),),
-            )
-            // playing 保存尾链（map → save → quit → smoke）
-            .add_systems(
-                Update,
-                (
-                    (save_settings_system, save_system)
-                        .chain()
-                        .in_set(GameSet::SaveWrite),
-                    (quit_to_menu_system, smoke_exit)
-                        .chain()
-                        .in_set(GameSet::SaveQuit),
-                )
-                    .chain()
-                    .run_if(in_state(GameState::Playing)),
-            );
-        crate::schedule::configure(app);
-    }
-}
-
 fn main() {
-    // Silence the expected egui first-frame font bootstrap panic (caught & retried
-    // by ui::egui_fonts_ready); keep printing any other panic.
-    std::panic::set_hook(Box::new(|info| {
-        let msg = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_default();
-        if msg.contains("No fonts available until first call to Context::run()") {
-            return;
-        }
-        eprintln!("panic: {msg}");
-        if let Some(loc) = info.location() {
-            eprintln!("  at {loc}");
-        }
-    }));
-    let smoke = std::env::args().any(|a| a == "--smoke");
-    let play = std::env::args().any(|a| a == "--play");
-    let asset_dir = executable_asset_dir();
-    let mut settings = save::load_settings();
-    // Read-only visual probe overrides. They never persist to settings.json.
-    if std::env::args().any(|arg| arg == "--clouds-off") {
-        settings.clouds = false;
-    }
-    if std::env::args().any(|arg| arg == "--legacy-lod") {
-        settings.lod_mode = save::LodMode::Legacy;
-    }
-    let cloud_tuning = weather::CloudTuning::from_settings(&settings);
-    let lighting_tuning = daynight::LightingTuning::from_settings(&settings);
-    let mut app = App::new();
-    app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.1)))
-        .insert_resource(DirectionalLightShadowMap { size: 4096 })
-        .add_plugins(
-            DefaultPlugins
-                // The game world spans hundreds of units, while Bevy's
-                // spatial mixer attenuates by inverse squared distance.
-                // Compress world coordinates before they reach the mixer so
-                // nearby combat and wildlife sounds remain audible.
-                .set(bevy::audio::AudioPlugin {
-                    default_spatial_scale: bevy::audio::SpatialScale::new(0.05),
-                    ..default()
-                })
-                .set(bevy::asset::AssetPlugin {
-                    file_path: asset_dir,
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "STARFORGE 星穹熔炉 · Bevy 移植版".into(),
-                        resolution: (1280, 720).into(),
-                        present_mode: PresentMode::AutoVsync,
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        )
-        .add_plugins(EguiPlugin::default())
-        .add_plugins(StarForgePlugins::new(
-            settings,
-            cloud_tuning,
-            lighting_tuning,
-        ))
-        .add_plugins(GameFlowPlugin);
-    if smoke || play {
-        // 自动建世界进入游戏（--play 不退出，供交互验证；--smoke 额外自测退出）
-        app.insert_resource(WorldRequest {
-            world_name: "smoke".into(),
-            char_name: "smoker".into(),
-            seed: 4242,
-            biome: "lush".into(),
-            difficulty: data::Difficulty::Normal,
-            load: false,
-            appearance: save::Appearance::random(4242),
-        });
-    }
-    if smoke {
-        app.insert_resource(SmokeFlag { frames: 0 });
-    }
-    app.run();
-}
-
-/// 发布版资源根目录固定在可执行文件旁，避免受启动时当前工作目录或
-/// `CARGO_MANIFEST_DIR` 环境变量影响。
-fn executable_dir() -> Option<std::path::PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-}
-
-fn executable_asset_dir() -> String {
-    executable_dir()
-        .map(|dir| dir.join("assets"))
-        .unwrap_or_else(|| std::path::PathBuf::from("assets"))
-        .to_string_lossy()
-        .into_owned()
-}
-
-// ---------- Startup ----------
-
-fn startup(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    settings: Res<save::Settings>,
-) {
-    // Self-extract the model assets next to the executable so the
-    // AssetServer finds them regardless of the working directory.
-    if let Some(dir) = executable_dir() {
-        // 本地开发构建时把模型目录复制到 exe 旁（源码在
-        // <crate>/target/<profile>/ 下时向上两级即 crate 根）。发布包则应
-        // 直接携带 exe 旁的 assets/models，不依赖源代码目录。
-        let models_dir = dir.join("assets").join("models");
-        let required_model_files = [
-            "creatures/quaternius_alpaca.gltf",
-            "creatures/quaternius_deer.gltf",
-            "creatures/quaternius_fox.gltf",
-            "creatures/quaternius_wolf.gltf",
-            "creatures/sentinel.glb",
-            "asteroids/meteor.glb",
-            "asteroids/meteor_detailed.glb",
-            "external/ships/space_ship_b/scene.gltf",
-            "external/stations/space_station/scene.gltf",
-        ];
-        if required_model_files
-            .iter()
-            .any(|path| !models_dir.join(path).exists())
-        {
-            let mut src: Option<std::path::PathBuf> = None;
-            let via_exe = dir.join("..").join("..").join("assets").join("models");
-            if via_exe.is_dir() {
-                src = Some(via_exe);
-            }
-            if let Some(s) = src {
-                let _ = copy_dir_all(&s, &models_dir);
-            }
-        }
-        let shaders_dir = dir.join("assets").join("shaders");
-        let via_exe = dir.join("..").join("..").join("assets").join("shaders");
-        if via_exe.is_dir() {
-            let _ = copy_dir_all(&via_exe, &shaders_dir);
-        }
-    }
-    // persistent camera: created now so bevy_egui's primary context exists in menus too.
-    // The player camera system drives it during Playing.
-    let cam = commands
-        .spawn((
-            Camera3d::default(),
-            Hdr,
-            AtmosphereSettings {
-                rendering_method: AtmosphereMode::Raymarched,
-                ..default()
-            },
-            // Feed the raymarched sky back into PBR as diffuse environment
-            // lighting; without this the small voxel ground can remain nearly
-            // black even while the atmospheric sky is bright. Intensity is
-            // overwritten each frame by daynight_system from the F3 tuning
-            // (default 1.0 = Bevy's atmosphere example value).
-            AtmosphereEnvironmentMapLight {
-                intensity: 1.0,
-                ..default()
-            },
-            // ContactShadows requires a depth prepass. Add it explicitly so
-            // the requirement remains clear even if camera composition
-            // changes later.
-            DepthPrepass,
-            ContactShadows {
-                // The default 0.3 world-unit ray is too short for the
-                // voxel creatures and machinery; extend it to cover their
-                // feet-to-ground contact without turning it into a second
-                // long-range shadow system.
-                linear_steps: 24,
-                thickness: 0.15,
-                length: 2.5,
-            },
-            // Ambient fill alone cannot know that a voxel ceiling is above
-            // the camera. SSAO restores local occlusion around terrain and
-            // the contact areas that should remain dark.
-            ScreenSpaceAmbientOcclusion::default(),
-            Bloom {
-                // Keep normal materials out of the glow and reserve Bloom
-                // for the over-bright sun and genuinely emissive pixels.
-                intensity: 0.12,
-                low_frequency_boost: 0.35,
-                prefilter: BloomPrefilter {
-                    threshold: 1.5,
-                    threshold_softness: 0.2,
-                },
-                ..Bloom::NATURAL
-            },
-            Tonemapping::AcesFitted,
-            // Fixed physical daylight exposure (matches Bevy's atmosphere
-            // example: RAW_SUNLIGHT at EV100 13). Auto exposure was removed:
-            // it normalized the metered region back to middle gray every
-            // frame, so the F3 lighting sliders (ambient/sun) had no visible
-            // effect — exactly the "ambient max still dark" report. The JS
-            // original has no auto exposure either; lighting is manual.
-            Exposure { ev100: 13.0 },
-            Msaa::Off,
-            Projection::Perspective(PerspectiveProjection {
-                fov: 75f32.to_radians(),
-                far: space::CAM_FAR,
-                ..default()
-            }),
-            Transform::from_xyz(96.0, 90.0, 96.0),
-            // Bevy's spatial audio uses the camera as the listener.  The ear
-            // gap is expressed in game units and is scaled by AudioPlugin.
-            bevy::audio::SpatialListener::new(2.0),
-            // 高度雾（JS planetScene.fog 移植）：远景融入天穹，隐藏流式区块边缘；
-            // daynight_system 会在爬升时动态收拢雾距（替代原曲率/淡出着色器）
-            DistanceFog {
-                color: Color::srgb(0.7, 0.85, 1.0),
-                directional_light_color: Color::WHITE,
-                directional_light_exponent: 1.0,
-                falloff: FogFalloff::Linear {
-                    start: 90.0,
-                    end: 1050.0,
-                },
-            },
-        ))
-        .id();
-    // 像素风低分辨率渲染：3D 相机渲染到 640×360 目标，UI 相机全屏最近邻放大
-    if settings.pixelated {
-        let mut lowres = Image::new(
-            bevy::render::render_resource::Extent3d {
-                width: 640,
-                height: 360,
-                depth_or_array_layers: 1,
-            },
-            bevy::render::render_resource::TextureDimension::D2,
-            // The camera is HDR because Atmosphere, SunDisk, Bloom and the
-            // sunlight exposure all operate before tonemapping. Keep the
-            // pixelated render target HDR as well, otherwise the post-process
-            // chain would be clipped at 1.0 before it reaches the screen.
-            vec![0u8; 640 * 360 * 8],
-            bevy::render::render_resource::TextureFormat::Rgba16Float,
-            bevy::asset::RenderAssetUsages::RENDER_WORLD,
-        );
-        // 作为渲染目标必须带 RENDER_ATTACHMENT（Image::new 默认仅绑定/拷贝）
-        lowres.texture_descriptor.usage |=
-            bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
-        lowres.sampler = bevy::image::ImageSampler::nearest();
-        let lowres = images.add(lowres);
-        commands
-            .entity(cam)
-            .insert(RenderTarget::Image(ImageRenderTarget {
-                handle: lowres.clone(),
-                scale_factor: 1.0,
-            }));
-        commands.insert_resource(PixelTarget(lowres.clone()));
-        // UI 相机 + 全屏放大节点
-        commands.spawn((
-            Camera2d,
-            Camera {
-                order: 10,
-                ..default()
-            },
-        ));
-        commands.spawn((
-            Node {
-                width: bevy::ui::Val::Percent(100.0),
-                height: bevy::ui::Val::Percent(100.0),
-                ..default()
-            },
-            bevy::ui::widget::ImageNode::new(lowres),
-            PixelUpscale,
-        ));
-    }
-}
-
-/// 递归复制目录（自解压素材用）。
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            let _ = std::fs::copy(entry.path(), &target);
-        }
-    }
-    Ok(())
+    app::run();
 }
 
 // ---------- Menu ----------
@@ -623,61 +267,100 @@ fn menu_system(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
-    egui::CentralPanel::default().show(&mut root, |ui| {
+    let panel =
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT));
+    panel.show(&mut root, |ui| {
+        paint_menu_backdrop(ui, menu.screen != MenuScreen::Title);
         match menu.screen {
             MenuScreen::Title => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(120.0);
-                    ui.label(
-                        egui::RichText::new("STARFORGE")
-                            .size(56.0)
-                            .strong()
-                            .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
-                    );
-                    ui.label(egui::RichText::new("星穹熔炉 · 体素星际工厂").size(22.0));
-                    ui.label(
-                        egui::RichText::new("Bevy (Rust) 移植版")
-                            .size(14.0)
-                            .color(egui::Color32::GRAY),
-                    );
-                    ui.add_space(48.0);
-                    let r_new = ui.add_sized([260.0, 40.0], egui::Button::new("🚀 新世界"));
-                    if r_new.clicked() {
-                        menu.screen = MenuScreen::NewWorld;
-                        menu.world_name = random_planet_name();
-                        menu.char_name = "探险家".into();
-                        menu.seed_text = format!("{}", rand_seed());
-                        menu.biome_idx = 0;
-                        menu.difficulty = 1;
-                        menu.creative = false;
-                        menu.error = None;
-                    }
-                    if ui
-                        .add_sized([260.0, 40.0], egui::Button::new("📂 读取世界"))
-                        .clicked()
-                    {
-                        menu.screen = MenuScreen::LoadWorld;
-                    }
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.label(format!("渲染距离: {} 区块", settings.view_dist));
-                        ui.label(format!("灵敏度: {:.1}", settings.mouse_sens));
-                        ui.label(format!(
-                            "渲染: {}",
-                            if settings.pixelated {
-                                "像素"
-                            } else {
-                                "现代"
-                            }
-                        ));
+                let left_margin = (ui.available_width() * 0.10).clamp(32.0, 150.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(left_margin);
+                    ui.vertical(|ui| {
+                        ui.set_width(380.0);
+                        ui.add_space((ui.available_height() * 0.16).clamp(55.0, 130.0));
+                        ui.label(
+                            egui::RichText::new("探索  /  建造  /  远航")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(0x8b, 0xc4, 0xd0)),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("STARFORGE")
+                                .size(62.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(0xd8, 0xfa, 0xff)),
+                        );
+                        ui.label(
+                            egui::RichText::new("星穹熔炉 · 体素星际工厂")
+                                .size(21.0)
+                                .color(egui::Color32::from_rgb(0x9e, 0xd0, 0xd8)),
+                        );
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new("在陌生星球点亮第一座工厂")
+                                .size(15.0)
+                                .color(egui::Color32::from_rgb(0x9a, 0xa9, 0xb9)),
+                        );
+                        ui.add_space(48.0);
+                        let r_new = ui.add_sized(
+                            [300.0, 48.0],
+                            egui::Button::new(egui::RichText::new("开始新世界  →").size(18.0))
+                                .fill(egui::Color32::from_rgb(0x13, 0x8e, 0xa3))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(0x5a, 0xdf, 0xea),
+                                )),
+                        );
+                        if r_new.clicked() {
+                            menu.screen = MenuScreen::NewWorld;
+                            menu.world_name = random_planet_name();
+                            menu.char_name = "探险家".into();
+                            menu.seed_text = format!("{}", rand_seed());
+                            menu.biome_idx = 0;
+                            menu.difficulty = 1;
+                            menu.creative = false;
+                            menu.error = None;
+                        }
+                        ui.add_space(7.0);
+                        if ui
+                            .add_sized(
+                                [300.0, 45.0],
+                                egui::Button::new(
+                                    egui::RichText::new("继续旅程  /  读取世界").size(16.0),
+                                )
+                                .fill(egui::Color32::from_rgb(0x18, 0x2b, 0x3b))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(0x38, 0x65, 0x75),
+                                )),
+                            )
+                            .clicked()
+                        {
+                            menu.screen = MenuScreen::LoadWorld;
+                        }
+                        ui.add_space(22.0);
+                        if ui
+                            .add_sized([300.0, 36.0], egui::Button::new("退出游戏"))
+                            .clicked()
+                        {
+                            std::process::exit(0);
+                        }
+                        ui.add_space(16.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "视距 {} 区块   ·   {}渲染",
+                                settings.view_dist,
+                                if settings.pixelated {
+                                    "像素"
+                                } else {
+                                    "现代"
+                                }
+                            ))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(0x72, 0x8a, 0x99)),
+                        );
                     });
-                    ui.add_space(20.0);
-                    if ui
-                        .add_sized([260.0, 36.0], egui::Button::new("🚪 退出"))
-                        .clicked()
-                    {
-                        std::process::exit(0);
-                    }
                 });
             }
             MenuScreen::NewWorld => {
@@ -933,6 +616,104 @@ fn menu_system(
     });
 }
 
+fn paint_menu_backdrop(ui: &egui::Ui, show_form_panel: bool) {
+    let rect = ui.max_rect();
+    let painter = ui.painter();
+    let bands = 32;
+    for i in 0..bands {
+        let t = i as f32 / bands as f32;
+        let y0 = rect.top() + rect.height() * t;
+        let y1 = rect.top() + rect.height() * (i + 1) as f32 / bands as f32 + 1.0;
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
+            0.0,
+            egui::Color32::from_rgb(
+                (9.0 + t * 5.0) as u8,
+                (22.0 + t * 13.0) as u8,
+                (38.0 + t * 18.0) as u8,
+            ),
+        );
+    }
+
+    // A sparse, fixed star field keeps the menu still and readable.
+    let mut seed = 0x73ad_5e21u32;
+    for _ in 0..110 {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let x = rect.left() + (seed as f32 / u32::MAX as f32) * rect.width();
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let y = rect.top() + (seed as f32 / u32::MAX as f32) * rect.height();
+        painter.circle_filled(
+            egui::pos2(x, y),
+            if seed & 7 == 0 { 1.3 } else { 0.7 },
+            egui::Color32::from_rgba_unmultiplied(167, 219, 235, 80),
+        );
+    }
+
+    let planet_radius = (rect.width() * 0.19).clamp(120.0, 260.0);
+    let planet = egui::pos2(rect.right() - planet_radius * 1.04, rect.center().y + 35.0);
+    for i in (0..5).rev() {
+        painter.circle_filled(
+            planet,
+            planet_radius + 18.0 + i as f32 * 16.0,
+            egui::Color32::from_rgba_unmultiplied(39, 147, 177, 7),
+        );
+    }
+    let ring: Vec<egui::Pos2> = (0..=96)
+        .map(|i| {
+            let a = i as f32 / 96.0 * std::f32::consts::TAU;
+            let x = a.cos() * planet_radius * 1.48;
+            let y = a.sin() * planet_radius * 0.47;
+            egui::pos2(planet.x + x + y * 0.28, planet.y + y - x * 0.16)
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        ring.clone(),
+        egui::Stroke::new(
+            1.4,
+            egui::Color32::from_rgba_unmultiplied(143, 213, 222, 118),
+        ),
+    ));
+    painter.circle_filled(planet, planet_radius, egui::Color32::from_rgb(19, 61, 76));
+    painter.circle_stroke(
+        planet,
+        planet_radius,
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(83, 184, 196)),
+    );
+    for (offset, alpha) in [(-0.42, 22), (-0.12, 30), (0.24, 18), (0.55, 24)] {
+        let y = planet.y + planet_radius * offset;
+        let half = (planet_radius * planet_radius - (y - planet.y).powi(2)).sqrt();
+        painter.line_segment(
+            [
+                egui::pos2(planet.x - half, y),
+                egui::pos2(planet.x + half, y),
+            ],
+            egui::Stroke::new(
+                12.0,
+                egui::Color32::from_rgba_unmultiplied(84, 177, 177, alpha),
+            ),
+        );
+    }
+    painter.add(egui::Shape::line(
+        ring[..=48].to_vec(),
+        egui::Stroke::new(
+            1.4,
+            egui::Color32::from_rgba_unmultiplied(173, 238, 244, 190),
+        ),
+    ));
+
+    if show_form_panel {
+        let size = egui::vec2(
+            700.0_f32.min(rect.width() - 32.0),
+            660.0_f32.min(rect.height() - 24.0),
+        );
+        painter.rect_filled(
+            egui::Rect::from_center_size(rect.center(), size),
+            egui::CornerRadius::same(12),
+            egui::Color32::from_rgba_unmultiplied(8, 17, 27, 225),
+        );
+    }
+}
+
 fn swatch_row(ui: &mut egui::Ui, label: &str, opts: &[&str], current: &mut String) {
     ui.label(label);
     ui.horizontal(|ui| {
@@ -1080,7 +861,7 @@ fn loading_system(
             &mut stdmats,
             &mut curved_mats,
             &mut images,
-            atlas.atlas.to_image(),
+            &atlas.atlas,
             ls.world.biome().water_tint,
         );
         commands.insert_resource(mats.clone());
@@ -1356,6 +1137,7 @@ fn spawn_scene(
         game.archives = wd.archives.clone();
         quests.placed = wd.placed.clone();
         quests.side = wd.side_quest.clone();
+        quests.frontier = wd.frontier.clone();
         saved_ship_hp = wd
             .ship_state
             .as_ref()
@@ -1691,8 +1473,10 @@ fn planet_switch_system(
     mut curved_materials: ResMut<Assets<materials::CurvedTerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     atlas: Res<AtlasRes>,
+    mut visual_lifecycle: visual::VisualLifecycleMut,
 ) {
     for e in ev.read() {
+        visual_lifecycle.advance(visual::WorldTransition::PlanetSwitch);
         let pid = e.pid;
         if e.archive_current {
             // 同一星系内换星：归档当前星球。跨星系时旧世界已在
@@ -1758,7 +1542,7 @@ fn planet_switch_system(
             &mut terrain_materials,
             &mut curved_materials,
             &mut images,
-            atlas.atlas.to_image(),
+            &atlas.atlas,
             data::biome_by_key(&biome).water_tint,
         );
         commands.insert_resource(mats);
@@ -1956,6 +1740,7 @@ fn save_system(
                 game.warp_lock.as_ref(),
                 &quests.placed,
                 quests.side.as_ref(),
+                &quests.frontier,
                 &machines_save,
                 &game.visited,
                 &game.archives,
@@ -1984,11 +1769,9 @@ fn quit_to_menu_system(
     mut commands: Commands,
     in_game: Query<Entity, With<InGame>>,
     mut network: ResMut<network::NetworkState>,
-    mut rain_audio: ResMut<weather::RainAudio>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     for _ in ev.read() {
-        rain_audio.entity = None;
         for e in &in_game {
             commands.entity(e).despawn();
         }
@@ -2017,11 +1800,9 @@ fn quit_to_menu_system(
         commands.remove_resource::<space::VisitorTraffic>();
         commands.remove_resource::<station::StationDefense>();
         commands.remove_resource::<factory::TickAcc>();
-        commands.remove_resource::<weather::ClimateRuntime>();
         commands.remove_resource::<creatures::SentinelSpawner>();
         commands.remove_resource::<ui::ScanState>();
         commands.insert_resource(creatures::SentinelSpawner::default());
-        commands.insert_resource(weather::ClimateRuntime::default());
         commands.insert_resource(space::VisitorRespawn::default());
         commands.insert_resource(space::VisitorTraffic::default());
         commands.insert_resource(station::StationDefense::default());

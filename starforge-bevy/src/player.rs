@@ -17,6 +17,11 @@ pub const H: f32 = 1.8;
 pub const EYE: f32 = 1.62;
 pub const JETPACK_CEILING: f32 = 118.0;
 
+/// Test launches keep the desktop cursor available instead of capturing it
+/// for first-person look. Inserted only for explicit test/play harness modes.
+#[derive(Resource, Default)]
+pub(crate) struct CursorCaptureDisabled;
+
 #[derive(Clone, Debug)]
 pub struct Stats {
     pub hp: f32,
@@ -166,6 +171,16 @@ pub struct Player {
     /// 「需要采矿激光」提示计时（JS noLaserHintT）
     pub no_laser_t: f32,
     pub step_t: f32,
+    /// 离开地面后的跳跃宽限时间（土狼时间），让边缘起跳更宽容。
+    pub coyote_t: f32,
+    /// 落地前按下的跳跃输入缓存。
+    pub jump_buffer_t: f32,
+    /// 当前脚下材质，用于脚步音效与粒子。
+    pub surface: crate::particles::FootSurface,
+    pub was_in_liquid: bool,
+    pub jet_fx_t: f32,
+    pub water_fx_t: f32,
+    pub last_fall_speed: f32,
 }
 
 impl Player {
@@ -196,6 +211,13 @@ impl Player {
             haz_beep_t: 0.0,
             no_laser_t: 0.0,
             step_t: 0.0,
+            coyote_t: 0.0,
+            jump_buffer_t: 0.0,
+            surface: crate::particles::FootSurface::Grass,
+            was_in_liquid: false,
+            jet_fx_t: 0.0,
+            water_fx_t: 0.0,
+            last_fall_speed: 0.0,
         }
     }
 
@@ -368,6 +390,8 @@ pub fn movement_system(
     world: Res<World>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
+    mut fx: crate::particles::ParticleSystem,
+    mut stats: ResMut<crate::achievements::PlayerStats>,
 ) {
     let dt = time.delta_secs();
     for mut p in &mut q {
@@ -404,17 +428,36 @@ pub fn movement_system(
         p.vel.z += (wish.z - p.vel.z) * k;
 
         // liquid test (previous frame pos)
-        let feet = data::block_by_id(world.get(
+        let feet_id = world.get(
             p.pos.x.floor() as i32,
             (p.pos.y + 0.1).floor() as i32,
             p.pos.z.floor() as i32,
-        ));
+        );
+        let feet = data::block_by_id(feet_id);
         let eye = data::block_by_id(world.get(
             p.pos.x.floor() as i32,
             (p.pos.y + EYE).floor() as i32,
             p.pos.z.floor() as i32,
         ));
+        let was_liquid = p.in_liquid;
         p.in_liquid = feet.liquid || eye.liquid;
+        // Surface classification samples the block just below the feet so
+        // footsteps know whether they are on grass, sand, metal or snow.
+        let below = data::block_by_id(world.get(
+            p.pos.x.floor() as i32,
+            (p.pos.y - 0.2).floor() as i32,
+            p.pos.z.floor() as i32,
+        ));
+        p.surface = if p.in_liquid {
+            crate::particles::FootSurface::Water
+        } else {
+            crate::particles::FootSurface::from_block_key(below.key)
+        };
+        if !was_liquid && p.in_liquid {
+            let fall = (-p.vel.y).max(0.0);
+            fx.splash(p.pos + Vec3::Y * 0.2, 0.7 + (fall / 24.0).min(0.9));
+            audio::play(&mut commands, sfx.pulse.clone(), 0.5, Some(0.72));
+        }
 
         if p.in_liquid {
             p.vel.x *= (1.0 - 5.0 * dt).max(0.0);
@@ -426,23 +469,77 @@ pub fn movement_system(
                 p.vel.y = (p.vel.y - 18.0 * dt).max(-5.5);
             }
             p.on_ground = false;
+            // 水下气泡
+            if p.pos.y + EYE > 0.0 {
+                p.water_fx_t += dt;
+                if p.water_fx_t > 0.55 {
+                    p.water_fx_t = 0.0;
+                    fx.emit(
+                        crate::particles::ParticleStyle::Bubble,
+                        p.eye() - Vec3::Y * 0.25,
+                        crate::particles::EmitOptions::default()
+                            .count(1)
+                            .speed(0.2, 0.7)
+                            .size_scale(0.8),
+                    );
+                }
+            }
         } else {
             p.vel.y -= 22.0 * dt;
             p.vel.y = p.vel.y.max(-40.0);
+            // Jump buffering + coyote time: a press slightly before landing or
+            // slightly after walking off a ledge still jumps.
+            if keys.just_pressed(KeyCode::Space) {
+                p.jump_buffer_t = 0.15;
+            } else {
+                p.jump_buffer_t = (p.jump_buffer_t - dt).max(0.0);
+            }
+            if p.on_ground {
+                p.coyote_t = 0.12;
+            } else {
+                p.coyote_t = (p.coyote_t - dt).max(0.0);
+            }
             let space = keys.pressed(KeyCode::Space);
-            if space && p.on_ground {
+            let can_ground_jump = (p.on_ground || p.coyote_t > 0.0) && p.jump_buffer_t > 0.0;
+            if space && can_ground_jump {
                 p.vel.y = 7.4;
                 p.on_ground = false;
+                p.coyote_t = 0.0;
+                p.jump_buffer_t = 0.0;
+                stats.add(crate::achievements::Metric::Jumps, 1.0);
                 audio::play(&mut commands, sfx.jump.clone(), 0.5, None);
+                fx.emit(
+                    crate::particles::ParticleStyle::Dust,
+                    p.pos + Vec3::Y * 0.08,
+                    crate::particles::EmitOptions::default()
+                        .count(5)
+                        .spread(1.6)
+                        .speed(1.0, 2.4)
+                        .size_scale(0.9),
+                );
             } else if space && !p.on_ground && p.stats.jet > 0.0 && p.pos.y < JETPACK_CEILING {
                 p.vel.y = (p.vel.y + 33.0 * dt).min(8.5);
                 p.stats.jet = (p.stats.jet - 28.0 * dt).max(0.0);
+                // 喷气尾焰粒子
+                p.jet_fx_t += dt;
+                if p.jet_fx_t >= 0.035 {
+                    p.jet_fx_t = 0.0;
+                    fx.jetpack(
+                        p.pos + Vec3::Y * 0.35,
+                        p.vel,
+                        (p.stats.jet / 100.0).clamp(0.2, 1.0),
+                    );
+                }
             } else if p.pos.y >= JETPACK_CEILING {
                 p.vel.y = p.vel.y.min(0.0);
             }
         }
         // 喷气背包循环音（JS Sound.loops.jet 启停）
-        let jetting = keys.pressed(KeyCode::Space) && !p.on_ground && p.stats.jet > 0.0;
+        let jetting = keys.pressed(KeyCode::Space)
+            && !p.on_ground
+            && p.stats.jet > 0.0
+            && !p.in_liquid
+            && p.pos.y < JETPACK_CEILING;
         if jetting && p.jet_entity.is_none() {
             let e = audio::play_jet(&mut commands, sfx.jet.clone(), 0.35);
             p.jet_entity = Some(e);
@@ -455,17 +552,28 @@ pub fn movement_system(
         if p.creative() {
             p.stats.jet = 100.0;
         }
+        // Fall damage feedback: remember the fastest descent so the landing
+        // frame can scale the camera dip and dust burst.
+        if !p.on_ground {
+            p.last_fall_speed = (-p.vel.y).max(p.last_fall_speed);
+        } else {
+            p.last_fall_speed = 0.0;
+        }
         let horizontal_speed = Vec2::new(p.vel.x, p.vel.z).length();
-        if p.on_ground && horizontal_speed > 1.0 {
+        if p.on_ground && horizontal_speed > 1.0 && !p.in_liquid {
             p.step_t += dt;
-            if p.step_t >= if sprint { 0.28 } else { 0.38 } {
+            let stride = if sprint { 0.28 } else { 0.38 };
+            if p.step_t >= stride {
                 p.step_t = 0.0;
+                let jitter =
+                    1.0 + ((p.pos.x * 12.9898).sin() * 0.5 + (p.pos.z * 7.233).sin() * 0.5) * 0.045;
                 audio::play(
                     &mut commands,
                     sfx.step.clone(),
-                    0.28,
-                    Some(0.92 + (p.pos.x.abs() % 0.12)),
+                    p.surface.step_volume() * (if sprint { 1.25 } else { 1.0 }),
+                    Some(p.surface.pitch() * jitter),
                 );
+                fx.footstep(p.pos, p.vel, p.surface, sprint);
             }
         } else {
             p.step_t = 0.0;
@@ -478,7 +586,14 @@ pub fn movement_system(
     }
 }
 
-pub fn collision_system(time: Res<Time>, mut q: Query<&mut Player>, world: Res<World>) {
+pub fn collision_system(
+    time: Res<Time>,
+    mut q: Query<&mut Player>,
+    world: Res<World>,
+    mut commands: Commands,
+    sfx: Res<audio::Sfx>,
+    feel: Res<crate::camera_fx::CameraFeel>,
+) {
     // A long frame must not turn one collision step into a several-hundred
     // metre teleport. This also bounds the recovery loop below.
     let dt = time.delta_secs().clamp(0.0, 0.1);
@@ -511,45 +626,73 @@ pub fn collision_system(time: Res<Time>, mut q: Query<&mut Player>, world: Res<W
             }
             false
         };
-        let mut np = p.pos;
-        np.x += p.vel.x * dt;
-        if collides(np.x, p.pos.y, p.pos.z) {
-            np.x = p.pos.x;
-            p.vel.x = 0.0;
-        }
-        np.z += p.vel.z * dt;
-        if collides(np.x, p.pos.y, np.z) {
-            np.z = p.pos.z;
-            p.vel.z = 0.0;
-        }
-        np.y = p.pos.y + p.vel.y * dt;
-        p.was_ground = p.on_ground;
-        p.on_ground = false;
-        if collides(np.x, np.y, np.z) {
-            if p.vel.y < 0.0 {
-                p.on_ground = true;
-                if p.vel.y < -12.0 {
-                    let dmg = ((-p.vel.y - 12.0) / 4.0).floor();
-                    p.damage(dmg);
+        // Sub-step by travel distance so fast falls cannot tunnel through a
+        // one-voxel floor. Each sub-step is at most ~0.32 blocks of motion.
+        let travel = p.vel.length() * dt;
+        let steps = ((travel / 0.32).ceil() as usize).clamp(1, 10);
+        let h = dt / steps as f32;
+        let started_grounded = p.on_ground;
+        let mut landed_this_frame = false;
+        for _ in 0..steps {
+            if p.dead {
+                break;
+            }
+            let mut np = p.pos;
+            np.x += p.vel.x * h;
+            if collides(np.x, p.pos.y, p.pos.z) {
+                np.x = p.pos.x;
+                p.vel.x = 0.0;
+            }
+            np.z += p.vel.z * h;
+            if collides(np.x, p.pos.y, np.z) {
+                np.z = p.pos.z;
+                p.vel.z = 0.0;
+            }
+            np.y = p.pos.y + p.vel.y * h;
+            p.was_ground = p.on_ground;
+            p.on_ground = false;
+            if collides(np.x, np.y, np.z) {
+                if p.vel.y < 0.0 {
+                    p.on_ground = true;
+                    landed_this_frame = true;
+                    if p.vel.y < -12.0 {
+                        let dmg = ((-p.vel.y - 12.0) / 4.0).floor();
+                        p.damage(dmg);
+                    }
+                }
+                np.y = p.pos.y;
+                p.vel.y = 0.0;
+                for _ in 0..2048 {
+                    if !collides(np.x, np.y, np.z) {
+                        break;
+                    }
+                    np.y += 0.05;
                 }
             }
-            np.y = p.pos.y;
-            p.vel.y = 0.0;
-            for _ in 0..2048 {
-                if !collides(np.x, np.y, np.z) {
-                    break;
-                }
-                np.y += 0.05;
+            p.pos = np;
+            if p.pos.y > JETPACK_CEILING {
+                p.pos.y = JETPACK_CEILING;
+                p.vel.y = p.vel.y.min(0.0);
+            }
+            if p.pos.y < -10.0 {
+                p.pos.y = 80.0;
+                p.damage(2.0);
             }
         }
-        p.pos = np;
-        if p.pos.y > JETPACK_CEILING {
-            p.pos.y = JETPACK_CEILING;
-            p.vel.y = p.vel.y.min(0.0);
-        }
-        if p.pos.y < -10.0 {
-            p.pos.y = 80.0;
-            p.damage(2.0);
+        // Landing thump: audio scales with the descent speed recorded before
+        // the first sub-step zeroed the velocity. The camera dip and dust are
+        // produced by `camera_fx::ground_feel_system` on the same transition.
+        if landed_this_frame && !started_grounded {
+            let fall = feel.last_vel_y;
+            if fall < -5.5 {
+                let impact = ((-fall - 5.5) / 22.0).clamp(0.0, 1.0);
+                audio::play(
+                    &mut commands,
+                    sfx.land.clone(),
+                    0.35 + impact * 0.45,
+                    Some(1.05 - impact * 0.25),
+                );
+            }
         }
     }
 }
@@ -665,8 +808,11 @@ pub fn survival_system(
 // ---------- Camera ----------
 
 pub fn camera_system(
+    time: Res<Time>,
     player: Query<&Player>,
-    mode: Res<PlayerCameraMode>,
+    mut mode: ResMut<PlayerCameraMode>,
+    feel: Res<crate::camera_fx::CameraFeel>,
+    world: Res<World>,
     mut cam: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<Player>)>,
 ) {
     let Ok(p) = player.single() else { return };
@@ -675,23 +821,56 @@ pub fn camera_system(
         let pitch = Quat::from_rotation_x(p.pitch);
         if mode.third_person {
             let look = p.eye();
-            tf.translation = look - p.forward() * 6.0 + Vec3::Y * 2.2;
+            let mut desired = look - p.forward() * 6.0 + Vec3::Y * 2.2;
+            // Pull the camera in when terrain would clip between the player and
+            // the shoulder position. Sampling the world ray keeps the third
+            // person camera usable inside caves and under overhangs.
+            let from_look = desired - look;
+            let distance = from_look.length();
+            if distance > 0.01 {
+                let dir = from_look / distance;
+                if let Some((_, _, hit)) = world.raycast(look, dir, distance) {
+                    desired = look + dir * (hit - 0.35).max(0.6);
+                }
+            }
+            // Spring the camera into place so walking and turning do not snap.
+            if !mode.smoothed {
+                mode.spring.jump(desired);
+                mode.smoothed = true;
+            }
+            let position = mode.spring.update(desired, time.delta_secs());
+            tf.translation = position;
             tf.look_at(look, Vec3::Y);
         } else {
+            mode.smoothed = false;
             tf.translation = p.eye();
             tf.rotation = yaw * pitch;
         }
         *proj = Projection::Perspective(PerspectiveProjection {
-            fov: 75f32.to_radians(),
+            fov: (75.0 + feel.fov).clamp(30.0, 110.0).to_radians(),
             far: crate::space::CAM_FAR,
             ..default()
         });
     }
 }
 
-#[derive(Resource, Default)]
+/// Third-person camera feels: a spring for shoulder position. Toggle resets it
+/// through `smoothed`, so switching views never animates across the map.
+#[derive(Resource)]
 pub struct PlayerCameraMode {
     pub third_person: bool,
+    pub smoothed: bool,
+    pub spring: crate::tween::SpringVec3,
+}
+
+impl Default for PlayerCameraMode {
+    fn default() -> Self {
+        Self {
+            third_person: false,
+            smoothed: false,
+            spring: crate::tween::SpringVec3::new(Vec3::ZERO, 55.0, 0.92),
+        }
+    }
 }
 
 pub fn camera_toggle_system(
@@ -729,6 +908,7 @@ pub fn mining_system(
     sfx: Res<audio::Sfx>,
     ui: Res<UiState>,
     mut queue: ResMut<BreakQueue>,
+    mut fx: crate::particles::ParticleSystem,
 ) {
     let dt = time.delta_secs();
     for (pe, mut p) in &mut q {
@@ -802,6 +982,23 @@ pub fn mining_system(
         }
         if let Some(ent) = hit_ent {
             p.mining = None;
+            // Laser impact sparks at the creature silhouette.
+            if let Some((_, _, tf)) = creatures
+                .p0()
+                .iter()
+                .find(|(candidate, _, _)| *candidate == ent)
+            {
+                fx.emit(
+                    crate::particles::ParticleStyle::Electric,
+                    tf.translation + Vec3::Y * 0.6,
+                    crate::particles::EmitOptions::default()
+                        .count(1)
+                        .dir(-dir)
+                        .speed(1.2, 3.0)
+                        .spread(1.4)
+                        .size_scale(0.8),
+                );
+            }
             if let Ok(mut c) = creatures.p1().get_mut(ent) {
                 c.shoot_t += dt;
                 if c.shoot_t >= 0.28 {
@@ -835,6 +1032,20 @@ pub fn mining_system(
                         dig_sound_t: 0.0,
                     });
                 }
+                // Impact sparks and a tiny amount of block dust at the contact
+                // point; the palette follows the block family so stone, metal
+                // and alien crystal read differently. Emission is limited to
+                // the slow contact tick (plus the first touch) so mining up
+                // close never strobes the screen.
+                let hit_point = origin + dir * dist;
+                let normal = Vec3::new(_normal[0] as f32, _normal[1] as f32, _normal[2] as f32);
+                let tint = match data::block_by_id(def.id).key {
+                    "iron_ore" | "titanium_ore" | "gold_ore" | "metal" => (0.75, 0.78, 0.82),
+                    "crystal" | "ice" | "glass" | "amber" => (0.55, 0.9, 1.0),
+                    "uranium_ore" => (0.5, 1.0, 0.5),
+                    "copper_ore" => (0.85, 0.55, 0.35),
+                    _ => (0.62, 0.55, 0.45),
+                };
                 let creative = p.creative();
                 let mult = p.difficulty.drop_mult();
                 if let Some(m) = p.mining.as_mut() {
@@ -843,6 +1054,7 @@ pub fn mining_system(
                     if m.dig_sound_t >= 0.22 {
                         m.dig_sound_t = 0.0;
                         audio::play(&mut commands, sfx.dig.clone(), 0.5, None);
+                        fx.mining(hit_point, normal, tint);
                     }
                     if m.prog >= 1.0 {
                         p.mining = None;
@@ -887,6 +1099,7 @@ pub fn placement_system(
     machines: Query<(&crate::factory::Machine, Entity)>,
     mut placed_ev: MessageWriter<crate::quests::PlacedEvent>,
     mut net_ev: MessageWriter<crate::network::BlockChanged>,
+    mut stats: ResMut<crate::achievements::PlayerStats>,
 ) {
     for mut p in &mut q {
         if p.dead || ui.locked() {
@@ -954,6 +1167,10 @@ pub fn placement_system(
                     continue;
                 }
                 world.set(t[0], t[1], t[2], b_def.id);
+                stats.add(crate::achievements::Metric::BlocksPlaced, 1.0);
+                if b_def.machine.is_some() {
+                    stats.add(crate::achievements::Metric::MachinesPlaced, 1.0);
+                }
                 net_ev.write(crate::network::BlockChanged {
                     x: t[0],
                     y: t[1],
@@ -1109,8 +1326,10 @@ pub fn break_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut feedback: ResMut<crate::feedback::FeedbackAssets>,
     sfx: Res<audio::Sfx>,
+    mut stats: ResMut<crate::achievements::PlayerStats>,
 ) {
     for (player_e, cell, drops, mult) in queue.0.drain(..) {
+        stats.add(crate::achievements::Metric::BlocksMined, 1.0);
         let mut rng = crate::rng::Rng::new(
             (cell[0] as u32).wrapping_mul(73856093)
                 ^ (cell[2] as u32).wrapping_mul(19349663)
@@ -1232,7 +1451,15 @@ pub fn break_system(
 pub fn cursor_system(
     mut q: Query<(&mut Window, &mut CursorOptions), With<bevy::window::PrimaryWindow>>,
     ui: Res<UiState>,
+    capture_disabled: Option<Res<CursorCaptureDisabled>>,
 ) {
+    if capture_disabled.is_some() {
+        for (_window, mut opts) in &mut q {
+            opts.grab_mode = CursorGrabMode::None;
+            opts.visible = true;
+        }
+        return;
+    }
     let want_lock = !ui.locked();
     for (_w, mut opts) in &mut q {
         let mode = if want_lock {
@@ -1317,10 +1544,18 @@ pub fn prompt_system(
 
 // ---------- Enter/exit cursor handling ----------
 
-fn on_enter_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>) {
+fn on_enter_playing(
+    mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>,
+    capture_disabled: Option<Res<CursorCaptureDisabled>>,
+) {
     for mut opts in &mut windows {
-        opts.grab_mode = CursorGrabMode::Locked;
-        opts.visible = false;
+        let capture = capture_disabled.is_none();
+        opts.grab_mode = if capture {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        opts.visible = !capture;
     }
 }
 

@@ -12,10 +12,49 @@
 
 ## 运行
 
+全面美术提升的待实施规划见 [`docs/art-overhaul/README.md`](docs/art-overhaul/README.md)。方案包含 66 个工作包、约新增 50,000 行 Rust 的预算、24 个验收场景和 132 条风险的预防/修复步骤，供后续 agent 按依赖分阶段执行。风格、色板、尺度与资产 manifest 规范见 [`art/style-guide.md`](art/style-guide.md)。
+
 ```powershell
 cargo run --release
 cargo run -- --smoke   # 冒烟自测：自动建世界 → 地面游玩 → 进入太空 → SMOKE_OK 退出
+cargo run -- --play    # 交互式检查：自动开局，鼠标保持可见且不被窗口捕获
 ```
+
+### 视觉 QA 与诊断工具（真实 CLI）
+
+以下参数均已在当前代码中实现；`--visual-qa` 运行不会写入用户存档或 `saves/settings.json`。
+
+| 参数 | 作用 |
+|---|---|
+| `--visual-qa` | 运行确定性视觉 QA（默认 S01 材料庭院 / S02 封闭屋 / S06 流式路线），报告写到 `target/visual-qa/<commit7>/...`；K01 同时生成 `<run>-acceptance.json`，把本轮执行结果与发布门槛分开，并显式记录 `pass/fail/skipped/not_run` |
+| `--visual-qa-scene S01,S06` | 选择场景；`S01`/`S02`/`S06` 已实现，`B01` 风格/尺度校准架，`B04` PBR 家族庭院（13 家族 × 5 形态，正午/阴天/夕阳/夜灯/室内 9 机位），`D01` 灰卡曝光与通道矩阵（full/no_post/sun_only/ambient_only/probe_stops/probe_zebra 配对帧），`E01` 云壳诊断矩阵 |
+| `--visual-qa-seed 1337` `--visual-qa-biome frozen` `--visual-qa-day 0.75` | 固定种子/生态/日时；默认 seed 11、lush、day 0.5 |
+| `--visual-qa-route-frames 240` `--visual-qa-run name` `--visual-qa-out dir` | 路线帧数/运行标签/输出根目录 |
+| `--visual-qa-no-capture` `--visual-qa-keep-open` | 不抓图（只测链路）/结束后保留窗口 |
+| `--art-audit` | 资产清单/缺失/大小写/许可/未引用审计 + B02 材质目录覆盖（未知 tile/未注册 painter/未使用层与冻结指纹），报告写到 `target/art-audit/art-manifest.json` 与 `target/art-audit/material-catalog.json`（清单与规则见 `src/art/` 与 `art/style-guide.md`） |
+| `--texture-audit` | B03/B04 纹理与 PBR 生产审计（纯 CPU，不开窗、不碰存档）：`target/art-audit/texture-pipeline.json`、`pbr-families.json` 与 `texture-contact-sheet.bmp`；`--simulate-low-device` 时按低端参考限制给出 `PaddedAtlas` fallback（实际路由由运行时设备能力决定） |
+| `--terrain-overlay` | C01 地形覆盖调试视图：近区块（脏块红/正常青）、LOD 分层矩形、legacy far 范围与曲率半径环（默认关闭） |
+| `--render-probe off\|false-color\|zebra\|luminance` | D01 HDR 全屏曝光/裁剪诊断（`Core3dSystems::PostProcess`、tonemapping 之前）；只读，不落盘 |
+| `--cloud-debug off\|density\|interval\|transmittance\|scattering\|steps\|depth\|light\|faces` | E01 云壳输入/区间/透射/散射诊断视图；只读，不落盘（E01 场景中按机位自动切换） |
+| `--climate-on` `--clouds-off` `--legacy-lod` | 只读探测：强制气候开启 / 关闭云 / 切旧 LOD；不落盘 |
+| `--simulate-low-device` | 只降不升地仿真低端设备能力，验证画质降级与 fallback |
+| `--lod-log` | 每 60 帧打印一次 LOD 统计（目标/常驻/可见/排队/构建毫秒） |
+
+每次运行会在 `visual_qa` 模式额外输出 `*-capabilities.json`（设备能力与降级原因）、
+`*-diagnostics.json`（生效设置、生命周期、资源计数与阈值告警）与 `*-rendering.json`（D01 相机/target/
+format/通道清单、AA 能力矩阵与 probe 生效状态）；每个场景的 `metrics.json` 还包含
+`terrain` 覆盖诊断（near/LOD/far 半径与计数、脏区块、曲率、`input_signature`，见 C01）与
+`clouds` 云壳诊断（生效 coverage/density/steps、legacy 云分辨率惰性标记、中心射线 first/far 区间、
+密度纹理统计与 debug 状态，见 E01）；`plan_cache` 记录结构计划缓存命中/未命中/淘汰与容量
+（有界缓存，淘汰后按同一种子重建相同计划，见 G01）；run summary 还记录 B02 材质目录
+`catalog_version` 与 `catalog_id_fingerprint`/`catalog_face_fingerprint`（换贴图顺序不改方块/存档 ID 的冻结指纹）；
+`*-capabilities.json` 记录 B03 `texture_route`（array/padded/classic 与拒绝原因）与 `surface_compression`。
+
+素材根目录固定为可执行文件旁的 `assets/`；测试或冷安装检查可用环境变量
+`STARFORGE_ASSET_DIR` 指向隔离目录。启动时会区分两种素材路径并打印一行摘要：
+
+- **最小素材路径**：仅使用仓库内自带资产（Kenney/Quaternius 模型、程序化贴图、内嵌音频）即可启动并完成地面与起飞流程；缺少下载模型时对应外部模型不显示（模型级 fallback 归 B06/I03 收敛）。
+- **完整素材路径**：额外存在下载的 `assets/models/external/` 与 `assets/models/earth/` 时自动使用外部飞船/空间站/地球模型，无需改配置。
 
 发布后的可执行文件必须与资源目录放在同一目录层级：
 
@@ -50,7 +89,19 @@ assets/
 | `C` | 扫描（脉冲 + 矿物标记，范围随科技 24/48/80，6s 冷却） |
 | `Tab` | 背包与合成（左键取放/右键拆半/Shift 快速移动/垃圾桶/整理/充能，Shift+点击合成 ×5） |
 | `T` | 科技树 |
+| `L` | 边疆公会：补给委托 / 远征故事 / 生态图鉴 / 里程碑（地面、飞船和空间站均可使用） |
 | `M` | 星球全息地图（标记增删/全星系显示/信标与 POI 图钉） |
+| `K` | 星际图鉴（方块/物品/生态/生物/机器收录，每 5 项奖励研究数据） |
+| `J` | 成就面板（40+ 项长期目标与统计） |
+| `N` | 小地图显示 / 隐藏（地面） |
+| `Q` | 冲刺（需研究「机动外骨骼」） |
+| `X` | 护盾冲击波（需研究「护盾爆发器」） |
+| `Z` | 应急供氧：护盾换氧气（需研究「应急氧气回收」） |
+| `H` | 使用医疗包 |
+| `B` / `F` | 战术夜视 / 头灯（需研究「战术目镜」） |
+| `F2` | 摄影模式（自由环绕镜头、滤镜、电影黑边、保存截图到 `screenshots/`） |
+| `Ctrl+C` / `Ctrl+V` | 复制 / 粘贴机器蓝图（对准机器复制 5×5 范围，粘贴近旁消耗对应物品） |
+| `[` / `]` | 旋转蓝图朝向 |
 | `P` | 创造物品库（创造模式） |
 | `O` | Bevy 原生联机（创建主机 / 加入 / 聊天 / 在线列表） |
 | `F5` | 快速存档 |
@@ -87,8 +138,39 @@ assets/
 
 ## 已移植（相对原版）
 
+### 新增：边疆公会内容扩展
+
+按 **L** 打开探索终端，或从空间站服务菜单进入。新角色和旧存档均可直接使用。
+
+- **30 种循环补给委托**：6 个委托方、5 级公会声望，从求生补给到精密制造、医疗救援、殖民与曲率航行。最多同时接 3 单，接受后的需求固定，交付后刷新；科技不足的成品订单不会提前出现。
+- **6 条远征、24 个阶段**：《长夜里的灯》《沉默的流水线》《无人应答的频率》《群星的颜色》《遗迹的回声》《第二个家园》。结合实际物资交付、建设、科研、生态调查、海盗/遗迹守卫战斗与殖民产出，支持 HUD 追踪和切换路线。
+- **16 种生态调查**：地面按 C，在同一生态获取 3 处调查记录；同一星球的调查点两两至少相距 64m，也可跨星球采样。提交对应实物样本后获得研究数据、信用点和声望，并归档调查成果。
+- **12 个一次性里程碑**：供应链、生态图鉴、远征、航路防卫、遗迹、跃迁与殖民均有长期目标和手动领取的奖励。
+- **可持续的村庄委托**：完成后可以继续接取新需求，每次额外增加 4 点公会声望，HUD 隐藏已完成订单。
+- **完整持久化和奖励保护**：接受的订单、远征阶段、调查点、已领取奖励和计数保存到世界存档，跨星球/星系保留。交付仅扣角色背包；背包无空间容纳奖励时整笔交易取消，物资和进度均保留。创造模式可浏览，奖励仅在生存模式结算。
+
+入门建议：先接一份现有资源能完成的补给单，开启《长夜里的灯》，带上氧气与钠，在三处不同位置按 C 调查起始生态。委托所得研究数据可以用于现有科技树；更高的公会声望会解锁后续远征与高级订单。详细设计与检查记录见 [FRONTIER_EXPANSION.md](FRONTIER_EXPANSION.md)。
+
+### 新增：沉浸感与表现升级
+
+- **程序化实时音乐**：内嵌实时合成器（PolyBLEP 振荡器、滤波器、FM 铃声、Karplus-Strong 拨弦、鼓组、延时/混响/合唱、限幅器），音乐随场景无缝交叉淡入淡出——主菜单、每颗星球（按生态选择调式与配器）、洞穴、太空、空间站、曲率跃迁各有独立音景；战斗强度、血量/危险度、昼夜、曲率飞行实时驱动配器与心跳脉冲，探索/研究/扫描/跃迁均有一击式动机点缀。零音频文件、零内存音频缓冲。
+- **环境氛围声**：风、洞穴滴水、海浪、火山轰鸣、森林鸟鸣与夜晚虫鸣均为实时合成，按生态/洞穴/昼夜交叉淡入淡出；雨声沿用原有气候系统。
+- **天气事件**：雷暴（闪电照亮天空、雷声、近距落雷伤害与屏幕闪光）、极光（夜间的流动光带）、沙暴（能见度与雾压变化）、流星雨（陨石坠落留下金属矿）。
+- **体素环境光遮蔽（AO）**：逐顶点采样邻域方块，堆叠结构拥有真实接触阴影，画面立体感显著提升。
+- **粒子系统**：脚步（按草/沙/雪/金属/水/岩浆/异星材质）、落地扬尘、喷气尾焰、飞船双引擎喷流、再入火花、采矿火花、机器烟雾/蒸汽/电火花、治疗、护盾、爆炸、水花、雨点飞溅等 20+ 预设；全部按风格缓存材质，上限保护。
+- **镜头手感**：基于创伤的屏幕震动（开火/受伤/爆炸/雷击/降落/跃迁）、第一人称头部摇曳、落地下沉、冲刺 FOV、横移侧倾、第三人称弹簧跟随与地形防穿模、飞船镜头惯性平滑、第三人称换镜不瞬移。
+- **屏幕反馈**：受伤红晕与低血量心跳暗角、受击方向指示、水下/高温/严寒/毒素/辐射/磁暴色调、雷击白闪、治疗/护盾/发现/升级闪光、夜视绿色画面增益（**拾取与挖掘不会整屏闪烁**：挖掘火花按触击节奏释放，方块破碎只保留碎片）。
+- **生物行为**：兽群聚集、夜间休息、被疾跑玩家惊扰、按体型区分的叫声（愤怒时低吼）、行走扬尘；小地图实时显示野兽、机器、停泊飞船与朝向。
+- **工厂可视化**：熔炉/燃烧器黑烟与火星、反应堆蒸汽、装配机工作火花、矿机钻击火花、太阳能反光、医疗舱治疗光雾、地热蒸汽、水泵气泡、殖民核心脉冲、按负载点亮的机器灯光池，以及传送带上随物品移动的货物方块。
+- **边疆与成长扩展**：新增科技分支「机动外骨骼 / 战术目镜 / 护盾爆发器 / 应急氧气回收」以及对应技能；星际图鉴（K）与 40+ 成就（J），解锁即奖励信用点/研究数据并播放音乐动机。
+- **上手引导**：首次情境提示（移动/采矿/合成/扫描/夜晚/飞船/太空/图鉴）与随状态变化的常驻小提示。
+- **摄影模式（F2）**：暂停 HUD 的自由环绕镜头、距离/视野/仰角滑块、5 种滤镜、电影黑边与一键截图。
+- **机器蓝图**：对准机器 `Ctrl+C` 复制 5×5 范围内的全部机器，`[`/`]` 旋转，`Ctrl+V` 消耗背包中对应物品粘贴建造。
+
+### 原有主线系统
+
 - **球面体素星球**：16×16×96 区块流式加载；16 种生态的全部地形公式、洞穴（5 种）、矿脉（6 种）、树木/巨菌、村庄与遗迹（3 种）、浮空岛；
-- **星球曲率着色器**：顶点弯曲（250 格曲率半径）、水面波浪、发光方块、NMS 式扫描脉冲；
+- **星球连续曲率**：`assets/shaders/planet_curvature.wgsl`（主通道与 prepass 共享）按 `planet_scale` 的局部星球半径 16384、曲率平坦半径 256 → 完全弯曲半径 1500 渐变弯曲远景地形，与球面轨道视角衔接；水面波浪、发光方块与 NMS 式扫描脉冲由地形扩展材质（TerrainExtension）提供；
 - **像素美术**：62 张 16×16 程序化方块贴图 + 全部物品图标（32×32，最近邻采样）；
 - **玩家控制与生存**：六维状态、无条件氧气消耗、生态危险、危险低值警报、熔岩灼烧、充能、死亡重生、摔落伤害；
 - **采矿与建造**：硬度→挖掘时间、掉率难度倍率、掉落物磁吸与同类合并（上限 90）、拆机内容退款、上方植物连带掉落、方块与机器放置、「需要采矿激光」提示；
@@ -103,7 +185,7 @@ assets/
 - **星系与曲率跃迁**：初始星系 5 行星 + 空间站；随机星系生成（4~7 颗星球、市场波动、站体与星球分离校验）；可交互的旋转 3D 投影星图（55 邻域 + 已到访标记 + 回家锁定）、脉冲冲刺自动跃迁、180 条发光曲速星线与动态拉伸、抵达新星系（跨星系标记随档案换档）；
 - **34 步双章主线任务线**：采集/合成/放置/研究/事件全类型推进，从求生、自动化和跃迁延伸到智能物流、外骨骼、深空海盗、殖民核心与基地防线；含任务日志 HUD、奖励 ₪ 与村庄支线委托；
 - **星球全息地图（M）**：2D 全景地图（村庄/遗迹/信标/飞船/玩家箭头）、点击添加标记（名称/全星系显示）、标记列表（切换范围/删除）、存档持久化；
-- **捏人**：主菜单角色创建（肤色/发型/发色/制服/饰条/裤装/靴子/目镜/头盔，🎲 随机），外观随存档；**CC0 GLB 角色模型**（站内 NPC/村民/游商）；
+- **捏人**：主菜单角色创建（肤色/发型/发色/制服/饰条/裤装/靴子/目镜/头盔，🎲 随机），外观随存档；原创体素 NPC，含五种岗位服饰、道具、骨骼式层级待机/行走动作；
 - **像素风低分辨率渲染模式**：640×360 渲染目标 + 最近邻全屏放大（主菜单/设置开启，重启生效）；
 - **存档**：人物/世界分离 JSON（`saves/`），含外观/装备/飞船/机库/任务进度/旗标/动态市价/星系种子/太空船状态/**地图标记/跃迁锁定/放置计数/研究进度/机器库存与殖民统计/跨星系档案**；
 - **Bevy 原生联机（O）**：内置权威 UDP 主机，无外部服务器依赖；同世界指纹校验、最多 32 人、玩家位置/状态插值、聊天与在线列表、方块及机器放置增量、迟加入增量回放、输入边界与超时校验。协议仅服务 Bevy 版，不兼容旧版 Node.js；
@@ -135,7 +217,7 @@ assets/
 | 随仓库提供的飞船/宇航员/陨石模型 | Kenney Space Kit | CC0 1.0 |
 | 外部飞船/空间站模型 | Sketchfab（作者见 `CREDITS.md`） | CC-BY-4.0，必须署名 |
 | 起源星地球模型（assets/models/earth/） | Sketchfab（作者：SebastianSosnowski） | CC-BY-4.0，必须署名 |
-| NPC 角色（冒险者 5 款） | KayKit Character Pack: Adventurers | CC0 |
+| 旧 NPC 角色模型（冒险者 5 款） | KayKit Character Pack: Adventurers（保留备用，当前未实例化） | CC0 |
 | 遗迹守卫（骷髅） | KayKit Character Pack: Skeletons | CC0 |
 | 生物模型（羊驼/鹿/狐/狼，带骨骼动画） | Quaternius Ultimate Animated Animal Pack | CC0 1.0 |
 
@@ -149,8 +231,10 @@ assets/
 
 - [Bevy 0.19](https://bevy.org)（MIT/Apache-2.0）—— ECS、PBR、窗口、音频、GLB 场景；
 - [bevy_egui 0.41](https://crates.io/crates/bevy_egui)（MIT/Apache-2.0）—— UI；
+- [rodio](https://crates.io/crates/rodio)（MIT/Apache-2.0）—— 自定义 `Decodable` 音频源，程序化音乐/氛围直接流式合成进 Bevy 音频混音器；
 - 自定义 `ExtendedMaterial<StandardMaterial, TerrainExtension>` 顶点着色器：曲率弯曲/水面波浪/发光/扫描脉冲；
 - 程序化噪声（复刻原版 mulberry32 / 2D Perlin / 3D 值噪声，含 JS 黄金值回归测试）；
+- 体素网格逐顶点环境光遮蔽与 PolyBLEP/Freeverb 等实时音频算法；
 - 字体：[Noto Sans SC](https://github.com/google/fonts)（SIL OFL 1.1，`assets/fonts/`）。
 
 ## 测试
@@ -164,39 +248,69 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 ```
 src/
-├── main.rs         # App 装配、状态机、流式加载、星球切换、保存、光标管理
+├── main.rs         # 薄入口：模块声明与 `app::run()`；状态机流程（菜单/加载/保存/星球切换/光标）
+├── app.rs          # 单一插件装配、启动参数解析、素材装配（最小/完整路径）、启动相机
+├── visual/         # 视觉契约与基础设施：VisualFrame、CelestialLighting、能力/画质、生命周期、设置、统一诊断
+├── visual_qa/      # 确定性视觉 QA 场景（S01/S02/S06）、manifest/metrics/diagnostics 报告
 ├── data.rs         # 方块/物品/配方/科技/生态 + 任务线/贸易/飞船等级/星系生成（data.js 1:1）
-├── world.rs        # 地形生成、区块、网格、射线、RLE、远景地形
-├── player.rs       # 移动/液体/喷气背包/采矿激光/放置/快捷栏/生存
+├── world.rs        # 地形生成、区块、网格（含环境光遮蔽）、射线、RLE、远景地形
+├── structures/     # G01 稳定结构计划/随机流/AABB 查询与有界缓存（diag 见 plan/query）
+├── player.rs       # 移动/液体/喷气背包/采矿激光/放置/快捷栏/生存/镜头
 ├── textures.rs     # 方块贴图 + 物品图标
 ├── materials.rs    # 地形扩展材质 + 曲率 uniform + 灯池（跟随灯块）
 ├── network.rs      # Bevy 原生 UDP 主机/客户端、聊天、玩家与体素增量同步
 ├── daynight.rs     # 昼夜循环、星空、太阳
-├── weather.rs      # 16 生态天气、高空云团、太空行星云层
+├── weather/        # mod.rs 16 生态天气/云壳/太空云；diag.rs E01 射线区间与调试视图
+├── storms.rs       # 雷暴/极光/沙暴/流星雨事件
 ├── creatures.rs    # 生物（GLB 模型）+ 遗迹守卫 + 掉落物
+├── wildlife.rs     # 兽群聚集/夜息/惊扰/叫声/足迹
 ├── factory.rs      # 局部电网 + 物流/流体网络 + 全部机器 + 殖民核心/自动炮塔
+├── machine_fx.rs   # 机器烟雾/灯光/钻击火花/传送带货物可视化
 ├── space.rs        # 太空飞行/大气层飞行/曲速跃迁/星系/星球换系/太空战斗/访客舰队
 ├── station.rs      # 空间站泊入/站内行走/贸易/购船
 ├── quests.rs       # 34 步双章任务线 + 村庄支线
-├── char.rs         # 捏人外观 + CC0 GLB 角色模型
+├── frontier.rs     # 30 种委托 / 24 阶段远征 / 16 种调查 / 12 个里程碑 / 原子结算
+├── frontier_ui.rs  # 边疆公会四页终端，L 键与空间站入口
+├── char.rs         # 捏人外观 + 原创体素 NPC 与层级骨骼动作
 ├── inventory.rs    # 背包
+├── suit.rs         # 外骨骼主动技能（冲刺/护盾冲击/应急供氧/夜视/头灯）
+├── codex.rs        # 星际图鉴 + 奖励 + 持久化
+├── achievements.rs # 统计与 40+ 成就 + 面板
+├── tutorial.rs     # 情境引导与常驻提示
+├── minimap.rs      # 地面小地图（缓存地表贴图 + 实体标记）
+├── photo.rs        # 摄影模式（滤镜/黑边/截图）
+├── particles.rs    # 通用粒子框架与 20+ 视觉预设
+├── feedback.rs     # 方块碎裂/闪光等共享反馈
+├── camera_fx.rs    # 屏幕震动/头部摇曳/落地下沉/冲刺 FOV/横滚
+├── screen_fx.rs    # 全屏色调/暗角/受击方向/事件闪光
+├── tween.rs        # 缓动/弹簧/平滑阻尼/噪声
+├── music/
+│   ├── mod.rs      # 音乐/氛围资产、导演系统、Bevy 集成
+│   ├── dsp.rs      # 振荡器/滤波/包络/延时/混响/鼓组/拨弦
+│   ├── theory.rs   # 调式/和弦/进行/鼓型/琶音
+│   ├── engine.rs   # 自适应编曲引擎与实时合成
+│   └── ambience.rs # 风/洞穴/海浪/火山/森林氛围合成
 ├── ui.rs           # egui HUD / 背包 / 科技树 / 机器面板 / 贸易 / 车库 / 星系图 / 星球地图 / 菜单
 ├── audio.rs        # Sonniss GDC 2026 音效库 + 迁移前脚步音效（内嵌 + 主音量）
 ├── save.rs         # 人物/世界 JSON 存档（含太空状态/标记/档案）
+├── lod.rs          # 层级体素远景
+├── planet_scale.rs # 星球尺度/大气交接
+├── schedule.rs     # GameSet 调度契约与共享模式判定
+├── terrain/        # C01 地形覆盖诊断（diag.rs）与 LOD/曲率/脏块调试覆盖层（overlay.rs）
+├── art/            # B01 资产 manifest/审计（manifest.rs）、色板与尺度锚点（style.rs）
 └── rng.rs          # mulberry32 / Perlin / 值噪声（含黄金值测试）
+art/
+└── style-guide.md  # B01 风格/色彩/尺度/manifest 规范（ART_STYLE_VERSION=1）
 assets/
 ├── audio/          # 32 条 Sonniss GDC 2026 WAV + 迁移前 step.ogg
 ├── models/         # 仓库内模型；external/ 外部大模型需按上文下载
 ├── licenses/       # 第三方许可证原文
 ├── fonts/NotoSansSC.ttf
-└── shaders/terrain_{vertex,prepass_vertex,fragment}.wgsl
+└── shaders/        # cloud_shell.wgsl、planet_curvature{,_prepass}.wgsl、visual/exposure_probe.wgsl（D01）
 ```
 
 ## 许可
 
 本项目代码 [MIT](LICENSE)（沿用原项目许可）；外部素材许可见 `CREDITS.md` 与 `assets/licenses/`；
-体积云渲染使用 vendored 的 `bevy-volumetric-clouds` 0.2.0，来源为
-<https://github.com/evroon/bevy-volumetric-clouds>，按 MIT 许可证使用；上游版权归
-evroon（2025），许可证原文保留在 `vendor/bevy-volumetric-clouds/LICENSE`，登记见
-`CREDITS.md`；
+体积云为仓库内自研实现：`assets/shaders/cloud_shell.wgsl` + `weather/mod.rs::CloudShellMaterial`（192×32×192 密度场、HG 相函数、深度截断、预乘 alpha；`--cloud-debug` 可查看密度/区间/透射/散射等诊断视图），不依赖外部 vendored 云库；
 Noto Sans SC 字体按 [SIL Open Font License 1.1](https://scripts.sil.org/OFL) 分发。

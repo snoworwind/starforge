@@ -150,940 +150,988 @@ ore_painter!(ore_gold, "#f5cd3a", "#ffe98a", None, "#b8921a");
 pub struct Atlas {
     pub index: HashMap<&'static str, usize>,
     pub tiles: Vec<[Pixel; 256]>,
+    /// UV rect per [`crate::art::catalog::SurfaceMaterialId`] (slot 0 unused).
+    /// Built at atlas creation so meshing resolves IDs in O(1) and a future
+    /// array/layer layout only changes this table, not any ID or save key.
+    by_material: Vec<Option<[f32; 4]>>,
+}
+
+/// (name, painter) in the exact `textures.js` registration order. This list
+/// owns the legacy atlas layout only; stable IDs live in `art::catalog`, so
+/// reordering it may move UVs but must never move a business key.
+fn painters() -> Vec<(&'static str, Painter)> {
+    vec![
+        ("grass_top", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#528b45"),
+                    hex("#477d3c"),
+                    hex("#64964e"),
+                    hex("#3f7538"),
+                    hex("#73a45b"),
+                ],
+            )
+        }),
+        ("dirt", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#8a5f3c"),
+                    hex("#7d5535"),
+                    hex("#95683f"),
+                    hex("#775033"),
+                    hex("#8a6039"),
+                ],
+            )
+        }),
+        ("grass_side", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#8a5f3c"),
+                    hex("#7d5535"),
+                    hex("#95683f"),
+                    hex("#775033"),
+                ],
+            );
+            for x in 0..16 {
+                let h = 3 + ((r.next() * 2.4) as i32);
+                for y in 0..h {
+                    set(
+                        b,
+                        x,
+                        y,
+                        [hex("#528b45"), hex("#477d3c"), hex("#64964e")]
+                            [((r.next() * 3.0) as usize).min(2)],
+                    );
+                }
+            }
+        }),
+        ("stone", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#8c8c8c"),
+                    hex("#828282"),
+                    hex("#969696"),
+                    hex("#7a7a7a"),
+                ],
+            );
+            for _ in 0..5 {
+                let x = (r.next() * 14.0) as i32;
+                let y = (r.next() * 14.0) as i32;
+                set(b, x, y, hex("#a3a3a3"));
+                set(b, x + 1, y, hex("#a3a3a3"));
+            }
+        }),
+        ("sand", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#e0d29a"),
+                    hex("#d8c98e"),
+                    hex("#e8dba6"),
+                    hex("#d0c184"),
+                ],
+            )
+        }),
+        ("gravel", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#8f8b87"),
+                    hex("#7c7975"),
+                    hex("#a09b96"),
+                    hex("#6e6a66"),
+                    hex("#95908b"),
+                ],
+            )
+        }),
+        ("log_side", |b, r| {
+            let bands = [
+                hex("#6b502f"),
+                hex("#5e4629"),
+                hex("#755834"),
+                hex("#634a2b"),
+            ];
+            for x in 0..16 {
+                let band = bands[(x % 4) as usize];
+                for y in 0..16 {
+                    set(
+                        b,
+                        x,
+                        y,
+                        if r.next() < 0.85 {
+                            band
+                        } else {
+                            shade_p("#6b502f", 0.8 + r.next() * 0.4)
+                        },
+                    );
+                }
+            }
+        }),
+        ("log_top", |b, r| {
+            speckle(b, r, &[hex("#b08d55"), hex("#a5854f")]);
+            let mut ring = 7i32;
+            while ring >= 1 {
+                for a in 0..64 {
+                    let x = 8
+                        + ((a as f32 / 64.0 * std::f32::consts::TAU).cos() * ring as f32 * 0.9)
+                            .round() as i32;
+                    let y = 8
+                        + ((a as f32 / 64.0 * std::f32::consts::TAU).sin() * ring as f32 * 0.9)
+                            .round() as i32;
+                    set(b, x, y, hex("#8a6b3d"));
+                }
+                ring -= 2;
+            }
+            for i in 0..16 {
+                set(b, i, 0, hex("#6b502f"));
+                set(b, i, 15, hex("#6b502f"));
+                set(b, 0, i, hex("#6b502f"));
+                set(b, 15, i, hex("#6b502f"));
+            }
+        }),
+        ("leaves", |b, r| {
+            let pal = [
+                hex("#4c8134"),
+                hex("#3e722d"),
+                hex("#629744"),
+                hex("#315f28"),
+                hex("#78a755"),
+            ];
+            // Four-pixel patches make the canopy read as leaf clusters instead
+            // of a uniform field of independent bright and dark pixels.
+            let mut patches = [0usize; 16];
+            for patch in &mut patches {
+                *patch = ((r.next() * pal.len() as f32) as usize).min(pal.len() - 1);
+            }
+            for y in 0..16 {
+                for x in 0..16 {
+                    if r.next() < 0.30 {
+                        set(b, x, y, [0, 0, 0, 0]);
+                        continue;
+                    }
+                    let patch = (y / 4 * 4 + x / 4) as usize;
+                    let tone = if r.next() < 0.18 {
+                        ((r.next() * pal.len() as f32) as usize).min(pal.len() - 1)
+                    } else {
+                        patches[patch]
+                    };
+                    set(b, x, y, pal[tone]);
+                }
+            }
+        }),
+        ("planks", |b, r| {
+            speckle(b, r, &[hex("#a8824f"), hex("#9d7948"), hex("#b28a55")]);
+            for y in (3..16).step_by(4) {
+                for x in 0..16 {
+                    set(b, x, y, hex("#7a5c35"));
+                }
+            }
+            set(b, 4, 1, hex("#7a5c35"));
+            set(b, 11, 5, hex("#7a5c35"));
+            set(b, 2, 9, hex("#7a5c35"));
+            set(b, 13, 13, hex("#7a5c35"));
+        }),
+        ("water", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#3e6bd6"),
+                    hex("#3862c7"),
+                    hex("#4675e0"),
+                    hex("#3455b8"),
+                ],
+            )
+        }),
+        ("ice", |b, r| {
+            speckle(b, r, &[hex("#a8d4f0"), hex("#9ccbeb"), hex("#b6ddf5")]);
+            for (x, y) in [(3, 4), (4, 5), (10, 9), (11, 10), (12, 3)] {
+                set(b, x, y, hex("#e0f2fc"));
+            }
+        }),
+        ("snow_top", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#f2f6fa"),
+                    hex("#e8eef5"),
+                    hex("#fafcff"),
+                    hex("#e0e8f0"),
+                ],
+            )
+        }),
+        ("snow_side", |b, r| {
+            speckle(b, r, &[hex("#8a5f3c"), hex("#7d5535"), hex("#95683f")]);
+            for x in 0..16 {
+                for y in 0..4 {
+                    set(
+                        b,
+                        x,
+                        y,
+                        [hex("#f2f6fa"), hex("#e8eef5")][((r.next() * 2.0) as usize).min(1)],
+                    );
+                }
+            }
+        }),
+        ("basalt", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#3a3a42"),
+                    hex("#33333a"),
+                    hex("#42424c"),
+                    hex("#2c2c33"),
+                ],
+            );
+            for _ in 0..4 {
+                let x = (r.next() * 15.0) as i32;
+                let y = (r.next() * 15.0) as i32;
+                set(b, x, y, hex("#ff7733"));
+                if r.next() < 0.5 {
+                    set(b, x + 1, y, hex("#c94f1e"));
+                }
+            }
+        }),
+        ("alien_top", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#9a5fd0"),
+                    hex("#8b52c2"),
+                    hex("#a86ddb"),
+                    hex("#7d47b3"),
+                    hex("#b078e0"),
+                ],
+            )
+        }),
+        ("alien_side", |b, r| {
+            speckle(b, r, &[hex("#6e4a8a"), hex("#61407c"), hex("#7b5498")]);
+            for x in 0..16 {
+                let h = 3 + ((r.next() * 2.2) as i32);
+                for y in 0..h {
+                    set(
+                        b,
+                        x,
+                        y,
+                        [hex("#9a5fd0"), hex("#a86ddb")][((r.next() * 2.0) as usize).min(1)],
+                    );
+                }
+            }
+        }),
+        ("barrier", |b, r| {
+            speckle(b, r, &[hex("#2a2a30"), hex("#222228"), hex("#32323a")]);
+            for i in 0..16 {
+                set(b, i, i, hex("#4a4a55"));
+                set(b, 15 - i, i, hex("#4a4a55"));
+            }
+        }),
+        ("crystal", |b, r| {
+            speckle(b, r, &[hex("#1a4a50"), hex("#153c42"), hex("#20585e")]);
+            for _ in 0..5 {
+                let x = 1 + ((r.next() * 12.0) as i32);
+                let y = 1 + ((r.next() * 12.0) as i32);
+                set(b, x, y, hex("#7fe8e0"));
+                set(b, x + 1, y + 1, hex("#aef7f2"));
+                set(b, x, y + 1, hex("#5ec8c0"));
+                if r.next() < 0.5 {
+                    set(b, x + 1, y, hex("#ffffff"));
+                }
+            }
+        }),
+        ("mush_stem", |b, r| {
+            let bands = [hex("#e8dcc8"), hex("#dccfb8"), hex("#f0e6d4")];
+            for x in 0..16 {
+                let band = bands[(x % 3) as usize];
+                for y in 0..16 {
+                    set(b, x, y, if r.next() < 0.9 { band } else { hex("#c4b8a2") });
+                }
+            }
+            for i in 0..16 {
+                set(b, 0, i, hex("#b8ab94"));
+                set(b, 15, i, hex("#b8ab94"));
+            }
+        }),
+        ("mush_cap", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#a04fc8"),
+                    hex("#9445ba"),
+                    hex("#ad5cd4"),
+                    hex("#8a3dad"),
+                ],
+            );
+            for _ in 0..5 {
+                let x = 1 + ((r.next() * 12.0) as i32);
+                let y = 1 + ((r.next() * 12.0) as i32);
+                set(b, x, y, hex("#f0e0f8"));
+                set(b, x + 1, y, hex("#f0e0f8"));
+                set(b, x, y + 1, hex("#f0e0f8"));
+                set(b, x + 1, y + 1, hex("#e0c8ec"));
+            }
+        }),
+        ("ash", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#5c5a56"),
+                    hex("#524f4c"),
+                    hex("#66625e"),
+                    hex("#48453f"),
+                ],
+            );
+            for _ in 0..3 {
+                let x = (r.next() * 15.0) as i32;
+                let y = (r.next() * 15.0) as i32;
+                set(
+                    b,
+                    x,
+                    y,
+                    if r.next() < 0.5 {
+                        hex("#8a4a2a")
+                    } else {
+                        hex("#3a3a3a")
+                    },
+                );
+            }
+        }),
+        ("amber", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#e0a63a"),
+                    hex("#d49830"),
+                    hex("#ecb448"),
+                    hex("#c88a28"),
+                ],
+            );
+            for _ in 0..4 {
+                let x = 1 + ((r.next() * 13.0) as i32);
+                let y = 1 + ((r.next() * 13.0) as i32);
+                set(b, x, y, hex("#8a5a14"));
+                if r.next() < 0.5 {
+                    set(b, x + 1, y, hex("#6e4610"));
+                }
+                set(b, x - 1, y - 1, hex("#f8d878"));
+            }
+        }),
+        ("rust", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#9a5a38"),
+                    hex("#8a4e30"),
+                    hex("#a86a42"),
+                    hex("#7c452a"),
+                ],
+            );
+            for _ in 0..5 {
+                let x = (r.next() * 15.0) as i32;
+                let y = (r.next() * 15.0) as i32;
+                set(
+                    b,
+                    x,
+                    y,
+                    if r.next() < 0.5 {
+                        hex("#c8875a")
+                    } else {
+                        hex("#5e3520")
+                    },
+                );
+                if r.next() < 0.3 {
+                    set(b, x + 1, y, hex("#d8d8dc"));
+                }
+            }
+        }),
+        ("salt", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#f0f2f4"),
+                    hex("#e6e9ec"),
+                    hex("#f8fafc"),
+                    hex("#dde2e6"),
+                ],
+            );
+            for _ in 0..4 {
+                let x = 1 + ((r.next() * 13.0) as i32);
+                let y = 1 + ((r.next() * 13.0) as i32);
+                set(b, x, y, hex("#c2c9ce"));
+                set(b, x + 1, y, hex("#c2c9ce"));
+                set(b, x + 1, y + 1, hex("#c2c9ce"));
+            }
+        }),
+        ("obsidian", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#1c1a26"),
+                    hex("#16141f"),
+                    hex("#24202e"),
+                    hex("#120f1a"),
+                ],
+            );
+            for _ in 0..3 {
+                let x = 1 + ((r.next() * 12.0) as i32);
+                let y = 1 + ((r.next() * 12.0) as i32);
+                set(b, x, y, hex("#6a5a9a"));
+                set(b, x + 1, y + 1, hex("#48406e"));
+                if r.next() < 0.4 {
+                    set(b, x + 2, y + 2, hex("#8a7ab8"));
+                }
+            }
+        }),
+        ("redmoss_top", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#b04a38"),
+                    hex("#a04230"),
+                    hex("#c05642"),
+                    hex("#943a2a"),
+                    hex("#c86a50"),
+                ],
+            )
+        }),
+        ("redmoss_side", |b, r| {
+            speckle(b, r, &[hex("#8a5f3c"), hex("#7d5535"), hex("#95683f")]);
+            for x in 0..16 {
+                let h = 3 + ((r.next() * 2.2) as i32);
+                for y in 0..h {
+                    set(
+                        b,
+                        x,
+                        y,
+                        [hex("#b04a38"), hex("#c05642")][((r.next() * 2.0) as usize).min(1)],
+                    );
+                }
+            }
+        }),
+        ("hive", |b, r| {
+            speckle(b, r, &[hex("#d8862a"), hex("#c87822"), hex("#e69634")]);
+            for cy in 0..2i32 {
+                for cx in 0..2i32 {
+                    let ox = cx * 8 + (cy % 2) * 4;
+                    let oy = cy * 8;
+                    for a in 0..12 {
+                        let x = (ox
+                            + 3
+                            + ((a as f32 / 12.0 * std::f32::consts::TAU).cos() * 2.6).round()
+                                as i32)
+                            & 15;
+                        let y = (oy
+                            + 3
+                            + ((a as f32 / 12.0 * std::f32::consts::TAU).sin() * 2.6).round()
+                                as i32)
+                            & 15;
+                        set(b, x, y, hex("#8a5210"));
+                    }
+                    set(b, (ox + 3) & 15, (oy + 3) & 15, hex("#5e3808"));
+                }
+            }
+        }),
+        ("murk_top", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#1e5a4c"),
+                    hex("#1a4f42"),
+                    hex("#246656"),
+                    hex("#16453a"),
+                ],
+            );
+            for _ in 0..4 {
+                set(
+                    b,
+                    (r.next() * 15.0) as i32,
+                    (r.next() * 15.0) as i32,
+                    hex("#4ee8b8"),
+                );
+            }
+        }),
+        ("murk_side", |b, r| {
+            speckle(b, r, &[hex("#4a4238"), hex("#3f382f"), hex("#554c40")]);
+            for x in 0..16 {
+                let h = 3 + ((r.next() * 2.0) as i32);
+                for y in 0..h {
+                    set(
+                        b,
+                        x,
+                        y,
+                        [hex("#1e5a4c"), hex("#246656")][((r.next() * 2.0) as usize).min(1)],
+                    );
+                }
+            }
+        }),
+        ("glow_shroom", |b, _r| {
+            set(b, 7, 15, hex("#3a5248"));
+            set(b, 8, 14, hex("#2e453c"));
+            set(b, 7, 13, hex("#3a5248"));
+            set(b, 8, 12, hex("#2e453c"));
+            let c = hex("#4ee8b8");
+            let h = hex("#b8ffe8");
+            let d = hex("#2aa882");
+            set(b, 6, 9, c);
+            set(b, 7, 9, c);
+            set(b, 8, 9, c);
+            set(b, 9, 9, c);
+            set(b, 5, 10, d);
+            set(b, 10, 10, d);
+            set(b, 6, 8, h);
+            set(b, 7, 7, h);
+            set(b, 8, 8, c);
+            set(b, 9, 8, d);
+            set(b, 7, 10, hex("#e8fff6"));
+            set(b, 8, 10, hex("#e8fff6"));
+        }),
+        ("coal_ore", ore_coal),
+        ("iron_ore", ore_iron),
+        ("copper_ore", ore_copper),
+        ("titanium_ore", ore_titanium),
+        ("uranium_ore", ore_uranium),
+        ("gold_ore", ore_gold),
+        ("sodium_plant", |b, _r| {
+            for (x, y) in [(7, 15), (8, 15), (7, 14), (8, 13), (7, 12)] {
+                set(
+                    b,
+                    x,
+                    y,
+                    if y == 12 {
+                        hex("#488a33")
+                    } else if (x, y) == (8, 15) {
+                        hex("#357024")
+                    } else {
+                        hex("#3f7d2c")
+                    },
+                );
+            }
+            let c = hex("#ffd23e");
+            let h = hex("#fff2ae");
+            let d = hex("#d9a80f");
+            set(b, 7, 8, c);
+            set(b, 8, 8, c);
+            set(b, 7, 9, c);
+            set(b, 8, 9, h);
+            set(b, 6, 6, c);
+            set(b, 10, 7, d);
+            set(b, 7, 5, h);
+            set(b, 9, 10, d);
+            set(b, 5, 9, c);
+            set(b, 9, 5, c);
+        }),
+        ("oxygen_plant", |b, _r| {
+            for (x, y, c) in [
+                (8, 15, "#3f7d2c"),
+                (8, 14, "#357024"),
+                (7, 13, "#3f7d2c"),
+                (8, 12, "#488a33"),
+            ] {
+                set(b, x, y, hex(c));
+            }
+            let c = hex("#ff5a4e");
+            let h = hex("#ffb0a8");
+            let d = hex("#c22e24");
+            set(b, 7, 8, c);
+            set(b, 8, 8, c);
+            set(b, 7, 9, c);
+            set(b, 8, 9, h);
+            set(b, 6, 7, d);
+            set(b, 9, 7, c);
+            set(b, 6, 10, c);
+            set(b, 9, 10, d);
+            set(b, 7, 6, h);
+            set(b, 8, 11, c);
+        }),
+        ("carbon_fern", |b, r| {
+            let pal = [hex("#2e6420"), hex("#3f7d2c"), hex("#244f19")];
+            for _ in 0..12 {
+                let x = 3 + ((r.next() * 10.0) as i32);
+                let y = 4 + ((r.next() * 11.0) as i32);
+                set(b, x, y, pal[((r.next() * 3.0) as usize).min(2)]);
+            }
+            set(b, 7, 15, hex("#244f19"));
+            set(b, 8, 14, hex("#2e6420"));
+            set(b, 7, 13, hex("#244f19"));
+            set(b, 8, 12, hex("#2e6420"));
+        }),
+        ("glass", |b, _r| {
+            for i in 0..16 {
+                set(b, i, 0, hex("#cfeef5"));
+                set(b, i, 15, hex("#cfeef5"));
+                set(b, 0, i, hex("#cfeef5"));
+                set(b, 15, i, hex("#cfeef5"));
+            }
+            set(b, 3, 3, hex("#ffffffcc"));
+            set(b, 4, 4, hex("#ffffff99"));
+            set(b, 5, 5, hex("#ffffff66"));
+        }),
+        ("lamp_on", |b, r| {
+            speckle(b, r, &[hex("#ffe9a8"), hex("#fff3c8"), hex("#ffdf8e")]);
+            for i in 0..16 {
+                set(b, i, 0, hex("#8a6b2d"));
+                set(b, i, 15, hex("#8a6b2d"));
+                set(b, 0, i, hex("#8a6b2d"));
+                set(b, 15, i, hex("#8a6b2d"));
+            }
+        }),
+        ("metal", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#9aa7b0"),
+                    hex("#909da6"),
+                    hex("#a4b1ba"),
+                    hex("#8a97a0"),
+                ],
+            );
+            for i in 0..16 {
+                set(b, i, 0, hex("#b8c5ce"));
+                set(b, 0, i, hex("#b8c5ce"));
+                set(b, i, 15, hex("#6a7780"));
+                set(b, 15, i, hex("#6a7780"));
+            }
+            for (x, y) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
+                set(b, x, y, hex("#5f6b73"));
+            }
+        }),
+        ("metal_dark", |b, r| {
+            speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
+            for i in 0..16 {
+                set(b, i, 0, hex("#68747d"));
+                set(b, 0, i, hex("#68747d"));
+                set(b, i, 15, hex("#333d44"));
+                set(b, 15, i, hex("#333d44"));
+            }
+        }),
+        ("vent", |b, r| {
+            speckle(b, r, &[hex("#4e5a63"), hex("#46525b")]);
+            for y in (2..14).step_by(3) {
+                for x in 2..14 {
+                    set(b, x, y, hex("#222a30"));
+                    set(b, x, y + 1, hex("#68747d"));
+                }
+            }
+        }),
+        ("furnace_front", |b, r| {
+            speckle(b, r, &[hex("#8c8c8c"), hex("#828282"), hex("#969696")]);
+            for y in 8..14 {
+                for x in 4..12 {
+                    set(b, x, y, hex("#1d1d1d"));
+                }
+            }
+            for x in 3..13 {
+                set(b, x, 7, hex("#5a5a5a"));
+                set(b, x, 14, hex("#5a5a5a"));
+            }
+        }),
+        ("furnace_on", |b, r| {
+            speckle(b, r, &[hex("#8c8c8c"), hex("#828282"), hex("#969696")]);
+            let flame = [
+                hex("#ff8c1a"),
+                hex("#ffb31a"),
+                hex("#ff6600"),
+                hex("#ffd21a"),
+            ];
+            for y in 8..14 {
+                for x in 4..12 {
+                    set(b, x, y, flame[((r.next() * 4.0) as usize).min(3)]);
+                }
+            }
+            for x in 3..13 {
+                set(b, x, 7, hex("#5a5a5a"));
+                set(b, x, 14, hex("#5a5a5a"));
+            }
+        }),
+        ("belt", |b, r| {
+            speckle(b, r, &[hex("#3a4148"), hex("#333a40"), hex("#424a52")]);
+            for x in 0..16 {
+                set(b, x, 0, hex("#586269"));
+                set(b, x, 15, hex("#586269"));
+            }
+            for oy in [2i32, 10] {
+                set(b, 3, oy, hex("#ffcf4d"));
+                set(b, 4, oy + 1, hex("#ffcf4d"));
+                set(b, 5, oy + 2, hex("#ffcf4d"));
+                set(b, 4, oy + 3, hex("#ffcf4d"));
+                set(b, 3, oy + 4, hex("#ffcf4d"));
+                set(b, 9, oy, hex("#e6b23a"));
+                set(b, 10, oy + 1, hex("#e6b23a"));
+                set(b, 11, oy + 2, hex("#e6b23a"));
+                set(b, 10, oy + 3, hex("#e6b23a"));
+                set(b, 9, oy + 4, hex("#e6b23a"));
+            }
+        }),
+        ("belt_turn", |b, r| {
+            speckle(b, r, &[hex("#3a4148"), hex("#333a40"), hex("#424a52")]);
+            for x in 0..16 {
+                set(b, x, 0, hex("#586269"));
+            }
+            for y in 0..16 {
+                set(b, 0, y, hex("#586269"));
+            }
+            for a in 0..26 {
+                let t = a as f32 / 25.0 * std::f32::consts::FRAC_PI_2;
+                let x = (15.0 - t.cos() * 12.0).round() as i32;
+                let y = (15.0 - t.sin() * 12.0).round() as i32;
+                set(b, x, y, hex("#ffcf4d"));
+                let x2 = (15.0 - t.cos() * 6.0).round() as i32;
+                let y2 = (15.0 - t.sin() * 6.0).round() as i32;
+                set(b, x2, y2, hex("#e6b23a"));
+            }
+            set(b, 13, 12, hex("#ffcf4d"));
+            set(b, 12, 13, hex("#ffcf4d"));
+        }),
+        ("wind_pole", |b, r| {
+            speckle(b, r, &[hex("#c8d2d8"), hex("#bcc6cc"), hex("#d2dce2")]);
+            for i in 0..16 {
+                set(b, 0, i, hex("#98a2a8"));
+                set(b, 15, i, hex("#98a2a8"));
+            }
+            for (x, y) in [(7, 3), (8, 3), (7, 10), (8, 10)] {
+                set(b, x, y, hex("#8a97a0"));
+            }
+        }),
+        ("miner_top", |b, r| {
+            speckle(b, r, &[hex("#9aa7b0"), hex("#909da6"), hex("#a4b1ba")]);
+            for y in 4..12 {
+                for x in 4..12 {
+                    set(b, x, y, hex("#333d44"));
+                }
+            }
+            for i in 5..11 {
+                set(b, i, i, hex("#ffcf4d"));
+                set(b, 16 - i, i, hex("#ffcf4d"));
+            }
+            for i in 0..16 {
+                set(b, i, 0, hex("#b8c5ce"));
+                set(b, 0, i, hex("#b8c5ce"));
+                set(b, i, 15, hex("#6a7780"));
+                set(b, 15, i, hex("#6a7780"));
+            }
+        }),
+        ("assembler_top", |b, r| {
+            speckle(b, r, &[hex("#9aa7b0"), hex("#909da6"), hex("#a4b1ba")]);
+            for y in 3..13 {
+                for x in 3..13 {
+                    set(b, x, y, hex("#1a2a38"));
+                }
+            }
+            set(b, 7, 7, hex("#35e0e8"));
+            set(b, 8, 7, hex("#35e0e8"));
+            set(b, 7, 8, hex("#35e0e8"));
+            set(b, 8, 8, hex("#7ff5fa"));
+            for i in 0..16 {
+                set(b, i, 0, hex("#b8c5ce"));
+                set(b, 0, i, hex("#b8c5ce"));
+                set(b, i, 15, hex("#6a7780"));
+                set(b, 15, i, hex("#6a7780"));
+            }
+        }),
+        ("solar_top", |b, r| {
+            let cells = [hex("#16294e"), hex("#1a3160"), hex("#122342")];
+            for y in 0..16 {
+                for x in 0..16 {
+                    if x % 5 == 0 || y % 8 == 7 {
+                        set(b, x, y, hex("#8a97a0"));
+                    } else {
+                        set(b, x, y, cells[((r.next() * 3.0) as usize).min(2)]);
+                    }
+                }
+            }
+            for (x, y) in [(3, 2), (8, 4), (12, 9)] {
+                set(b, x, y, hex("#4a6dc0"));
+            }
+        }),
+        ("chest_side", |b, r| {
+            speckle(b, r, &[hex("#a8824f"), hex("#9d7948"), hex("#b28a55")]);
+            for i in 0..16 {
+                set(b, i, 0, hex("#7a5c35"));
+                set(b, i, 15, hex("#7a5c35"));
+                set(b, 0, i, hex("#7a5c35"));
+                set(b, 15, i, hex("#7a5c35"));
+            }
+            for x in 0..16 {
+                set(b, x, 6, hex("#63482a"));
+            }
+            set(b, 7, 6, hex("#d8d8d8"));
+            set(b, 8, 6, hex("#d8d8d8"));
+            set(b, 7, 7, hex("#b8b8b8"));
+            set(b, 8, 7, hex("#b8b8b8"));
+        }),
+        ("refinery_side", |b, r| {
+            speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
+            for y in 3..13 {
+                set(b, 4, y, hex("#ff8c1a"));
+                set(b, 5, y, hex("#c9641a"));
+                set(b, 10, y, hex("#35e0e8"));
+                set(b, 11, y, hex("#1a8a90"));
+            }
+            for i in 0..16 {
+                set(b, i, 0, hex("#68747d"));
+                set(b, i, 15, hex("#333d44"));
+            }
+        }),
+        ("reactor_side", |b, r| {
+            speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
+            let core = [hex("#69d436"), hex("#a2f078"), hex("#4caf1e")];
+            for y in 4..12 {
+                for x in 6..10 {
+                    set(b, x, y, core[((r.next() * 3.0) as usize).min(2)]);
+                }
+            }
+            for i in 0..16 {
+                set(b, i, 0, hex("#68747d"));
+                set(b, 0, i, hex("#68747d"));
+                set(b, i, 15, hex("#333d44"));
+                set(b, 15, i, hex("#333d44"));
+            }
+        }),
+        ("launchpad_top", |b, r| {
+            speckle(b, r, &[hex("#4e5a63"), hex("#46525b")]);
+            for i in 0..16 {
+                if i % 4 < 2 {
+                    set(b, i, 0, hex("#ffcf4d"));
+                    set(b, i, 15, hex("#ffcf4d"));
+                    set(b, 0, i, hex("#ffcf4d"));
+                    set(b, 15, i, hex("#ffcf4d"));
+                }
+            }
+            for a in 0..40 {
+                let x = 8 + ((a as f32 / 40.0 * std::f32::consts::TAU).cos() * 5.0).round() as i32;
+                let y = 8 + ((a as f32 / 40.0 * std::f32::consts::TAU).sin() * 5.0).round() as i32;
+                set(b, x, y, hex("#ffcf4d"));
+            }
+            for (x, y) in [(7, 8), (8, 8), (8, 7), (7, 7)] {
+                set(b, x, y, hex("#ffcf4d"));
+            }
+        }),
+        ("storage_top", |b, r| {
+            speckle(b, r, &[hex("#a8824f"), hex("#9d7948")]);
+            for i in 0..16 {
+                set(b, i, 0, hex("#7a5c35"));
+                set(b, i, 15, hex("#7a5c35"));
+                set(b, 0, i, hex("#7a5c35"));
+                set(b, 15, i, hex("#7a5c35"));
+            }
+        }),
+        ("medbay_top", |b, r| {
+            speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
+            for y in 4..11 {
+                set(b, 7, y, hex("#7dff8a"));
+                set(b, 8, y, hex("#7dff8a"));
+            }
+            for x in 4..11 {
+                set(b, x, 7, hex("#7dff8a"));
+                set(b, x, 8, hex("#7dff8a"));
+            }
+            for i in 0..16 {
+                set(b, i, 0, hex("#68747d"));
+                set(b, 0, i, hex("#68747d"));
+                set(b, i, 15, hex("#333d44"));
+                set(b, 15, i, hex("#333d44"));
+            }
+        }),
+        ("slab", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#8c8c8c"),
+                    hex("#828282"),
+                    hex("#969696"),
+                    hex("#7a7a7a"),
+                ],
+            );
+            for i in 0..16 {
+                set(b, i, 0, hex("#a8a8a8"));
+                set(b, i, 1, hex("#9c9c9c"));
+                set(b, i, 15, hex("#5a5a5a"));
+            }
+            for x in (2..14).step_by(4) {
+                set(b, x, 8, hex("#9c9c9c"));
+                set(b, x + 1, 9, hex("#9c9c9c"));
+            }
+        }),
+        ("concrete", |b, r| {
+            speckle(
+                b,
+                r,
+                &[
+                    hex("#9aa3ab"),
+                    hex("#8f989f"),
+                    hex("#a5aeb6"),
+                    hex("#848d94"),
+                ],
+            );
+            for i in 0..16 {
+                set(b, i, 0, hex("#b8c0c7"));
+                set(b, 0, i, hex("#a8b0b8"));
+            }
+            for (x, y) in [(3, 4), (4, 5), (11, 9), (12, 10)] {
+                set(b, x, y, hex("#7a828a"));
+            }
+        }),
+    ]
 }
 
 impl Atlas {
     /// Build the full 62-tile atlas in the exact registration order of textures.js.
     pub fn build() -> Self {
+        Self::from_painters(painters())
+    }
+
+    /// Painter keys in registration order; used by the B02 catalog audit to
+    /// detect painters that were never registered as surface materials.
+    pub(crate) fn painter_keys() -> Vec<&'static str> {
+        painters().into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// Test hook: build an atlas whose registration order is `order` (a
+    /// permutation of `0..painter_keys().len()`), used to prove that atlas
+    /// order is not an ID source.
+    #[cfg(test)]
+    pub(crate) fn build_with_order(order: &[usize]) -> Option<Self> {
+        let painters = painters();
+        if order.len() != painters.len() {
+            return None;
+        }
+        let mut seen = vec![false; painters.len()];
+        let mut permuted: Vec<(&'static str, Painter)> = Vec::with_capacity(order.len());
+        for &index in order {
+            if index >= painters.len() || seen[index] {
+                return None;
+            }
+            seen[index] = true;
+            permuted.push(painters[index]);
+        }
+        Some(Self::from_painters(permuted))
+    }
+
+    fn from_painters(painters: Vec<(&'static str, Painter)>) -> Self {
         let mut index = HashMap::new();
         let mut tiles: Vec<[Pixel; 256]> = Vec::new();
-        // (name, painter) in exact order
-        let painters: Vec<(&'static str, Painter)> = vec![
-            ("grass_top", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#3f9b72"),
-                        hex("#2d8068"),
-                        hex("#56b982"),
-                        hex("#347f70"),
-                        hex("#65c58d"),
-                    ],
-                )
-            }),
-            ("dirt", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#8a5f3c"),
-                        hex("#7d5535"),
-                        hex("#95683f"),
-                        hex("#775033"),
-                        hex("#8a6039"),
-                    ],
-                )
-            }),
-            ("grass_side", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#8a5f3c"),
-                        hex("#7d5535"),
-                        hex("#95683f"),
-                        hex("#775033"),
-                    ],
-                );
-                for x in 0..16 {
-                    let h = 3 + ((r.next() * 2.4) as i32);
-                    for y in 0..h {
-                        set(
-                            b,
-                            x,
-                            y,
-                            [hex("#3f9b72"), hex("#2d8068"), hex("#56b982")]
-                                [((r.next() * 3.0) as usize).min(2)],
-                        );
-                    }
-                }
-            }),
-            ("stone", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#8c8c8c"),
-                        hex("#828282"),
-                        hex("#969696"),
-                        hex("#7a7a7a"),
-                    ],
-                );
-                for _ in 0..5 {
-                    let x = (r.next() * 14.0) as i32;
-                    let y = (r.next() * 14.0) as i32;
-                    set(b, x, y, hex("#a3a3a3"));
-                    set(b, x + 1, y, hex("#a3a3a3"));
-                }
-            }),
-            ("sand", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#e0d29a"),
-                        hex("#d8c98e"),
-                        hex("#e8dba6"),
-                        hex("#d0c184"),
-                    ],
-                )
-            }),
-            ("gravel", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#8f8b87"),
-                        hex("#7c7975"),
-                        hex("#a09b96"),
-                        hex("#6e6a66"),
-                        hex("#95908b"),
-                    ],
-                )
-            }),
-            ("log_side", |b, r| {
-                let bands = [
-                    hex("#6b502f"),
-                    hex("#5e4629"),
-                    hex("#755834"),
-                    hex("#634a2b"),
-                ];
-                for x in 0..16 {
-                    let band = bands[(x % 4) as usize];
-                    for y in 0..16 {
-                        set(
-                            b,
-                            x,
-                            y,
-                            if r.next() < 0.85 {
-                                band
-                            } else {
-                                shade_p("#6b502f", 0.8 + r.next() * 0.4)
-                            },
-                        );
-                    }
-                }
-            }),
-            ("log_top", |b, r| {
-                speckle(b, r, &[hex("#b08d55"), hex("#a5854f")]);
-                let mut ring = 7i32;
-                while ring >= 1 {
-                    for a in 0..64 {
-                        let x = 8
-                            + ((a as f32 / 64.0 * std::f32::consts::TAU).cos() * ring as f32 * 0.9)
-                                .round() as i32;
-                        let y = 8
-                            + ((a as f32 / 64.0 * std::f32::consts::TAU).sin() * ring as f32 * 0.9)
-                                .round() as i32;
-                        set(b, x, y, hex("#8a6b3d"));
-                    }
-                    ring -= 2;
-                }
-                for i in 0..16 {
-                    set(b, i, 0, hex("#6b502f"));
-                    set(b, i, 15, hex("#6b502f"));
-                    set(b, 0, i, hex("#6b502f"));
-                    set(b, 15, i, hex("#6b502f"));
-                }
-            }),
-            ("leaves", |b, r| {
-                let pal = [
-                    hex("#3f7d2c"),
-                    hex("#357024"),
-                    hex("#488a33"),
-                    hex("#2e6420"),
-                ];
-                for y in 0..16 {
-                    for x in 0..16 {
-                        if r.next() < 0.24 {
-                            set(b, x, y, [0, 0, 0, 0]);
-                            continue;
-                        }
-                        set(b, x, y, pal[((r.next() * 4.0) as usize).min(3)]);
-                        if r.next() < 0.06 {
-                            set(b, x, y, hex("#5aa93f"));
-                        }
-                    }
-                }
-            }),
-            ("planks", |b, r| {
-                speckle(b, r, &[hex("#a8824f"), hex("#9d7948"), hex("#b28a55")]);
-                for y in (3..16).step_by(4) {
-                    for x in 0..16 {
-                        set(b, x, y, hex("#7a5c35"));
-                    }
-                }
-                set(b, 4, 1, hex("#7a5c35"));
-                set(b, 11, 5, hex("#7a5c35"));
-                set(b, 2, 9, hex("#7a5c35"));
-                set(b, 13, 13, hex("#7a5c35"));
-            }),
-            ("water", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#3e6bd6"),
-                        hex("#3862c7"),
-                        hex("#4675e0"),
-                        hex("#3455b8"),
-                    ],
-                )
-            }),
-            ("ice", |b, r| {
-                speckle(b, r, &[hex("#a8d4f0"), hex("#9ccbeb"), hex("#b6ddf5")]);
-                for (x, y) in [(3, 4), (4, 5), (10, 9), (11, 10), (12, 3)] {
-                    set(b, x, y, hex("#e0f2fc"));
-                }
-            }),
-            ("snow_top", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#f2f6fa"),
-                        hex("#e8eef5"),
-                        hex("#fafcff"),
-                        hex("#e0e8f0"),
-                    ],
-                )
-            }),
-            ("snow_side", |b, r| {
-                speckle(b, r, &[hex("#8a5f3c"), hex("#7d5535"), hex("#95683f")]);
-                for x in 0..16 {
-                    for y in 0..4 {
-                        set(
-                            b,
-                            x,
-                            y,
-                            [hex("#f2f6fa"), hex("#e8eef5")][((r.next() * 2.0) as usize).min(1)],
-                        );
-                    }
-                }
-            }),
-            ("basalt", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#3a3a42"),
-                        hex("#33333a"),
-                        hex("#42424c"),
-                        hex("#2c2c33"),
-                    ],
-                );
-                for _ in 0..4 {
-                    let x = (r.next() * 15.0) as i32;
-                    let y = (r.next() * 15.0) as i32;
-                    set(b, x, y, hex("#ff7733"));
-                    if r.next() < 0.5 {
-                        set(b, x + 1, y, hex("#c94f1e"));
-                    }
-                }
-            }),
-            ("alien_top", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#9a5fd0"),
-                        hex("#8b52c2"),
-                        hex("#a86ddb"),
-                        hex("#7d47b3"),
-                        hex("#b078e0"),
-                    ],
-                )
-            }),
-            ("alien_side", |b, r| {
-                speckle(b, r, &[hex("#6e4a8a"), hex("#61407c"), hex("#7b5498")]);
-                for x in 0..16 {
-                    let h = 3 + ((r.next() * 2.2) as i32);
-                    for y in 0..h {
-                        set(
-                            b,
-                            x,
-                            y,
-                            [hex("#9a5fd0"), hex("#a86ddb")][((r.next() * 2.0) as usize).min(1)],
-                        );
-                    }
-                }
-            }),
-            ("barrier", |b, r| {
-                speckle(b, r, &[hex("#2a2a30"), hex("#222228"), hex("#32323a")]);
-                for i in 0..16 {
-                    set(b, i, i, hex("#4a4a55"));
-                    set(b, 15 - i, i, hex("#4a4a55"));
-                }
-            }),
-            ("crystal", |b, r| {
-                speckle(b, r, &[hex("#1a4a50"), hex("#153c42"), hex("#20585e")]);
-                for _ in 0..5 {
-                    let x = 1 + ((r.next() * 12.0) as i32);
-                    let y = 1 + ((r.next() * 12.0) as i32);
-                    set(b, x, y, hex("#7fe8e0"));
-                    set(b, x + 1, y + 1, hex("#aef7f2"));
-                    set(b, x, y + 1, hex("#5ec8c0"));
-                    if r.next() < 0.5 {
-                        set(b, x + 1, y, hex("#ffffff"));
-                    }
-                }
-            }),
-            ("mush_stem", |b, r| {
-                let bands = [hex("#e8dcc8"), hex("#dccfb8"), hex("#f0e6d4")];
-                for x in 0..16 {
-                    let band = bands[(x % 3) as usize];
-                    for y in 0..16 {
-                        set(b, x, y, if r.next() < 0.9 { band } else { hex("#c4b8a2") });
-                    }
-                }
-                for i in 0..16 {
-                    set(b, 0, i, hex("#b8ab94"));
-                    set(b, 15, i, hex("#b8ab94"));
-                }
-            }),
-            ("mush_cap", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#a04fc8"),
-                        hex("#9445ba"),
-                        hex("#ad5cd4"),
-                        hex("#8a3dad"),
-                    ],
-                );
-                for _ in 0..5 {
-                    let x = 1 + ((r.next() * 12.0) as i32);
-                    let y = 1 + ((r.next() * 12.0) as i32);
-                    set(b, x, y, hex("#f0e0f8"));
-                    set(b, x + 1, y, hex("#f0e0f8"));
-                    set(b, x, y + 1, hex("#f0e0f8"));
-                    set(b, x + 1, y + 1, hex("#e0c8ec"));
-                }
-            }),
-            ("ash", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#5c5a56"),
-                        hex("#524f4c"),
-                        hex("#66625e"),
-                        hex("#48453f"),
-                    ],
-                );
-                for _ in 0..3 {
-                    let x = (r.next() * 15.0) as i32;
-                    let y = (r.next() * 15.0) as i32;
-                    set(
-                        b,
-                        x,
-                        y,
-                        if r.next() < 0.5 {
-                            hex("#8a4a2a")
-                        } else {
-                            hex("#3a3a3a")
-                        },
-                    );
-                }
-            }),
-            ("amber", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#e0a63a"),
-                        hex("#d49830"),
-                        hex("#ecb448"),
-                        hex("#c88a28"),
-                    ],
-                );
-                for _ in 0..4 {
-                    let x = 1 + ((r.next() * 13.0) as i32);
-                    let y = 1 + ((r.next() * 13.0) as i32);
-                    set(b, x, y, hex("#8a5a14"));
-                    if r.next() < 0.5 {
-                        set(b, x + 1, y, hex("#6e4610"));
-                    }
-                    set(b, x - 1, y - 1, hex("#f8d878"));
-                }
-            }),
-            ("rust", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#9a5a38"),
-                        hex("#8a4e30"),
-                        hex("#a86a42"),
-                        hex("#7c452a"),
-                    ],
-                );
-                for _ in 0..5 {
-                    let x = (r.next() * 15.0) as i32;
-                    let y = (r.next() * 15.0) as i32;
-                    set(
-                        b,
-                        x,
-                        y,
-                        if r.next() < 0.5 {
-                            hex("#c8875a")
-                        } else {
-                            hex("#5e3520")
-                        },
-                    );
-                    if r.next() < 0.3 {
-                        set(b, x + 1, y, hex("#d8d8dc"));
-                    }
-                }
-            }),
-            ("salt", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#f0f2f4"),
-                        hex("#e6e9ec"),
-                        hex("#f8fafc"),
-                        hex("#dde2e6"),
-                    ],
-                );
-                for _ in 0..4 {
-                    let x = 1 + ((r.next() * 13.0) as i32);
-                    let y = 1 + ((r.next() * 13.0) as i32);
-                    set(b, x, y, hex("#c2c9ce"));
-                    set(b, x + 1, y, hex("#c2c9ce"));
-                    set(b, x + 1, y + 1, hex("#c2c9ce"));
-                }
-            }),
-            ("obsidian", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#1c1a26"),
-                        hex("#16141f"),
-                        hex("#24202e"),
-                        hex("#120f1a"),
-                    ],
-                );
-                for _ in 0..3 {
-                    let x = 1 + ((r.next() * 12.0) as i32);
-                    let y = 1 + ((r.next() * 12.0) as i32);
-                    set(b, x, y, hex("#6a5a9a"));
-                    set(b, x + 1, y + 1, hex("#48406e"));
-                    if r.next() < 0.4 {
-                        set(b, x + 2, y + 2, hex("#8a7ab8"));
-                    }
-                }
-            }),
-            ("redmoss_top", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#b04a38"),
-                        hex("#a04230"),
-                        hex("#c05642"),
-                        hex("#943a2a"),
-                        hex("#c86a50"),
-                    ],
-                )
-            }),
-            ("redmoss_side", |b, r| {
-                speckle(b, r, &[hex("#8a5f3c"), hex("#7d5535"), hex("#95683f")]);
-                for x in 0..16 {
-                    let h = 3 + ((r.next() * 2.2) as i32);
-                    for y in 0..h {
-                        set(
-                            b,
-                            x,
-                            y,
-                            [hex("#b04a38"), hex("#c05642")][((r.next() * 2.0) as usize).min(1)],
-                        );
-                    }
-                }
-            }),
-            ("hive", |b, r| {
-                speckle(b, r, &[hex("#d8862a"), hex("#c87822"), hex("#e69634")]);
-                for cy in 0..2i32 {
-                    for cx in 0..2i32 {
-                        let ox = cx * 8 + (cy % 2) * 4;
-                        let oy = cy * 8;
-                        for a in 0..12 {
-                            let x = (ox
-                                + 3
-                                + ((a as f32 / 12.0 * std::f32::consts::TAU).cos() * 2.6).round()
-                                    as i32)
-                                & 15;
-                            let y = (oy
-                                + 3
-                                + ((a as f32 / 12.0 * std::f32::consts::TAU).sin() * 2.6).round()
-                                    as i32)
-                                & 15;
-                            set(b, x, y, hex("#8a5210"));
-                        }
-                        set(b, (ox + 3) & 15, (oy + 3) & 15, hex("#5e3808"));
-                    }
-                }
-            }),
-            ("murk_top", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#1e5a4c"),
-                        hex("#1a4f42"),
-                        hex("#246656"),
-                        hex("#16453a"),
-                    ],
-                );
-                for _ in 0..4 {
-                    set(
-                        b,
-                        (r.next() * 15.0) as i32,
-                        (r.next() * 15.0) as i32,
-                        hex("#4ee8b8"),
-                    );
-                }
-            }),
-            ("murk_side", |b, r| {
-                speckle(b, r, &[hex("#4a4238"), hex("#3f382f"), hex("#554c40")]);
-                for x in 0..16 {
-                    let h = 3 + ((r.next() * 2.0) as i32);
-                    for y in 0..h {
-                        set(
-                            b,
-                            x,
-                            y,
-                            [hex("#1e5a4c"), hex("#246656")][((r.next() * 2.0) as usize).min(1)],
-                        );
-                    }
-                }
-            }),
-            ("glow_shroom", |b, _r| {
-                set(b, 7, 15, hex("#3a5248"));
-                set(b, 8, 14, hex("#2e453c"));
-                set(b, 7, 13, hex("#3a5248"));
-                set(b, 8, 12, hex("#2e453c"));
-                let c = hex("#4ee8b8");
-                let h = hex("#b8ffe8");
-                let d = hex("#2aa882");
-                set(b, 6, 9, c);
-                set(b, 7, 9, c);
-                set(b, 8, 9, c);
-                set(b, 9, 9, c);
-                set(b, 5, 10, d);
-                set(b, 10, 10, d);
-                set(b, 6, 8, h);
-                set(b, 7, 7, h);
-                set(b, 8, 8, c);
-                set(b, 9, 8, d);
-                set(b, 7, 10, hex("#e8fff6"));
-                set(b, 8, 10, hex("#e8fff6"));
-            }),
-            ("coal_ore", ore_coal),
-            ("iron_ore", ore_iron),
-            ("copper_ore", ore_copper),
-            ("titanium_ore", ore_titanium),
-            ("uranium_ore", ore_uranium),
-            ("gold_ore", ore_gold),
-            ("sodium_plant", |b, _r| {
-                for (x, y) in [(7, 15), (8, 15), (7, 14), (8, 13), (7, 12)] {
-                    set(
-                        b,
-                        x,
-                        y,
-                        if y == 12 {
-                            hex("#488a33")
-                        } else if (x, y) == (8, 15) {
-                            hex("#357024")
-                        } else {
-                            hex("#3f7d2c")
-                        },
-                    );
-                }
-                let c = hex("#ffd23e");
-                let h = hex("#fff2ae");
-                let d = hex("#d9a80f");
-                set(b, 7, 8, c);
-                set(b, 8, 8, c);
-                set(b, 7, 9, c);
-                set(b, 8, 9, h);
-                set(b, 6, 6, c);
-                set(b, 10, 7, d);
-                set(b, 7, 5, h);
-                set(b, 9, 10, d);
-                set(b, 5, 9, c);
-                set(b, 9, 5, c);
-            }),
-            ("oxygen_plant", |b, _r| {
-                for (x, y, c) in [
-                    (8, 15, "#3f7d2c"),
-                    (8, 14, "#357024"),
-                    (7, 13, "#3f7d2c"),
-                    (8, 12, "#488a33"),
-                ] {
-                    set(b, x, y, hex(c));
-                }
-                let c = hex("#ff5a4e");
-                let h = hex("#ffb0a8");
-                let d = hex("#c22e24");
-                set(b, 7, 8, c);
-                set(b, 8, 8, c);
-                set(b, 7, 9, c);
-                set(b, 8, 9, h);
-                set(b, 6, 7, d);
-                set(b, 9, 7, c);
-                set(b, 6, 10, c);
-                set(b, 9, 10, d);
-                set(b, 7, 6, h);
-                set(b, 8, 11, c);
-            }),
-            ("carbon_fern", |b, r| {
-                let pal = [hex("#2e6420"), hex("#3f7d2c"), hex("#244f19")];
-                for _ in 0..12 {
-                    let x = 3 + ((r.next() * 10.0) as i32);
-                    let y = 4 + ((r.next() * 11.0) as i32);
-                    set(b, x, y, pal[((r.next() * 3.0) as usize).min(2)]);
-                }
-                set(b, 7, 15, hex("#244f19"));
-                set(b, 8, 14, hex("#2e6420"));
-                set(b, 7, 13, hex("#244f19"));
-                set(b, 8, 12, hex("#2e6420"));
-            }),
-            ("glass", |b, _r| {
-                for i in 0..16 {
-                    set(b, i, 0, hex("#cfeef5"));
-                    set(b, i, 15, hex("#cfeef5"));
-                    set(b, 0, i, hex("#cfeef5"));
-                    set(b, 15, i, hex("#cfeef5"));
-                }
-                set(b, 3, 3, hex("#ffffffcc"));
-                set(b, 4, 4, hex("#ffffff99"));
-                set(b, 5, 5, hex("#ffffff66"));
-            }),
-            ("lamp_on", |b, r| {
-                speckle(b, r, &[hex("#ffe9a8"), hex("#fff3c8"), hex("#ffdf8e")]);
-                for i in 0..16 {
-                    set(b, i, 0, hex("#8a6b2d"));
-                    set(b, i, 15, hex("#8a6b2d"));
-                    set(b, 0, i, hex("#8a6b2d"));
-                    set(b, 15, i, hex("#8a6b2d"));
-                }
-            }),
-            ("metal", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#9aa7b0"),
-                        hex("#909da6"),
-                        hex("#a4b1ba"),
-                        hex("#8a97a0"),
-                    ],
-                );
-                for i in 0..16 {
-                    set(b, i, 0, hex("#b8c5ce"));
-                    set(b, 0, i, hex("#b8c5ce"));
-                    set(b, i, 15, hex("#6a7780"));
-                    set(b, 15, i, hex("#6a7780"));
-                }
-                for (x, y) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
-                    set(b, x, y, hex("#5f6b73"));
-                }
-            }),
-            ("metal_dark", |b, r| {
-                speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
-                for i in 0..16 {
-                    set(b, i, 0, hex("#68747d"));
-                    set(b, 0, i, hex("#68747d"));
-                    set(b, i, 15, hex("#333d44"));
-                    set(b, 15, i, hex("#333d44"));
-                }
-            }),
-            ("vent", |b, r| {
-                speckle(b, r, &[hex("#4e5a63"), hex("#46525b")]);
-                for y in (2..14).step_by(3) {
-                    for x in 2..14 {
-                        set(b, x, y, hex("#222a30"));
-                        set(b, x, y + 1, hex("#68747d"));
-                    }
-                }
-            }),
-            ("furnace_front", |b, r| {
-                speckle(b, r, &[hex("#8c8c8c"), hex("#828282"), hex("#969696")]);
-                for y in 8..14 {
-                    for x in 4..12 {
-                        set(b, x, y, hex("#1d1d1d"));
-                    }
-                }
-                for x in 3..13 {
-                    set(b, x, 7, hex("#5a5a5a"));
-                    set(b, x, 14, hex("#5a5a5a"));
-                }
-            }),
-            ("furnace_on", |b, r| {
-                speckle(b, r, &[hex("#8c8c8c"), hex("#828282"), hex("#969696")]);
-                let flame = [
-                    hex("#ff8c1a"),
-                    hex("#ffb31a"),
-                    hex("#ff6600"),
-                    hex("#ffd21a"),
-                ];
-                for y in 8..14 {
-                    for x in 4..12 {
-                        set(b, x, y, flame[((r.next() * 4.0) as usize).min(3)]);
-                    }
-                }
-                for x in 3..13 {
-                    set(b, x, 7, hex("#5a5a5a"));
-                    set(b, x, 14, hex("#5a5a5a"));
-                }
-            }),
-            ("belt", |b, r| {
-                speckle(b, r, &[hex("#3a4148"), hex("#333a40"), hex("#424a52")]);
-                for x in 0..16 {
-                    set(b, x, 0, hex("#586269"));
-                    set(b, x, 15, hex("#586269"));
-                }
-                for oy in [2i32, 10] {
-                    set(b, 3, oy, hex("#ffcf4d"));
-                    set(b, 4, oy + 1, hex("#ffcf4d"));
-                    set(b, 5, oy + 2, hex("#ffcf4d"));
-                    set(b, 4, oy + 3, hex("#ffcf4d"));
-                    set(b, 3, oy + 4, hex("#ffcf4d"));
-                    set(b, 9, oy, hex("#e6b23a"));
-                    set(b, 10, oy + 1, hex("#e6b23a"));
-                    set(b, 11, oy + 2, hex("#e6b23a"));
-                    set(b, 10, oy + 3, hex("#e6b23a"));
-                    set(b, 9, oy + 4, hex("#e6b23a"));
-                }
-            }),
-            ("belt_turn", |b, r| {
-                speckle(b, r, &[hex("#3a4148"), hex("#333a40"), hex("#424a52")]);
-                for x in 0..16 {
-                    set(b, x, 0, hex("#586269"));
-                }
-                for y in 0..16 {
-                    set(b, 0, y, hex("#586269"));
-                }
-                for a in 0..26 {
-                    let t = a as f32 / 25.0 * std::f32::consts::FRAC_PI_2;
-                    let x = (15.0 - t.cos() * 12.0).round() as i32;
-                    let y = (15.0 - t.sin() * 12.0).round() as i32;
-                    set(b, x, y, hex("#ffcf4d"));
-                    let x2 = (15.0 - t.cos() * 6.0).round() as i32;
-                    let y2 = (15.0 - t.sin() * 6.0).round() as i32;
-                    set(b, x2, y2, hex("#e6b23a"));
-                }
-                set(b, 13, 12, hex("#ffcf4d"));
-                set(b, 12, 13, hex("#ffcf4d"));
-            }),
-            ("wind_pole", |b, r| {
-                speckle(b, r, &[hex("#c8d2d8"), hex("#bcc6cc"), hex("#d2dce2")]);
-                for i in 0..16 {
-                    set(b, 0, i, hex("#98a2a8"));
-                    set(b, 15, i, hex("#98a2a8"));
-                }
-                for (x, y) in [(7, 3), (8, 3), (7, 10), (8, 10)] {
-                    set(b, x, y, hex("#8a97a0"));
-                }
-            }),
-            ("miner_top", |b, r| {
-                speckle(b, r, &[hex("#9aa7b0"), hex("#909da6"), hex("#a4b1ba")]);
-                for y in 4..12 {
-                    for x in 4..12 {
-                        set(b, x, y, hex("#333d44"));
-                    }
-                }
-                for i in 5..11 {
-                    set(b, i, i, hex("#ffcf4d"));
-                    set(b, 16 - i, i, hex("#ffcf4d"));
-                }
-                for i in 0..16 {
-                    set(b, i, 0, hex("#b8c5ce"));
-                    set(b, 0, i, hex("#b8c5ce"));
-                    set(b, i, 15, hex("#6a7780"));
-                    set(b, 15, i, hex("#6a7780"));
-                }
-            }),
-            ("assembler_top", |b, r| {
-                speckle(b, r, &[hex("#9aa7b0"), hex("#909da6"), hex("#a4b1ba")]);
-                for y in 3..13 {
-                    for x in 3..13 {
-                        set(b, x, y, hex("#1a2a38"));
-                    }
-                }
-                set(b, 7, 7, hex("#35e0e8"));
-                set(b, 8, 7, hex("#35e0e8"));
-                set(b, 7, 8, hex("#35e0e8"));
-                set(b, 8, 8, hex("#7ff5fa"));
-                for i in 0..16 {
-                    set(b, i, 0, hex("#b8c5ce"));
-                    set(b, 0, i, hex("#b8c5ce"));
-                    set(b, i, 15, hex("#6a7780"));
-                    set(b, 15, i, hex("#6a7780"));
-                }
-            }),
-            ("solar_top", |b, r| {
-                let cells = [hex("#16294e"), hex("#1a3160"), hex("#122342")];
-                for y in 0..16 {
-                    for x in 0..16 {
-                        if x % 5 == 0 || y % 8 == 7 {
-                            set(b, x, y, hex("#8a97a0"));
-                        } else {
-                            set(b, x, y, cells[((r.next() * 3.0) as usize).min(2)]);
-                        }
-                    }
-                }
-                for (x, y) in [(3, 2), (8, 4), (12, 9)] {
-                    set(b, x, y, hex("#4a6dc0"));
-                }
-            }),
-            ("chest_side", |b, r| {
-                speckle(b, r, &[hex("#a8824f"), hex("#9d7948"), hex("#b28a55")]);
-                for i in 0..16 {
-                    set(b, i, 0, hex("#7a5c35"));
-                    set(b, i, 15, hex("#7a5c35"));
-                    set(b, 0, i, hex("#7a5c35"));
-                    set(b, 15, i, hex("#7a5c35"));
-                }
-                for x in 0..16 {
-                    set(b, x, 6, hex("#63482a"));
-                }
-                set(b, 7, 6, hex("#d8d8d8"));
-                set(b, 8, 6, hex("#d8d8d8"));
-                set(b, 7, 7, hex("#b8b8b8"));
-                set(b, 8, 7, hex("#b8b8b8"));
-            }),
-            ("refinery_side", |b, r| {
-                speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
-                for y in 3..13 {
-                    set(b, 4, y, hex("#ff8c1a"));
-                    set(b, 5, y, hex("#c9641a"));
-                    set(b, 10, y, hex("#35e0e8"));
-                    set(b, 11, y, hex("#1a8a90"));
-                }
-                for i in 0..16 {
-                    set(b, i, 0, hex("#68747d"));
-                    set(b, i, 15, hex("#333d44"));
-                }
-            }),
-            ("reactor_side", |b, r| {
-                speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
-                let core = [hex("#69d436"), hex("#a2f078"), hex("#4caf1e")];
-                for y in 4..12 {
-                    for x in 6..10 {
-                        set(b, x, y, core[((r.next() * 3.0) as usize).min(2)]);
-                    }
-                }
-                for i in 0..16 {
-                    set(b, i, 0, hex("#68747d"));
-                    set(b, 0, i, hex("#68747d"));
-                    set(b, i, 15, hex("#333d44"));
-                    set(b, 15, i, hex("#333d44"));
-                }
-            }),
-            ("launchpad_top", |b, r| {
-                speckle(b, r, &[hex("#4e5a63"), hex("#46525b")]);
-                for i in 0..16 {
-                    if i % 4 < 2 {
-                        set(b, i, 0, hex("#ffcf4d"));
-                        set(b, i, 15, hex("#ffcf4d"));
-                        set(b, 0, i, hex("#ffcf4d"));
-                        set(b, 15, i, hex("#ffcf4d"));
-                    }
-                }
-                for a in 0..40 {
-                    let x =
-                        8 + ((a as f32 / 40.0 * std::f32::consts::TAU).cos() * 5.0).round() as i32;
-                    let y =
-                        8 + ((a as f32 / 40.0 * std::f32::consts::TAU).sin() * 5.0).round() as i32;
-                    set(b, x, y, hex("#ffcf4d"));
-                }
-                for (x, y) in [(7, 8), (8, 8), (8, 7), (7, 7)] {
-                    set(b, x, y, hex("#ffcf4d"));
-                }
-            }),
-            ("storage_top", |b, r| {
-                speckle(b, r, &[hex("#a8824f"), hex("#9d7948")]);
-                for i in 0..16 {
-                    set(b, i, 0, hex("#7a5c35"));
-                    set(b, i, 15, hex("#7a5c35"));
-                    set(b, 0, i, hex("#7a5c35"));
-                    set(b, 15, i, hex("#7a5c35"));
-                }
-            }),
-            ("medbay_top", |b, r| {
-                speckle(b, r, &[hex("#4e5a63"), hex("#46525b"), hex("#57636c")]);
-                for y in 4..11 {
-                    set(b, 7, y, hex("#7dff8a"));
-                    set(b, 8, y, hex("#7dff8a"));
-                }
-                for x in 4..11 {
-                    set(b, x, 7, hex("#7dff8a"));
-                    set(b, x, 8, hex("#7dff8a"));
-                }
-                for i in 0..16 {
-                    set(b, i, 0, hex("#68747d"));
-                    set(b, 0, i, hex("#68747d"));
-                    set(b, i, 15, hex("#333d44"));
-                    set(b, 15, i, hex("#333d44"));
-                }
-            }),
-            ("slab", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#8c8c8c"),
-                        hex("#828282"),
-                        hex("#969696"),
-                        hex("#7a7a7a"),
-                    ],
-                );
-                for i in 0..16 {
-                    set(b, i, 0, hex("#a8a8a8"));
-                    set(b, i, 1, hex("#9c9c9c"));
-                    set(b, i, 15, hex("#5a5a5a"));
-                }
-                for x in (2..14).step_by(4) {
-                    set(b, x, 8, hex("#9c9c9c"));
-                    set(b, x + 1, 9, hex("#9c9c9c"));
-                }
-            }),
-            ("concrete", |b, r| {
-                speckle(
-                    b,
-                    r,
-                    &[
-                        hex("#9aa3ab"),
-                        hex("#8f989f"),
-                        hex("#a5aeb6"),
-                        hex("#848d94"),
-                    ],
-                );
-                for i in 0..16 {
-                    set(b, i, 0, hex("#b8c0c7"));
-                    set(b, 0, i, hex("#a8b0b8"));
-                }
-                for (x, y) in [(3, 4), (4, 5), (11, 9), (12, 10)] {
-                    set(b, x, y, hex("#7a828a"));
-                }
-            }),
-        ];
         for (name, painter) in painters {
             let idx = tiles.len();
             let mut buf = [Pixel::default(); 256];
@@ -1092,7 +1140,74 @@ impl Atlas {
             tiles.push(buf);
             index.insert(name, idx);
         }
-        Self { index, tiles }
+        let mut atlas = Self {
+            index,
+            tiles,
+            by_material: vec![None; crate::art::catalog::MATERIAL_COUNT + 1],
+        };
+        atlas.resolve_catalog_materials();
+        debug_assert!(
+            atlas.catalog_gaps().is_empty(),
+            "B02 catalog/atlas mismatch: {:?}",
+            atlas.catalog_gaps()
+        );
+        atlas
+    }
+
+    /// Fill the ID→UV table from the catalog; called once after the tiles
+    /// exist, never in the per-frame path.
+    fn resolve_catalog_materials(&mut self) {
+        for material in crate::art::catalog::SURFACE_MATERIALS {
+            if let Some(&idx) = self.index.get(material.key) {
+                self.by_material[material.id.slot()] = Some(Self::rect_at(idx));
+            }
+        }
+    }
+
+    fn rect_at(index: usize) -> [f32; 4] {
+        let col = index % 16;
+        let row = index / 16;
+        [
+            col as f32 / 16.0,
+            row as f32 / 16.0,
+            (col + 1) as f32 / 16.0,
+            (row + 1) as f32 / 16.0,
+        ]
+    }
+
+    /// Registered materials with no painter, plus painters with no material
+    /// row. Both directions matter: one is a broken block, the other a broken
+    /// asset (R020).
+    pub fn catalog_gaps(&self) -> Vec<String> {
+        let mut gaps = Vec::new();
+        for material in crate::art::catalog::SURFACE_MATERIALS {
+            if !self.index.contains_key(material.key) {
+                gaps.push(format!("material {} has no painter", material.key));
+            }
+        }
+        for key in self.index.keys() {
+            if crate::art::catalog::material_by_key(key).is_none() {
+                gaps.push(format!("painter {key} has no material"));
+            }
+        }
+        gaps.sort();
+        gaps
+    }
+
+    /// UV rect for a stable surface-material ID.
+    pub fn uv_rect_material(&self, id: crate::art::catalog::SurfaceMaterialId) -> Option<[f32; 4]> {
+        self.by_material.get(id.slot()).copied().flatten()
+    }
+
+    /// Atlas layer for a stable surface-material ID.
+    pub fn tile_material(
+        &self,
+        id: crate::art::catalog::SurfaceMaterialId,
+    ) -> Option<&[Pixel; 256]> {
+        let material = crate::art::catalog::material_by_id(id)?;
+        self.index
+            .get(material.key)
+            .map(|index| &self.tiles[*index])
     }
 
     pub fn tile_idx(&self, name: &str) -> usize {
@@ -1106,15 +1221,7 @@ impl Atlas {
     /// UV rect for a tile in Bevy convention (v=0 is image top, no flip).
     /// Returns [u0, v0, u1, v1] with v0 = top, v1 = bottom.
     pub fn uv_rect(&self, name: &str) -> [f32; 4] {
-        let i = self.tile_idx(name);
-        let c = i % 16;
-        let r = i / 16;
-        [
-            c as f32 / 16.0,
-            r as f32 / 16.0,
-            (c + 1) as f32 / 16.0,
-            (r + 1) as f32 / 16.0,
-        ]
+        Self::rect_at(self.tile_idx(name))
     }
 
     /// Flatten the atlas into an RGBA8 image (256×256).
@@ -1182,13 +1289,23 @@ fn affine_blit(
     }
 }
 
-/// Isometric block icon (blockIcon).
-fn block_icon(atlas: &Atlas, top: &str, side: &str, side2: &str) -> IconBuf {
+/// Isometric block icon (blockIcon), resolved through stable material IDs.
+fn block_icon(
+    atlas: &Atlas,
+    top: crate::art::catalog::SurfaceMaterialId,
+    side: crate::art::catalog::SurfaceMaterialId,
+    side2: crate::art::catalog::SurfaceMaterialId,
+) -> IconBuf {
+    let layer = |id| {
+        atlas
+            .tile_material(id)
+            .unwrap_or_else(|| atlas.tile(crate::art::catalog::FALLBACK_TILE))
+    };
     let mut buf = IconBuf::default();
     // top (unshaded)
     affine_blit(
         &mut buf,
-        atlas.tile(top),
+        layer(top),
         [[1.0, -1.0], [0.5, 0.5]],
         16.0,
         1.0,
@@ -1199,7 +1316,7 @@ fn block_icon(atlas: &Atlas, top: &str, side: &str, side2: &str) -> IconBuf {
     // left (25% black)
     affine_blit(
         &mut buf,
-        atlas.tile(side),
+        layer(side),
         [[1.0, 0.0], [0.5, 1.0]],
         1.0,
         8.5,
@@ -1210,7 +1327,7 @@ fn block_icon(atlas: &Atlas, top: &str, side: &str, side2: &str) -> IconBuf {
     // right (45% black)
     affine_blit(
         &mut buf,
-        atlas.tile(side2),
+        layer(side2),
         [[1.0, 0.0], [-0.5, 1.0]],
         16.0,
         16.0,
@@ -1221,10 +1338,12 @@ fn block_icon(atlas: &Atlas, top: &str, side: &str, side2: &str) -> IconBuf {
     buf
 }
 
-/// Flat 2× nearest upscale (flatIcon).
-fn flat_icon(atlas: &Atlas, tile: &str) -> IconBuf {
+/// Flat 2× nearest upscale (flatIcon), resolved through a stable material ID.
+fn flat_icon(atlas: &Atlas, material: crate::art::catalog::SurfaceMaterialId) -> IconBuf {
     let mut buf = IconBuf::default();
-    let src = atlas.tile(tile);
+    let src = atlas
+        .tile_material(material)
+        .unwrap_or_else(|| atlas.tile(crate::art::catalog::FALLBACK_TILE));
     for y in 0..TS {
         for x in 0..TS {
             let p = src[y * TS + x];
@@ -1441,17 +1560,12 @@ pub fn item_icon(atlas: &Atlas, item_key: &str) -> IconBuf {
     if let Some(bkey) = def.icon_block {
         let b = crate::data::block_by_key(bkey);
         if b.cross {
-            let t = b.tiles.side.or(b.tiles.all).unwrap_or("grass_top");
-            return flat_icon(atlas, t);
+            return flat_icon(atlas, crate::art::catalog::cross_material(b.id));
         }
-        let top = b.tiles.top.or(b.tiles.all).unwrap_or("grass_top");
-        let side = b.tiles.side.or(b.tiles.all).unwrap_or("grass_top");
-        let front = b
-            .tiles
-            .front
-            .or(b.tiles.side)
-            .or(b.tiles.all)
-            .unwrap_or(side);
+        // Same stable IDs as the mesher: top (+Y), side (+X), front (+Z).
+        let top = crate::art::catalog::face_material(b.id, 2);
+        let side = crate::art::catalog::face_material(b.id, 0);
+        let front = crate::art::catalog::face_material(b.id, 4);
         return block_icon(atlas, top, side, front);
     }
     match def.icon_fn {
@@ -1501,5 +1615,76 @@ pub fn item_icon(atlas: &Atlas, item_key: &str) -> IconBuf {
         Some("medkit") => crystal_icon("#d83f4f", "#ffffff"),
         Some("laser") => laser_icon(),
         _ => crystal_icon("#888888", "#cccccc"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::art::catalog;
+
+    fn opaque_pixels(icon: &IconBuf) -> usize {
+        icon.iter()
+            .flat_map(|row| row.iter())
+            .filter(|pixel| pixel[3] > 0)
+            .count()
+    }
+
+    #[test]
+    fn atlas_resolves_every_catalog_material() {
+        let atlas = Atlas::build();
+        assert!(
+            atlas.catalog_gaps().is_empty(),
+            "{:?}",
+            atlas.catalog_gaps()
+        );
+        for material in catalog::SURFACE_MATERIALS {
+            assert!(
+                atlas.uv_rect_material(material.id).is_some(),
+                "{} has no UV",
+                material.key
+            );
+            assert!(
+                atlas.tile_material(material.id).is_some(),
+                "{} has no layer",
+                material.key
+            );
+        }
+    }
+
+    #[test]
+    fn block_item_icons_resolve_through_catalog_ids() {
+        let atlas = Atlas::build();
+        let mut block_items = 0;
+        for item in crate::data::ITEMS {
+            let Some(block_key) = item.icon_block else {
+                continue;
+            };
+            block_items += 1;
+            let icon = item_icon(&atlas, item.key);
+            assert!(
+                opaque_pixels(&icon) > 0,
+                "{} ({block_key}) produced an empty icon",
+                item.key
+            );
+        }
+        assert!(block_items >= 40, "expected the block/machine item set");
+        assert!(opaque_pixels(&item_icon(&atlas, "laser")) > 0);
+    }
+
+    #[test]
+    fn cross_icons_use_the_side_layer() {
+        let atlas = Atlas::build();
+        let fern = crate::data::block_by_key("fern");
+        assert!(fern.cross, "fixture must be a cross block");
+        let expected = atlas
+            .tile_material(catalog::cross_material(fern.id))
+            .expect("fern material");
+        let flat = flat_icon(&atlas, catalog::cross_material(fern.id));
+        for y in 0..TS {
+            for x in 0..TS {
+                assert_eq!(flat[y * 2][x * 2], expected[y * TS + x]);
+            }
+        }
     }
 }

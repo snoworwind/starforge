@@ -74,12 +74,16 @@ pub enum GameSet {
     LateSpaceActors,
     /// Ship/camera/visual/audio transforms that consume the completed simulation state.
     LateSpacePresentation,
+    /// Screen shake and camera feel layered on top of every camera writer.
+    CameraFx,
     /// Planet switch + ground-scene visibility (flow-owned).
     LateSwitchFlow,
     /// Space-mode sky sync (daynight-owned).
     LateSwitchSky,
     /// Cursor grab/visibility (player-owned).
     LateSwitchCursor,
+    /// Record all frame events before guild claims, HUD and save snapshots.
+    FrontierProgress,
     /// Build ghost preview.
     HudGhostUi,
     /// Laser beam + interact prompt.
@@ -151,9 +155,11 @@ pub fn configure(app: &mut App) {
                 GameSet::LateSpaceScene,
                 GameSet::LateSpaceActors,
                 GameSet::LateSpacePresentation,
+                GameSet::CameraFx,
                 GameSet::LateSwitchFlow,
                 GameSet::LateSwitchSky,
                 GameSet::LateSwitchCursor,
+                GameSet::FrontierProgress,
                 GameSet::HudGhostUi,
                 GameSet::HudGhostPlayer,
             )

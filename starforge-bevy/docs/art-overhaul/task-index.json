@@ -1,0 +1,813 @@
+{
+  "schema_version": 1,
+  "document_version": "1.0",
+  "created_at": "2026-09-12",
+  "baseline_commit": "c6f0c1d1aaba4af47d9f589a3ae67e80e56e18af",
+  "status": "planning_only",
+  "source_of_truth": "05-EXECUTION-BACKLOG.md",
+  "budget_metric": "Net added first-party Rust physical lines; exclude moved, generated and vendored code; not an acceptance quota",
+  "baseline_src_files": 45,
+  "baseline_src_physical_lines": 49664,
+  "total_rust_budget": 50000,
+  "tasks": [
+    {
+      "id": "A01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [],
+      "deliverable": "visual_qa基础场景/基线元数据",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "A02",
+      "status": "review",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "A01"
+      ],
+      "deliverable": "visual/frame、公共数据契约",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "A03",
+      "status": "review",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "A01"
+      ],
+      "deliverable": "visual/capabilities、quality解析",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "A04",
+      "status": "review",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "A02"
+      ],
+      "deliverable": "visual/lifecycle、epoch和缓存拥有者",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "codex"
+    },
+    {
+      "id": "A05",
+      "status": "review",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "A02",
+        "A03"
+      ],
+      "deliverable": "visual/settings、调参/诊断",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "A06",
+      "status": "review",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "A04",
+        "A05"
+      ],
+      "deliverable": "应用接入、schedule适配、旧入口收敛",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "B01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "A01"
+      ],
+      "deliverable": "art/manifest、风格/尺度样板",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "B02",
+      "status": "review",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "A02",
+        "B01"
+      ],
+      "deliverable": "art/catalog、稳定材质/视觉ID",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "B03",
+      "status": "review",
+      "rust_net_physical_lines_budget": 1000,
+      "dependencies": [
+        "A03",
+        "B02"
+      ],
+      "deliverable": "纹理mip/数组/压缩生产工具",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "B04",
+      "status": "review",
+      "rust_net_physical_lines_budget": 800,
+      "dependencies": [
+        "B03",
+        "D01"
+      ],
+      "deliverable": "PBR家族、材质庭院",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "B05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "B02",
+        "B04"
+      ],
+      "deliverable": "图标生成/模型导入检查",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "B06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "B05",
+        "A04"
+      ],
+      "deliverable": "资产覆盖、热重载、打包manifest",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "C01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "A01",
+        "A02"
+      ],
+      "deliverable": "terrain适配、mesh/LOD诊断",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "C02",
+      "status": "active",
+      "rust_net_physical_lines_budget": 1200,
+      "dependencies": [
+        "C01",
+        "B02"
+      ],
+      "deliverable": "分桶/UV/tangent/AO/边界mesh",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "codex"
+    },
+    {
+      "id": "C03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1300,
+      "dependencies": [
+        "C02",
+        "A04"
+      ],
+      "deliverable": "异步任务、revision、时间/上传预算",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "C04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1100,
+      "dependencies": [
+        "C03",
+        "B04"
+      ],
+      "deliverable": "屏幕误差LOD、拼接/替换",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "C05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "C04"
+      ],
+      "deliverable": "修改摘要、轨道地貌/地图一致性",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "C06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 800,
+      "dependencies": [
+        "C05",
+        "G03"
+      ],
+      "deliverable": "大结构代理、压力、fallback收敛",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "D01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "A01",
+        "A03"
+      ],
+      "deliverable": "HDR/曝光/渲染通道最小验证",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "D02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 800,
+      "dependencies": [
+        "D01",
+        "A02",
+        "B04"
+      ],
+      "deliverable": "场景光/曝光/色彩基线",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "D03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "D02",
+        "C02"
+      ],
+      "deliverable": "阴影级联/接触/AO协调",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "D04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 800,
+      "dependencies": [
+        "D03",
+        "A04"
+      ],
+      "deliverable": "局部灯注册、室内补光/遮挡",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "D05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "D02",
+        "C04"
+      ],
+      "deliverable": "生态大气、昼夜/轨道连续",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "D06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "D03",
+        "A03",
+        "E03"
+      ],
+      "deliverable": "AA/合成/质量档与回归",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "E01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "A02",
+        "A03",
+        "D01"
+      ],
+      "deliverable": "球壳/深度/噪声诊断",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "E02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1100,
+      "dependencies": [
+        "E01",
+        "B01"
+      ],
+      "deliverable": "宏观天气、形态、密度生成",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "E03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1100,
+      "dependencies": [
+        "E02",
+        "A04"
+      ],
+      "deliverable": "实际云RT、历史、双边上采样",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "E04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "E03",
+        "D02"
+      ],
+      "deliverable": "积分/散射/云影",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "E05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "E04",
+        "C05",
+        "D05"
+      ],
+      "deliverable": "轨道交接、透明/天气耦合",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "E06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "E05",
+        "D06"
+      ],
+      "deliverable": "多相机/质量/极端条件验证",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "F01",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "B01",
+        "C01",
+        "E02"
+      ],
+      "deliverable": "生态视觉profile、地形mask",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "F02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1000,
+      "dependencies": [
+        "F01",
+        "C03",
+        "B04"
+      ],
+      "deliverable": "植被/碎石分布与实例化",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "F03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "F01",
+        "D02",
+        "E03"
+      ],
+      "deliverable": "水/岸线/水下路径",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "F04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "F02",
+        "F03",
+        "E05"
+      ],
+      "deliverable": "湿润/雪/灰/降水遮挡",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "F05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 700,
+      "dependencies": [
+        "F04",
+        "C05"
+      ],
+      "deliverable": "16生态全覆盖、远景色彩",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "F06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "F05",
+        "A04"
+      ],
+      "deliverable": "装饰生命周期、LOD、极端回归",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "G01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "A02",
+        "C01"
+      ],
+      "deliverable": "plan/schema/稳定种子/版本",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "opencode"
+    },
+    {
+      "id": "G02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1600,
+      "dependencies": [
+        "G01",
+        "F01"
+      ],
+      "deliverable": "选址、路网、地块、冲突裁决",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "G03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1900,
+      "dependencies": [
+        "G02",
+        "C03",
+        "B04"
+      ],
+      "deliverable": "功能图、模块、地基/屋顶/碰撞",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "G04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1400,
+      "dependencies": [
+        "G03",
+        "D04"
+      ],
+      "deliverable": "室内、家具、NPC/任务锚点",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "G05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1500,
+      "dependencies": [
+        "G04",
+        "F02"
+      ],
+      "deliverable": "遗迹/磨损/内容库/自动验证",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "G06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1200,
+      "dependencies": [
+        "G05",
+        "C05",
+        "A04"
+      ],
+      "deliverable": "旧档/网络/区域版本、规模测试",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "H01",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 400,
+      "dependencies": [
+        "A02",
+        "B02"
+      ],
+      "deliverable": "机器状态适配/注册",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "H02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "H01",
+        "B04"
+      ],
+      "deliverable": "25种模型/socket/LOD",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "H03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 800,
+      "dependencies": [
+        "H02",
+        "C03"
+      ],
+      "deliverable": "物流货物/接头/端口",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "H04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "H03",
+        "D04"
+      ],
+      "deliverable": "工作动画/灯/故障/VFX",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "H05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "H04",
+        "J02"
+      ],
+      "deliverable": "预览/蓝图/高亮和状态面板接入",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "H06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 400,
+      "dependencies": [
+        "H05",
+        "A04"
+      ],
+      "deliverable": "百/五百机压力及持久化回归",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "I01",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "B05",
+        "A02"
+      ],
+      "deliverable": "Appearance映射/角色组装",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "I02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "I01",
+        "F02"
+      ],
+      "deliverable": "生物动作/落地/动画LOD",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "I03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "B05",
+        "D02"
+      ],
+      "deliverable": "船模型/socket/状态",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "I04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "I03",
+        "D05"
+      ],
+      "deliverable": "站体/轨道/行星细节",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "I05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 500,
+      "dependencies": [
+        "I02",
+        "I03",
+        "A02"
+      ],
+      "deliverable": "VisualEvent粒子/镜头适配",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "I06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 400,
+      "dependencies": [
+        "I04",
+        "I05",
+        "A04"
+      ],
+      "deliverable": "动画/资源/网络/切换回归",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "J01",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "B01",
+        "A02"
+      ],
+      "deliverable": "theme、排版、输入路由设计",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "J02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 800,
+      "dependencies": [
+        "J01",
+        "B02"
+      ],
+      "deliverable": "widgets、view model、图标适配",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "J03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1100,
+      "dependencies": [
+        "J02",
+        "B05"
+      ],
+      "deliverable": "HUD/背包/合成/科技/机器",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "J04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 900,
+      "dependencies": [
+        "J03",
+        "I03"
+      ],
+      "deliverable": "太空/交易/地图/图鉴/公会等",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "J05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 1000,
+      "dependencies": [
+        "J04",
+        "A05",
+        "I01"
+      ],
+      "deliverable": "菜单/捏人/设置/摄影/其余界面",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "J06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 600,
+      "dependencies": [
+        "J05",
+        "A04"
+      ],
+      "deliverable": "DPI/输入法/可访问性/业务回归",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "K01",
+      "status": "review",
+      "rust_net_physical_lines_budget": 250,
+      "dependencies": [
+        "A01"
+      ],
+      "deliverable": "验收manifest/报告schema",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": "codex"
+    },
+    {
+      "id": "K02",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 300,
+      "dependencies": [
+        "C06",
+        "G06",
+        "J06"
+      ],
+      "deliverable": "关键路径/存档/联机集成运行器",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "K03",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 300,
+      "dependencies": [
+        "E06",
+        "F06",
+        "H06",
+        "I06"
+      ],
+      "deliverable": "性能/内存/压力报告",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "K04",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 250,
+      "dependencies": [
+        "B06",
+        "K02"
+      ],
+      "deliverable": "冷安装/资源/许可/平台检查",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "K05",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 200,
+      "dependencies": [
+        "K02",
+        "K03",
+        "K04"
+      ],
+      "deliverable": "视觉差异/人工审稿证据索引",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    },
+    {
+      "id": "K06",
+      "status": "planned",
+      "rust_net_physical_lines_budget": 200,
+      "dependencies": [
+        "K05"
+      ],
+      "deliverable": "发布门槛/回滚/最终文档",
+      "instructions": "05-EXECUTION-BACKLOG.md",
+      "owner": null
+    }
+  ]
+}

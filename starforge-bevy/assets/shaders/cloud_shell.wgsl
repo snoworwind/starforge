@@ -15,6 +15,8 @@ struct CloudShellUniform {
     ambient: vec4<f32>,
     quality: vec4<f32>,
     wind: vec4<f32>,
+    // x = E01 debug view (0 = shipping path), y = debug scale, zw reserved.
+    debug: vec4<f32>,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)
@@ -121,9 +123,21 @@ fn light_transmittance(world_position: vec3<f32>) -> f32 {
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var out: FragmentOutput;
+    let debug_mode = u32(params.debug.x);
     let camera_radius = length(view.world_position - params.center_radius.xyz);
     let camera_inside_outer = camera_radius < params.shell.y + 16.0;
-    if (camera_inside_outer && is_front) || (!camera_inside_outer && !is_front) {
+    let kept_face = (camera_inside_outer && !is_front) || (!camera_inside_outer && is_front);
+    // E01 mode 8: visualize the face filter itself (green = kept, red = culled)
+    // before any early return, so the culling rule can be verified on screen.
+    if (debug_mode == 8u) {
+        out.color = select(
+            vec4<f32>(0.9, 0.15, 0.1, 1.0),
+            vec4<f32>(0.15, 0.9, 0.25, 1.0),
+            kept_face,
+        );
+        return out;
+    }
+    if (!kept_face) {
         out.color = vec4<f32>(0.0);
         return out;
     }
@@ -136,6 +150,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let ray_origin = view.world_position;
     let ray_direction = normalize(far_world - ray_origin);
     var interval = shell_interval(ray_origin, ray_direction);
+    let interval_before_depth = interval;
 
     let scene_depth = textureLoad(depth_prepass_texture, pixel, 0);
     if scene_depth > 0.0 {
@@ -143,6 +158,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         interval.y = min(interval.y, distance(scene_world, ray_origin));
     }
     if interval.y <= interval.x {
+        if (debug_mode == 2u) {
+            // Empty interval marker; the E01 report records how often this
+            // happens instead of hiding it behind the background sky.
+            out.color = vec4<f32>(0.0, 0.0, 0.3, 1.0);
+            return out;
+        }
         out.color = vec4<f32>(0.0);
         return out;
     }
@@ -153,6 +174,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var distance_along_ray = interval.x + jitter * step_length;
     var transmittance = 1.0;
     var radiance = vec3<f32>(0.0);
+    var max_density = 0.0;
+    var used_steps = 0u;
     let phase = henyey_greenstein(dot(params.sun.xyz, -ray_direction), params.quality.w);
 
     for (var i = 0u; i < MAX_STEPS; i += 1u) {
@@ -169,10 +192,47 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             let sample_alpha = 1.0 - sample_transmittance;
             radiance += transmittance * (direct + ambient) * sample_alpha;
             transmittance *= sample_transmittance;
+            max_density = max(max_density, density);
         }
+        used_steps = i + 1u;
         distance_along_ray += step_length;
     }
 
-    out.color = vec4<f32>(radiance, 1.0 - transmittance);
+    // E01 diagnostic views. All of them write opaque colors so a capture can
+    // be compared directly against mode 0 without background bleed.
+    let range = 1.0 / 4000.0;
+    if (debug_mode == 1u) {
+        out.color = vec4<f32>(vec3<f32>(max_density), 1.0);
+    } else if (debug_mode == 2u) {
+        out.color = vec4<f32>(
+            interval_before_depth.x * range,
+            interval_before_depth.y * range,
+            interval.y * range,
+            1.0,
+        );
+    } else if (debug_mode == 3u) {
+        out.color = vec4<f32>(vec3<f32>(transmittance), 1.0);
+    } else if (debug_mode == 4u) {
+        out.color = vec4<f32>(radiance / (1.0 + radiance), 1.0);
+    } else if (debug_mode == 5u) {
+        out.color = vec4<f32>(
+            f32(used_steps) / max(f32(steps), 1.0),
+            transmittance,
+            0.0,
+            1.0,
+        );
+    } else if (debug_mode == 6u) {
+        out.color = vec4<f32>(
+            select(0.0, 0.6, scene_depth > 0.0),
+            interval_before_depth.y * range,
+            interval.y * range,
+            1.0,
+        );
+    } else if (debug_mode == 7u) {
+        let light_trans = light_transmittance(ray_origin + ray_direction * interval.x);
+        out.color = vec4<f32>(vec3<f32>(light_trans), 1.0);
+    } else {
+        out.color = vec4<f32>(radiance, 1.0 - transmittance);
+    }
     return out;
 }

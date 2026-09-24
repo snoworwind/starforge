@@ -33,9 +33,19 @@ const PROJECTED_ERROR_DISTANCE: f32 = 100.0;
 const BUILD_BUDGET_PER_FRAME: usize = 4;
 const EVICT_AFTER_FRAMES: u64 = 900;
 
+/// C01 diagnostics: public coverage facts for reports and the debug overlay.
+pub const COVERAGE_RADIUS_METERS: f32 = LOD_RADIUS;
+pub const LEVEL_RANGE: (u8, u8) = (SURFACE_MIN_LEVEL, SURFACE_MAX_LEVEL);
+
 pub const VOXEL_OPAQUE: u8 = 1 << 0;
 pub const VOXEL_WATER: u8 = 1 << 1;
 pub const VOXEL_EMISSIVE: u8 = 1 << 2;
+
+/// `--lod-log` probe. Parsed once by `app::LaunchOptions` and inserted as a
+/// resource by the assembly entry; the LOD system no longer scans
+/// `std::env::args()` on its first frame.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct LodLogging(pub bool);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LodVoxel {
@@ -191,7 +201,7 @@ struct ResidentNode {
     last_used_frame: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
 pub struct LodStats {
     pub target_sections: usize,
     pub resident_sections: usize,
@@ -202,9 +212,18 @@ pub struct LodStats {
     pub parent_fallbacks: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LodNodeView {
+    pub key: LodSectionKey,
+    /// World-space AABB center of the section (absolute voxel coordinates).
+    pub center: Vec3,
+    pub span: f32,
+    pub visible: bool,
+}
+
 #[derive(Resource, Default)]
 pub struct LodRuntime {
-    world_seed: Option<u32>,
+    world_epoch: Option<u64>,
     frame: u64,
     nodes: HashMap<LodSectionKey, ResidentNode>,
     pub coverage_ready: bool,
@@ -220,6 +239,61 @@ impl LodRuntime {
         self.coverage_ready = false;
         self.stats = LodStats::default();
     }
+
+    /// Sorted snapshot for C01 diagnostics and the debug overlay. HashMap
+    /// iteration order is nondeterministic, so sort by section key.
+    pub fn node_views(&self) -> Vec<LodNodeView> {
+        let mut views: Vec<LodNodeView> = self
+            .nodes
+            .iter()
+            .map(|(key, node)| LodNodeView {
+                key: *key,
+                center: Vec3::new(
+                    (key.x as f32 + 0.5) * key.span(),
+                    (key.y as f32 + 0.5) * key.span(),
+                    (key.z as f32 + 0.5) * key.span(),
+                ),
+                span: key.span(),
+                visible: node.visible,
+            })
+            .collect();
+        views.sort_by_key(|view| (view.key.level, view.key.x, view.key.z, view.key.y));
+        views
+    }
+
+    /// Resident node count per level (index = level). Sum equals
+    /// `stats.resident_sections`; C01 uses it to show the LOD distribution.
+    pub fn level_histogram(&self) -> Vec<usize> {
+        let mut histogram = vec![0usize; SURFACE_MAX_LEVEL as usize + 1];
+        for key in self.nodes.keys() {
+            histogram[key.level as usize] += 1;
+        }
+        histogram
+    }
+
+    pub fn world_epoch(&self) -> Option<u64> {
+        self.world_epoch
+    }
+
+    pub(crate) fn lifecycle_owned_handles(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn release_after_world(&mut self, meshes: &mut Assets<Mesh>) {
+        for (_, node) in self.nodes.drain() {
+            meshes.remove(&node.mesh);
+        }
+        self.world_epoch = None;
+        self.coverage_ready = false;
+        self.stats = LodStats::default();
+    }
+}
+
+fn cleanup_lod_runtime(mut runtime: ResMut<LodRuntime>, mut meshes: ResMut<Assets<Mesh>>) {
+    // `InGame` entities are removed by the flow owner before OnExit runs. The
+    // LOD cache still owns strong mesh handles, so release them explicitly
+    // instead of retaining dead Entity ids while the menu is open.
+    runtime.release_after_world(&mut meshes);
 }
 
 #[derive(Default)]
@@ -453,10 +527,12 @@ pub fn hierarchical_lod_system(
     mode: Res<FlightMode>,
     player: Query<&Player>,
     world: Res<World>,
+    epoch: Res<crate::visual::WorldEpoch>,
     atlas: Res<crate::textures::AtlasRes>,
     materials: Res<TerrainMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut runtime: ResMut<LodRuntime>,
+    logging: Res<LodLogging>,
 ) {
     runtime.frame = runtime.frame.wrapping_add(1);
     if settings.lod_mode != LodMode::Hierarchical || !mode.ground_scene() {
@@ -469,9 +545,9 @@ pub fn hierarchical_lod_system(
     }
     let Ok(player) = player.single() else { return };
     let player_xz = player.pos.xz();
-    if runtime.world_seed != Some(world.seed) {
+    if runtime.world_epoch != Some(epoch.0) {
         runtime.clear(&mut commands, &mut meshes);
-        runtime.world_seed = Some(world.seed);
+        runtime.world_epoch = Some(epoch.0);
     }
 
     let exact_radius = world.view_dist as f32 * crate::data::CHUNK as f32 - 8.0;
@@ -567,10 +643,7 @@ pub fn hierarchical_lod_system(
         build_ms: build_start.elapsed().as_secs_f32() * 1_000.0,
         parent_fallbacks: fallbacks,
     };
-    static LOG_STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *LOG_STATS.get_or_init(|| std::env::args().any(|arg| arg == "--lod-log"))
-        && runtime.frame.is_multiple_of(60)
-    {
+    if logging.0 && runtime.frame.is_multiple_of(60) {
         let stats = runtime.stats;
         println!(
             "LOD target={} resident={} visible={} queued={} generated={} build_ms={:.2} fallback={} ready={}",
@@ -592,13 +665,19 @@ pub struct LodPlugin;
 
 impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LodRuntime>().add_systems(
-            Update,
-            hierarchical_lod_system
-                .in_set(crate::schedule::GameSet::FarLod)
-                .before(crate::schedule::GameSet::FarMesh)
-                .run_if(in_state(crate::schedule::GameState::Playing)),
-        );
+        app.init_resource::<LodRuntime>()
+            .init_resource::<LodLogging>()
+            .add_systems(
+                Update,
+                hierarchical_lod_system
+                    .in_set(crate::schedule::GameSet::FarLod)
+                    .before(crate::schedule::GameSet::FarMesh)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
+                OnExit(crate::schedule::GameState::Playing),
+                cleanup_lod_runtime,
+            );
     }
 }
 
@@ -617,6 +696,39 @@ mod tests {
         let high = LodSectionKey { level: 5, ..low };
         assert_eq!(low.span(), 32.0);
         assert_eq!(high.span(), 1_024.0);
+    }
+
+    #[test]
+    fn menu_cleanup_releases_resident_mesh_handles() {
+        let mut assets = Assets::<Mesh>::default();
+        let handle = assets.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
+        let mut ecs_world = bevy::ecs::world::World::new();
+        let entity = ecs_world.spawn_empty().id();
+        let key = LodSectionKey {
+            level: 0,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
+        let mut runtime = LodRuntime {
+            world_epoch: Some(4),
+            ..Default::default()
+        };
+        runtime.nodes.insert(
+            key,
+            ResidentNode {
+                entity,
+                mesh: handle.clone(),
+                visible: true,
+                last_used_frame: 7,
+            },
+        );
+
+        runtime.release_after_world(&mut assets);
+
+        assert!(runtime.nodes.is_empty());
+        assert_eq!(runtime.world_epoch, None);
+        assert!(assets.get(&handle).is_none());
     }
 
     #[test]

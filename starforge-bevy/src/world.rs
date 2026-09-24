@@ -1,17 +1,23 @@
 //! Voxel world: chunk storage, deterministic terrain generation, meshing, raycasting.
 //! Faithful port of js/world.js per SPEC_world.md.
 
+use crate::art::catalog::{self, SurfaceMaterialId};
 use crate::data::{self, Biome, CHUNK, SEA, WORLD_H, ids};
 use crate::rng::{Noise2, Rng, hash2, vnoise3};
 use crate::schedule::{GameSet, GameState, ground_scene_mode};
 use crate::space::FlightMode;
+use crate::structures::{
+    DEFAULT_PLAN_CACHE_CAPACITY, GENERATOR_VERSION_LEGACY, LegacyLayout, PlanAabb, PlanCache,
+    PlanStats, StreamSeeds, StructurePlan, StructureStream, cell_range_for_rect,
+    plan_search_margin,
+};
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub const CHUNK_CELLS: usize = (CHUNK * CHUNK * WORLD_H) as usize; // 24576
 pub const GEN_R: i32 = 17;
@@ -53,22 +59,8 @@ pub struct CharAxes {
     pub wet: f32,
 }
 
-#[derive(Clone, Debug)]
-pub enum Structure {
-    Village {
-        x: i32,
-        z: i32,
-        h: i32,
-        huts: Vec<(i32, i32, i32)>, // (hut x, hut z, hut ground h)
-    },
-    Ruin {
-        x: i32,
-        z: i32,
-        kind: u32,
-        h: i32,
-        seed: u32,
-    },
-}
+/// 结构布局（G01 改名前的兼容别名）：村庄/遗迹的冻结 v1 数据。
+pub use crate::structures::LegacyLayout as Structure;
 
 /// Immutable per-world generation context.
 pub struct WorldGen {
@@ -76,9 +68,9 @@ pub struct WorldGen {
     pub biome: &'static Biome,
     pub noise: Noise2,
     pub axes: CharAxes,
-    /// 格哈希结构的惰性缓存（Mutex 保持 Sync，Bevy Resource 要求）。
+    /// 格哈希结构的惰性缓存（G01：有界容量 + 淘汰；键为 cell 坐标）。
     /// 村庄格的 on_land/hut 生成较重，缓存避免每个邻块重复计算。
-    struct_cache: Mutex<HashMap<(i32, i32), Option<Arc<Structure>>>>,
+    struct_cache: PlanCache,
 }
 
 impl WorldGen {
@@ -95,7 +87,7 @@ impl WorldGen {
             biome,
             noise,
             axes,
-            struct_cache: Mutex::new(HashMap::new()),
+            struct_cache: PlanCache::new(DEFAULT_PLAN_CACHE_CAPACITY),
         }
     }
 
@@ -678,61 +670,75 @@ impl WorldGen {
         true
     }
 
-    /// 矩形内所有结构（含 ±1 格边界，覆盖跨格戳记半径 ~20 格）。
-    /// 无限地表下没有全局结构表——按格哈希查询（Minecraft 式）。
+    /// 矩形内所有结构布局（G01：查询范围由版本化 margin + 真实 AABB 决定，
+    /// 不再假设固定 ±1 格覆盖所有未来聚落）。返回冻结的 v1 布局，供戳记与
+    /// 现有玩法消费者使用。
     pub fn structures_in_rect(&self, x0: i32, z0: i32, x1: i32, z1: i32) -> Vec<Structure> {
-        let c0 = x0.div_euclid(STRUCT_CELL_X) - 1;
-        let c1 = x1.div_euclid(STRUCT_CELL_X) + 1;
-        let r0 = z0.div_euclid(STRUCT_CELL_Z) - 1;
-        let r1 = z1.div_euclid(STRUCT_CELL_Z) + 1;
+        let margin = plan_search_margin(GENERATOR_VERSION_LEGACY);
+        let range = cell_range_for_rect(x0, z0, x1, z1, margin, STRUCT_CELL_X, STRUCT_CELL_Z);
+        let query = PlanAabb::new(x0, z0, x1, z1);
         let mut out = Vec::new();
-        for ccx in c0..=c1 {
-            for ccz in r0..=r1 {
-                if let Some(s) = self.structure_in_cell(ccx, ccz) {
-                    out.push((*s).clone());
-                }
+        for (ccx, ccz) in range.cells() {
+            if let Some(plan) = self.plan_in_cell(ccx, ccz)
+                && plan.aabb.overlaps(query)
+            {
+                out.push(plan.layout.clone());
             }
         }
         out
     }
 
-    /// 格坐标 → 格内结构（村庄/遗迹），种子确定性；惰性缓存。
+    /// 格坐标 → 结构计划，种子确定性；有界容量缓存（G01）。
+    pub fn plan_in_cell(&self, ccx: i32, ccz: i32) -> Option<Arc<StructurePlan>> {
+        self.struct_cache
+            .get_or_generate((ccx, ccz), || self.plan_in_cell_uncached(ccx, ccz))
+    }
+
+    /// 兼容旧调用：取格内冻结布局（村庄/遗迹）。测试与旧消费者用。
+    pub fn structure_in_cell(&self, ccx: i32, ccz: i32) -> Option<Arc<Structure>> {
+        self.plan_in_cell(ccx, ccz)
+            .map(|plan| Arc::new(plan.layout.clone()))
+    }
+
+    pub fn plan_cache_stats(&self) -> crate::structures::PlanCacheStats {
+        self.struct_cache.stats()
+    }
+
+    /// 旧生成器冻结实现（generator_version = 1）。随机数只从 `Layout` 流取，
+    /// 与改造前 `hash2(ccx, ccz, 0x57A7C7, seed)` 的序列逐位一致（有黄金
+    /// chunk 指纹与流等价测试守住）。
     ///
     /// 原版 `gen_structures` 用整图种子 RNG 在固定 ±1300×±440 撒 3 个点；
     /// 无限地表下改为按格哈希掷骰。原版村庄还有 240 格最小间距约束——
     /// 格 640×320 远大于该值，仅相邻格各自恰好贴近公共边界时可能出现
     /// 近距结构，概率可忽略，故不再跨格约束。
-    pub fn structure_in_cell(&self, ccx: i32, ccz: i32) -> Option<Arc<Structure>> {
-        if let Some(v) = self.struct_cache.lock().unwrap().get(&(ccx, ccz)) {
-            return v.clone();
-        }
-        let st = self.structure_in_cell_uncached(ccx, ccz);
-        let arc = st.map(Arc::new);
-        self.struct_cache
-            .lock()
-            .unwrap()
-            .insert((ccx, ccz), arc.clone());
-        arc
-    }
-
-    fn structure_in_cell_uncached(&self, ccx: i32, ccz: i32) -> Option<Structure> {
+    fn plan_in_cell_uncached(&self, ccx: i32, ccz: i32) -> Option<StructurePlan> {
         let sea = self.sea();
         let on_land = |x: f32, z: f32| self.height_at(x, z) > sea + 1;
         // 原点格必出村庄（可居生态）：保证出生地附近有地标
         // （原版出生区必有村庄，村庄支线任务依赖）。
         let guaranteed = ccx == 0 && ccz == 0 && self.biome.haz.is_none();
-        let mut rnd = hash2(ccx, ccz, 0x57A7C7, self.seed);
+        let streams = StreamSeeds::for_cell(self.seed, GENERATOR_VERSION_LEGACY, ccx, ccz, 0);
+        let mut rnd = streams.rng(StructureStream::Layout);
         if !guaranteed && rnd.next() >= STRUCT_P {
             return None;
         }
         let x0 = ccx * STRUCT_CELL_X;
         let z0 = ccz * STRUCT_CELL_Z;
-        for _ in 0..70 {
+        let mut rejected = 0u32;
+        for attempt in 0..70u32 {
+            let candidates = attempt + 1;
             let x = x0 + (rnd.next() * STRUCT_CELL_X as f32) as i32;
             let z = z0 + (rnd.next() * STRUCT_CELL_Z as f32) as i32;
             if !on_land(x as f32, z as f32) {
+                rejected += 1;
                 continue;
             }
+            let stats = PlanStats {
+                site_candidates: candidates,
+                rejected_sites: rejected,
+                ..Default::default()
+            };
             if self.biome.haz.is_none() {
                 // 村庄（沿用原版 hut 撒点逻辑）
                 let n = 4 + (rnd.next() * 3.0) as usize;
@@ -747,22 +753,39 @@ impl WorldGen {
                     }
                 }
                 if huts.len() >= 3 {
-                    return Some(Structure::Village {
+                    let layout = LegacyLayout::Village {
                         x,
                         z,
                         h: self.height_at(x as f32, z as f32),
                         huts,
-                    });
+                    };
+                    return Some(StructurePlan::from_legacy(
+                        self.seed,
+                        GENERATOR_VERSION_LEGACY,
+                        (ccx, ccz),
+                        layout,
+                        streams,
+                        stats,
+                    ));
                 }
+                rejected += 1;
             } else {
                 let kind = (rnd.next() * 3.0) as u32;
-                return Some(Structure::Ruin {
+                let layout = LegacyLayout::Ruin {
                     x,
                     z,
                     kind,
                     h: self.height_at(x as f32, z as f32),
                     seed: (rnd.next() * 0xFFFF as f32) as u32,
-                });
+                };
+                return Some(StructurePlan::from_legacy(
+                    self.seed,
+                    GENERATOR_VERSION_LEGACY,
+                    (ccx, ccz),
+                    layout,
+                    streams,
+                    stats,
+                ));
             }
         }
         None
@@ -1048,11 +1071,26 @@ pub struct Chunk {
     pub dirty: bool,
     pub modified: bool,
     pub mesh: Option<bevy::prelude::Entity>,
+    pub cutout_mesh: Option<bevy::prelude::Entity>,
+    pub transparent_mesh: Option<bevy::prelude::Entity>,
+    pub emissive_mesh: Option<bevy::prelude::Entity>,
+    pub special_mesh: Option<bevy::prelude::Entity>,
     pub water_mesh: Option<bevy::prelude::Entity>,
     pub from_save: bool,
     /// Newly materialized chunks need one voxel scan to rebuild machine state.
     pub machine_scan: bool,
     pub need_save: bool,
+}
+
+impl Chunk {
+    pub(crate) fn has_render_mesh(&self) -> bool {
+        self.mesh.is_some()
+            || self.cutout_mesh.is_some()
+            || self.transparent_mesh.is_some()
+            || self.emissive_mesh.is_some()
+            || self.special_mesh.is_some()
+            || self.water_mesh.is_some()
+    }
 }
 
 #[derive(Resource)]
@@ -1124,16 +1162,21 @@ impl World {
                     dirty: true,
                     modified: false,
                     mesh: None,
+                    cutout_mesh: None,
+                    transparent_mesh: None,
+                    emissive_mesh: None,
+                    special_mesh: None,
                     water_mesh: None,
                     from_save,
                     machine_scan: true,
                     need_save: false,
                 },
             );
-            // JS markNeighborsDirty：新块生成后，已网格化的 4 邻需重算边界面
-            for (nx, nz) in [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+            // AO samples corner voxels, so a newly materialized halo can
+            // change diagonal neighbours as well as the four face neighbours.
+            for (nx, nz) in chunk_neighbours(cx, cz) {
                 if let Some(c) = self.chunks.get_mut(&ckey(nx, nz))
-                    && (c.mesh.is_some() || c.water_mesh.is_some())
+                    && c.has_render_mesh()
                 {
                     c.dirty = true;
                     self.stream_dirty = true;
@@ -1181,17 +1224,22 @@ impl World {
         c.need_save = true;
         c.dirty = true;
         self.stream_dirty = true;
-        if lx == 0 {
-            self.mark_dirty(cx - 1, cz);
-        }
-        if lx == CHUNK - 1 {
-            self.mark_dirty(cx + 1, cz);
-        }
-        if lz == 0 {
-            self.mark_dirty(cx, cz - 1);
-        }
-        if lz == CHUNK - 1 {
-            self.mark_dirty(cx, cz + 1);
+        let x_offsets: &[i32] = match lx {
+            0 => &[-1, 0],
+            x if x == CHUNK - 1 => &[0, 1],
+            _ => &[0],
+        };
+        let z_offsets: &[i32] = match lz {
+            0 => &[-1, 0],
+            z if z == CHUNK - 1 => &[0, 1],
+            _ => &[0],
+        };
+        for &dx in x_offsets {
+            for &dz in z_offsets {
+                if dx != 0 || dz != 0 {
+                    self.mark_dirty(cx + dx, cz + dz);
+                }
+            }
         }
     }
 
@@ -1433,29 +1481,186 @@ impl World {
     }
 }
 
+fn chunk_neighbours(cx: i32, cz: i32) -> impl Iterator<Item = (i32, i32)> {
+    (-1..=1).flat_map(move |dz| {
+        (-1..=1)
+            .filter(move |&dx| dx != 0 || dz != 0)
+            .map(move |dx| (cx + dx, cz + dz))
+    })
+}
+
 // ===================== Mesh building =====================
 
+pub const VOXEL_AO_ATTRIBUTE: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Voxel_Ao",
+        10,
+        bevy::render::render_resource::VertexFormat::Float32,
+    );
+pub const VOXEL_MATERIAL_ATTRIBUTE: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Voxel_Material_Id",
+        11,
+        bevy::render::render_resource::VertexFormat::Uint32,
+    );
+
+#[derive(Default)]
 pub struct VoxelMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub tangents: Vec<[f32; 4]>,
     pub uvs: Vec<[f32; 2]>,
+    pub aos: Vec<f32>,
+    pub material_ids: Vec<u32>,
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
 impl VoxelMesh {
     fn new() -> Self {
-        Self {
-            positions: Vec::new(),
-            normals: Vec::new(),
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            indices: Vec::new(),
-        }
+        Self::default()
     }
 
     fn is_empty(&self) -> bool {
         self.positions.is_empty()
+    }
+
+    fn append(&mut self, mut other: Self) {
+        let base = self.positions.len() as u32;
+        self.positions.append(&mut other.positions);
+        self.normals.append(&mut other.normals);
+        self.tangents.append(&mut other.tangents);
+        self.uvs.append(&mut other.uvs);
+        self.aos.append(&mut other.aos);
+        self.material_ids.append(&mut other.material_ids);
+        self.colors.append(&mut other.colors);
+        self.indices
+            .extend(other.indices.into_iter().map(|index| index + base));
+    }
+
+    /// Deterministic FNV-1a signature over the full vertex/index stream. C01
+    /// uses it as the "same seed → same mesh" regression gate around the
+    /// MeshBuilder refactor; f32 values are hashed by exact bits so a changed
+    /// AO value, UV or winding order cannot pass silently.
+    pub fn signature(&self) -> u64 {
+        const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = OFFSET_BASIS;
+        let write = |hash: &mut u64, bytes: &[u8]| {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(PRIME);
+            }
+        };
+        for position in &self.positions {
+            for value in position {
+                write(&mut hash, &value.to_bits().to_le_bytes());
+            }
+        }
+        for normal in &self.normals {
+            for value in normal {
+                write(&mut hash, &value.to_bits().to_le_bytes());
+            }
+        }
+        for tangent in &self.tangents {
+            for value in tangent {
+                write(&mut hash, &value.to_bits().to_le_bytes());
+            }
+        }
+        for uv in &self.uvs {
+            for value in uv {
+                write(&mut hash, &value.to_bits().to_le_bytes());
+            }
+        }
+        for ao in &self.aos {
+            write(&mut hash, &ao.to_bits().to_le_bytes());
+        }
+        for material_id in &self.material_ids {
+            write(&mut hash, &material_id.to_le_bytes());
+        }
+        for color in &self.colors {
+            for value in color {
+                write(&mut hash, &value.to_bits().to_le_bytes());
+            }
+        }
+        for index in &self.indices {
+            write(&mut hash, &index.to_le_bytes());
+        }
+        hash
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeshBucket {
+    Opaque,
+    Cutout,
+    Transparent,
+    Emissive,
+    Special,
+    Liquid,
+}
+
+fn mesh_bucket(def: &data::Block) -> MeshBucket {
+    if def.liquid {
+        MeshBucket::Liquid
+    } else if def.cross || (def.transparent && def.fancy) {
+        MeshBucket::Cutout
+    } else if def.transparent {
+        MeshBucket::Transparent
+    } else if def.glow {
+        MeshBucket::Emissive
+    } else if def.machine.is_some() || def.lowbox.is_some() {
+        MeshBucket::Special
+    } else {
+        MeshBucket::Opaque
+    }
+}
+
+fn should_emit_face(
+    id: u8,
+    def: &data::Block,
+    neighbor_id: u8,
+    neighbor: &data::Block,
+    face: usize,
+) -> bool {
+    if def.liquid {
+        return !(neighbor_id == id || (neighbor.solid && !neighbor.transparent));
+    }
+    if def.lowbox.is_some() && face == 3 {
+        return !(neighbor.solid && !neighbor.transparent);
+    }
+    if def.transparent {
+        return !(neighbor.solid && !neighbor.transparent) && neighbor_id != id;
+    }
+    !(neighbor.solid && !neighbor.transparent && !neighbor.cross && neighbor.lowbox.is_none())
+}
+
+#[derive(Default)]
+pub struct ChunkMeshBuckets {
+    pub opaque: Option<VoxelMesh>,
+    pub cutout: Option<VoxelMesh>,
+    pub transparent: Option<VoxelMesh>,
+    pub emissive: Option<VoxelMesh>,
+    pub special: Option<VoxelMesh>,
+    pub liquid: Option<VoxelMesh>,
+}
+
+impl ChunkMeshBuckets {
+    fn combined_solid(self) -> Option<VoxelMesh> {
+        let mut combined = VoxelMesh::new();
+        for mesh in [
+            self.opaque,
+            self.cutout,
+            self.transparent,
+            self.emissive,
+            self.special,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            combined.append(mesh);
+        }
+        (!combined.is_empty()).then_some(combined)
     }
 }
 
@@ -1473,116 +1678,221 @@ const FACE_DIRS: [[i32; 3]; 6] = [
 // more of the lighting relationship, so cast shadows remain visible.
 const FACE_SHADE: [f32; 6] = [0.90, 0.90, 1.00, 0.70, 0.80, 0.80];
 
+/// Single meshing seam from a stable [`SurfaceMaterialId`] to an atlas UV
+/// rect. The catalog audit guarantees registered blocks resolve; the
+/// fallback only covers unknown ids and mirrors the legacy unknown-name path.
+fn surface_uv(atlas: &crate::textures::Atlas, material: SurfaceMaterialId) -> [f32; 4] {
+    atlas
+        .uv_rect_material(material)
+        .unwrap_or_else(|| atlas.uv_rect(catalog::FALLBACK_TILE))
+}
+
+/// C01 MeshBuilder entry, expanded by C02 into render-compatible buckets.
+pub struct ChunkMeshBuilder<'a> {
+    world: &'a World,
+    chunk: &'a Chunk,
+    atlas: &'a crate::textures::Atlas,
+    opaque: VoxelMesh,
+    cutout: VoxelMesh,
+    transparent: VoxelMesh,
+    emissive: VoxelMesh,
+    special: VoxelMesh,
+    liquid: VoxelMesh,
+}
+
+impl<'a> ChunkMeshBuilder<'a> {
+    pub fn new(world: &'a World, chunk: &'a Chunk, atlas: &'a crate::textures::Atlas) -> Self {
+        Self {
+            world,
+            chunk,
+            atlas,
+            opaque: VoxelMesh::new(),
+            cutout: VoxelMesh::new(),
+            transparent: VoxelMesh::new(),
+            emissive: VoxelMesh::new(),
+            special: VoxelMesh::new(),
+            liquid: VoxelMesh::new(),
+        }
+    }
+
+    pub fn build(mut self) -> ChunkMeshBuckets {
+        let world = self.world;
+        let c = self.chunk;
+        let atlas = self.atlas;
+        let cx = c.cx;
+        let cz = c.cz;
+        let x0 = cx * CHUNK;
+        let z0 = cz * CHUNK;
+        let water_tint = world.biome().water_tint;
+        let tint = [
+            ((water_tint >> 16) & 0xFF) as f32 / 255.0,
+            ((water_tint >> 8) & 0xFF) as f32 / 255.0,
+            (water_tint & 0xFF) as f32 / 255.0,
+        ];
+
+        for y in 0..WORLD_H {
+            for lz in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    let id = c.data[lidx(lx, y, lz)];
+                    if id == ids::AIR {
+                        continue;
+                    }
+                    let def = data::block_by_id(id);
+                    let bucket = mesh_bucket(def);
+                    let wx = x0 + lx;
+                    let wz = z0 + lz;
+                    if def.cross {
+                        // two diagonal quads
+                        let material = catalog::cross_material(id);
+                        let [u0, v0, u1, v1] = surface_uv(atlas, material);
+                        let bright = if def.glow { 1.7 } else { 1.0 };
+                        let (x, z) = (wx as f32, wz as f32);
+                        let (y0, y1) = (y as f32, y as f32 + 1.0);
+                        let quads = [
+                            [
+                                (x, y0, z + 1.0),
+                                (x + 1.0, y0, z),
+                                (x, y1, z + 1.0),
+                                (x + 1.0, y1, z),
+                            ],
+                            [
+                                (x, y0, z),
+                                (x + 1.0, y0, z + 1.0),
+                                (x, y1, z),
+                                (x + 1.0, y1, z + 1.0),
+                            ],
+                        ];
+                        let uv = [[u0, v1], [u1, v1], [u0, v0], [u1, v0]];
+                        for q in quads {
+                            let normal = quad_normal(q);
+                            emit_quad(&mut self.cutout, q, uv, bright, normal, material);
+                        }
+                        continue;
+                    }
+                    let lb = def.lowbox.unwrap_or(1.0);
+                    let (y0, y1) = (y as f32, y as f32 + lb);
+                    for f in 0..6 {
+                        let dir = FACE_DIRS[f];
+                        let nx = wx + dir[0];
+                        let ny = y + dir[1];
+                        let nz = wz + dir[2];
+                        let n_id = world.get(nx, ny, nz);
+                        let n_def = data::block_by_id(n_id);
+                        let emit = should_emit_face(id, def, n_id, n_def, f);
+                        if !emit {
+                            continue;
+                        }
+                        let material = catalog::face_material(id, f);
+                        let [u0, v0, u1, v1] = surface_uv(atlas, material);
+                        let shade = if def.liquid {
+                            0.72 + FACE_SHADE[f] * 0.28
+                        } else if def.glow {
+                            FACE_SHADE[f] * 2.2
+                        } else {
+                            FACE_SHADE[f]
+                        };
+                        let corners = face_corners(wx as f32, wz as f32, y0, y1, f);
+                        // UV mapping: u across horizontal, v follows y (v0 = tile top, v1 = tile bottom)
+                        let uv = face_uvs(f, [u0, v0, u1, v1]);
+                        if def.liquid {
+                            let mut cols = [[0f32; 4]; 4];
+                            for col in &mut cols {
+                                // alpha 0.72：原生 StandardMaterial 把顶点色（含 alpha）
+                                // 作为 base_color 参与 Blend，水面保持半透明
+                                *col = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 0.72];
+                            }
+                            emit_quad_col(
+                                &mut self.liquid,
+                                corners,
+                                uv,
+                                cols,
+                                [1.0; 4],
+                                dir.map(|v| v as f32),
+                                material,
+                            );
+                        } else {
+                            // Per-vertex ambient occlusion: sample the three voxels
+                            // touching each corner in the neighbouring layer. This
+                            // is what makes stacked blocks read as solid geometry
+                            // instead of flat tiles.
+                            let (tangent_a, tangent_b) = face_tangents(f);
+                            let center = [wx as f32 + 0.5, y as f32 + lb * 0.5, wz as f32 + 0.5];
+                            let mut cols = [[0f32; 4]; 4];
+                            let mut aos = [1.0f32; 4];
+                            for (i, corner) in corners.iter().enumerate() {
+                                let side_a = if corner_dot(corner, &center, tangent_a) > 0.0 {
+                                    1
+                                } else {
+                                    -1
+                                };
+                                let side_b = if corner_dot(corner, &center, tangent_b) > 0.0 {
+                                    1
+                                } else {
+                                    -1
+                                };
+                                let ao = corner_ao(
+                                    world,
+                                    [wx, y, wz],
+                                    dir,
+                                    tangent_a,
+                                    tangent_b,
+                                    side_a,
+                                    side_b,
+                                );
+                                let value = shade * ao;
+                                aos[i] = ao;
+                                cols[i] = [value, value, value, 1.0];
+                            }
+                            let target = match bucket {
+                                MeshBucket::Opaque => &mut self.opaque,
+                                MeshBucket::Cutout => &mut self.cutout,
+                                MeshBucket::Transparent => &mut self.transparent,
+                                MeshBucket::Emissive => &mut self.emissive,
+                                MeshBucket::Special => &mut self.special,
+                                MeshBucket::Liquid => unreachable!("liquids handled above"),
+                            };
+                            emit_quad_col(
+                                target,
+                                corners,
+                                uv,
+                                cols,
+                                aos,
+                                dir.map(|v| v as f32),
+                                material,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ChunkMeshBuckets {
+            opaque: (!self.opaque.is_empty()).then_some(self.opaque),
+            cutout: (!self.cutout.is_empty()).then_some(self.cutout),
+            transparent: (!self.transparent.is_empty()).then_some(self.transparent),
+            emissive: (!self.emissive.is_empty()).then_some(self.emissive),
+            special: (!self.special.is_empty()).then_some(self.special),
+            liquid: (!self.liquid.is_empty()).then_some(self.liquid),
+        }
+    }
+}
+
+pub fn build_chunk_mesh_buckets(
+    world: &World,
+    c: &Chunk,
+    atlas: &crate::textures::Atlas,
+) -> ChunkMeshBuckets {
+    ChunkMeshBuilder::new(world, c, atlas).build()
+}
+
 /// Build solid + water meshes for one chunk. Neighbors must exist.
 pub fn build_chunk_meshes(
     world: &World,
     c: &Chunk,
     atlas: &crate::textures::Atlas,
 ) -> (Option<VoxelMesh>, Option<VoxelMesh>) {
-    let mut solid = VoxelMesh::new();
-    let mut water = VoxelMesh::new();
-    let cx = c.cx;
-    let cz = c.cz;
-    let x0 = cx * CHUNK;
-    let z0 = cz * CHUNK;
-    let water_tint = world.biome().water_tint;
-    let tint = [
-        ((water_tint >> 16) & 0xFF) as f32 / 255.0,
-        ((water_tint >> 8) & 0xFF) as f32 / 255.0,
-        (water_tint & 0xFF) as f32 / 255.0,
-    ];
-
-    for y in 0..WORLD_H {
-        for lz in 0..CHUNK {
-            for lx in 0..CHUNK {
-                let id = c.data[lidx(lx, y, lz)];
-                if id == ids::AIR {
-                    continue;
-                }
-                let def = data::block_by_id(id);
-                let wx = x0 + lx;
-                let wz = z0 + lz;
-                if def.cross {
-                    // two diagonal quads
-                    let tile = def.tiles.side.or(def.tiles.all).unwrap_or("grass_top");
-                    let [u0, v0, u1, v1] = atlas.uv_rect(tile);
-                    let bright = if def.glow { 1.7 } else { 1.0 };
-                    let (x, z) = (wx as f32, wz as f32);
-                    let (y0, y1) = (y as f32, y as f32 + 1.0);
-                    let quads = [
-                        [
-                            (x, y0, z + 1.0),
-                            (x + 1.0, y0, z),
-                            (x, y1, z + 1.0),
-                            (x + 1.0, y1, z),
-                        ],
-                        [
-                            (x, y0, z),
-                            (x + 1.0, y0, z + 1.0),
-                            (x, y1, z),
-                            (x + 1.0, y1, z + 1.0),
-                        ],
-                    ];
-                    let uv = [[u0, v1], [u1, v1], [u0, v0], [u1, v0]];
-                    for q in quads {
-                        emit_quad(&mut solid, q, uv, bright, [0.0, 1.0, 0.0]);
-                    }
-                    continue;
-                }
-                let lb = def.lowbox.unwrap_or(1.0);
-                let (y0, y1) = (y as f32, y as f32 + lb);
-                for f in 0..6 {
-                    let dir = FACE_DIRS[f];
-                    let nx = wx + dir[0];
-                    let ny = y + dir[1];
-                    let nz = wz + dir[2];
-                    let n_id = world.get(nx, ny, nz);
-                    let n_def = data::block_by_id(n_id);
-                    let emit = if def.liquid {
-                        !(n_id == id || (n_def.solid && !n_def.transparent))
-                    } else if def.lowbox.is_some() && f == 3 {
-                        !(n_def.solid && !n_def.transparent)
-                    } else {
-                        !(n_def.solid
-                            && !n_def.transparent
-                            && !n_def.cross
-                            && n_def.machine.is_none())
-                            && !(n_id == id && def.transparent && !def.fancy)
-                    };
-                    if !emit {
-                        continue;
-                    }
-                    let tile = def.tiles.for_face(f);
-                    let [u0, v0, u1, v1] = atlas.uv_rect(tile);
-                    let shade = if def.liquid {
-                        0.72 + FACE_SHADE[f] * 0.28
-                    } else if def.glow {
-                        FACE_SHADE[f] * 2.2
-                    } else {
-                        FACE_SHADE[f]
-                    };
-                    let corners = face_corners(wx as f32, wz as f32, y0, y1, f);
-                    // UV mapping: u across horizontal, v follows y (v0 = tile top, v1 = tile bottom)
-                    let uv = face_uvs(f, [u0, v0, u1, v1]);
-                    if def.liquid {
-                        let mut cols = [[0f32; 4]; 4];
-                        for col in &mut cols {
-                            // alpha 0.72：原生 StandardMaterial 把顶点色（含 alpha）
-                            // 作为 base_color 参与 Blend，水面保持半透明
-                            *col = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 0.72];
-                        }
-                        emit_quad_col(&mut water, corners, uv, cols, dir.map(|v| v as f32));
-                    } else {
-                        emit_quad(&mut solid, corners, uv, shade, dir.map(|v| v as f32));
-                    }
-                }
-            }
-        }
-    }
-    (
-        if solid.is_empty() { None } else { Some(solid) },
-        if water.is_empty() { None } else { Some(water) },
-    )
+    let mut buckets = build_chunk_mesh_buckets(world, c, atlas);
+    let liquid = buckets.liquid.take();
+    (buckets.combined_solid(), liquid)
 }
 
 /// Corners for a face (4 positions). y0/y1 already account for lowbox height.
@@ -1627,26 +1937,77 @@ fn face_uvs(face: usize, rect: [f32; 4]) -> [[f32; 2]; 4] {
     }
 }
 
+/// Brightness multipliers for ambient occlusion levels 0 (fully occluded
+/// corner) through 3 (open corner).
+const AO_LEVELS: [f32; 4] = [0.5, 0.68, 0.85, 1.0];
+
+/// The two in-plane axes of a face used for AO sampling.
+fn face_tangents(face: usize) -> ([i32; 3], [i32; 3]) {
+    match face {
+        0 | 1 => ([0, 1, 0], [0, 0, 1]), // ±X spans Y/Z
+        2 | 3 => ([1, 0, 0], [0, 0, 1]), // ±Y spans X/Z
+        _ => ([1, 0, 0], [0, 1, 0]),     // ±Z spans X/Y
+    }
+}
+
+fn corner_dot(corner: &(f32, f32, f32), center: &[f32; 3], axis: [i32; 3]) -> f32 {
+    (corner.0 - center[0]) * axis[0] as f32
+        + (corner.1 - center[1]) * axis[1] as f32
+        + (corner.2 - center[2]) * axis[2] as f32
+}
+
+/// Classic voxel ambient occlusion: counts the two edge neighbours and the
+/// diagonal neighbour around a corner. Solid, non-transparent, non-cross
+/// blocks occlude; everything else lets light through.
+fn corner_ao(
+    world: &World,
+    cell: [i32; 3],
+    normal: [i32; 3],
+    axis_a: [i32; 3],
+    axis_b: [i32; 3],
+    side_a: i32,
+    side_b: i32,
+) -> f32 {
+    let occludes = |dx: i32, dy: i32, dz: i32| -> i32 {
+        let id = world.get(
+            cell[0] + normal[0] + dx,
+            cell[1] + normal[1] + dy,
+            cell[2] + normal[2] + dz,
+        );
+        let def = data::block_by_id(id);
+        (def.solid && !def.transparent && !def.cross) as i32
+    };
+    let a = occludes(axis_a[0] * side_a, axis_a[1] * side_a, axis_a[2] * side_a);
+    let b = occludes(axis_b[0] * side_b, axis_b[1] * side_b, axis_b[2] * side_b);
+    if a == 1 && b == 1 {
+        return AO_LEVELS[0];
+    }
+    let diagonal = occludes(
+        axis_a[0] * side_a + axis_b[0] * side_b,
+        axis_a[1] * side_a + axis_b[1] * side_b,
+        axis_a[2] * side_a + axis_b[2] * side_b,
+    );
+    let level = (3 - a - b - diagonal).clamp(0, 3) as usize;
+    AO_LEVELS[level]
+}
+
 fn emit_quad(
     m: &mut VoxelMesh,
     q: [(f32, f32, f32); 4],
     uv: [[f32; 2]; 4],
     bright: f32,
     n: [f32; 3],
+    material: SurfaceMaterialId,
 ) {
-    let base = m.positions.len() as u32;
-    for i in 0..4 {
-        m.positions.push([q[i].0, q[i].1, q[i].2]);
-        m.normals.push(n);
-        m.colors.push([bright, bright, bright, 1.0]);
-        m.uvs.push(uv[i]);
-    }
-    m.indices.push(base);
-    m.indices.push(base + 1);
-    m.indices.push(base + 2);
-    m.indices.push(base + 2);
-    m.indices.push(base + 1);
-    m.indices.push(base + 3);
+    emit_quad_col(
+        m,
+        q,
+        uv,
+        [[bright, bright, bright, 1.0]; 4],
+        [1.0; 4],
+        n,
+        material,
+    );
 }
 
 fn emit_quad_col(
@@ -1654,21 +2015,63 @@ fn emit_quad_col(
     q: [(f32, f32, f32); 4],
     uv: [[f32; 2]; 4],
     cols: [[f32; 4]; 4],
+    aos: [f32; 4],
     n: [f32; 3],
+    material: SurfaceMaterialId,
 ) {
     let base = m.positions.len() as u32;
+    let tangent = quad_tangent(q, uv, n);
     for i in 0..4 {
         m.positions.push([q[i].0, q[i].1, q[i].2]);
         m.normals.push(n);
+        m.tangents.push(tangent);
         m.uvs.push(uv[i]);
+        m.aos.push(aos[i]);
+        m.material_ids.push(u32::from(material.raw()));
         m.colors.push(cols[i]);
     }
-    m.indices.push(base);
-    m.indices.push(base + 1);
-    m.indices.push(base + 2);
-    m.indices.push(base + 2);
-    m.indices.push(base + 1);
-    m.indices.push(base + 3);
+    // `face_corners` is ordered for UV continuity rather than uniform
+    // winding. Choose the index direction from the declared normal so every
+    // bucket can safely use back-face culling where appropriate.
+    let geometric = Vec3::new(q[1].0 - q[0].0, q[1].1 - q[0].1, q[1].2 - q[0].2).cross(Vec3::new(
+        q[2].0 - q[0].0,
+        q[2].1 - q[0].1,
+        q[2].2 - q[0].2,
+    ));
+    if geometric.dot(Vec3::from_array(n)) >= 0.0 {
+        m.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    } else {
+        m.indices
+            .extend_from_slice(&[base, base + 2, base + 1, base + 2, base + 3, base + 1]);
+    }
+}
+
+fn quad_normal(q: [(f32, f32, f32); 4]) -> [f32; 3] {
+    let a = Vec3::new(q[1].0 - q[0].0, q[1].1 - q[0].1, q[1].2 - q[0].2);
+    let b = Vec3::new(q[2].0 - q[0].0, q[2].1 - q[0].1, q[2].2 - q[0].2);
+    let normal = a.cross(b).normalize_or_zero();
+    normal.to_array()
+}
+
+fn quad_tangent(q: [(f32, f32, f32); 4], uv: [[f32; 2]; 4], normal: [f32; 3]) -> [f32; 4] {
+    let edge_a = Vec3::new(q[1].0 - q[0].0, q[1].1 - q[0].1, q[1].2 - q[0].2);
+    let edge_b = Vec3::new(q[2].0 - q[0].0, q[2].1 - q[0].1, q[2].2 - q[0].2);
+    let duv_a = Vec2::new(uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]);
+    let duv_b = Vec2::new(uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
+    let determinant = duv_a.x * duv_b.y - duv_a.y * duv_b.x;
+    if determinant.abs() <= f32::EPSILON {
+        return [1.0, 0.0, 0.0, 1.0];
+    }
+    let inverse = determinant.recip();
+    let tangent = ((edge_a * duv_b.y - edge_b * duv_a.y) * inverse).normalize_or_zero();
+    let bitangent = ((edge_b * duv_a.x - edge_a * duv_b.x) * inverse).normalize_or_zero();
+    let handedness = if Vec3::from_array(normal).cross(tangent).dot(bitangent) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    [tangent.x, tangent.y, tangent.z, handedness]
 }
 
 // ---------- 远景模拟地形（JS ensureFarMesh / tickFar 移植） ----------
@@ -1708,16 +2111,18 @@ pub fn far_row_order(i: usize) -> usize {
     }
 }
 
-/// 地表瓦片平均色（与 JS `tileAvgColor` 同口径；瓦片缺失时给中性绿）。
+/// 地表材质平均色（与 JS `tileAvgColor` 同口径；材质缺失时给中性绿）。
 /// 返回**线性空间** RGB：图集像素是 sRGB，而 Bevy 的网格顶点色是线性值
 /// （近处地形走 sRGB 纹理、由采样器自动转线性）。JS 原版 three.js 会为
 /// 顶点色做同样的 sRGB→线性转换，Bevy 不会，所以这里必须手动转，
 /// 否则远景地表会比近处地形亮约 2.4 倍。
-pub(crate) fn far_tile_avg(atlas: &crate::textures::Atlas, tile: &str) -> [f32; 3] {
-    let Some(&idx) = atlas.index.get(tile) else {
+pub(crate) fn far_material_avg(
+    atlas: &crate::textures::Atlas,
+    material: SurfaceMaterialId,
+) -> [f32; 3] {
+    let Some(t) = atlas.tile_material(material) else {
         return [0.5, 0.6, 0.4].map(srgb_to_linear);
     };
-    let t = &atlas.tiles[idx];
     let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
     for p in t.iter() {
         r += p[0] as u32;
@@ -1775,22 +2180,18 @@ pub(crate) fn far_surface_sample(
         .map(|sub| sub.0)
         .filter(|key| !key.is_empty())
         .unwrap_or(b.grass);
-    let tile = match ground {
-        "grass" => "grass_top",
-        "snow" => "snow_top",
-        "alien" => "alien_top",
-        "murk" => "murk_top",
-        "redmoss" => "redmoss_top",
-        other => other,
-    };
+    let material = catalog::ground_material(ground);
     let no_beach = matches!(
         b.grass,
         "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
     );
     let avg = if height < sea + 1.0 && !no_beach && !island {
-        far_tile_avg(atlas, "sand")
+        far_material_avg(
+            atlas,
+            catalog::material_id("sand").unwrap_or(SurfaceMaterialId::UNKNOWN),
+        )
     } else {
-        far_tile_avg(atlas, tile)
+        far_material_avg(atlas, material)
     };
     let shade = (0.72 + (height - 14.0) * 0.012).clamp(0.0, 1.35);
     (
@@ -1850,7 +2251,7 @@ pub fn fill_far_rows(
     let b = g.biome;
     let seab = g.sea() as f32;
     let wt = b.water_tint;
-    // 与 far_tile_avg 同理：水色也是 sRGB 值，转线性后写入顶点色，
+    // 与 far_material_avg 同理：水色也是 sRGB 值，转线性后写入顶点色，
     // 否则远景水面会比近处水（sRGB 纹理自动转线性）亮约 2.4 倍。
     let water_rgb = [
         srgb_to_linear(((wt >> 16) & 0xFF) as f32 / 255.0),
@@ -1861,20 +2262,11 @@ pub fn fill_far_rows(
         b.grass,
         "sand" | "basalt" | "ash" | "salt" | "obsidian" | "rust" | "hive" | "amber"
     );
-    // 地表瓦片：sub 地面覆盖优先（JS tileFor(BLOCKS[sd.g || biome.grass], 2)），redmoss→redmoss_top
-    fn tile_key(k: &'static str) -> &'static str {
-        match k {
-            "grass" => "grass_top",
-            "snow" => "snow_top",
-            "alien" => "alien_top",
-            "murk" => "murk_top",
-            "redmoss" => "redmoss_top",
-            other => other,
-        }
-    }
-    let mut tile_cache: std::collections::HashMap<&'static str, [f32; 3]> =
+    // 地表材质：sub 地面覆盖优先（JS tileFor(BLOCKS[sd.g || biome.grass], 2)）
+    let mut material_cache: std::collections::HashMap<SurfaceMaterialId, [f32; 3]> =
         std::collections::HashMap::new();
-    let sand_avg = far_tile_avg(atlas, "sand");
+    let sand_material = catalog::material_id("sand").unwrap_or(SurfaceMaterialId::UNKNOWN);
+    let sand_avg = far_material_avg(atlas, sand_material);
     let half = (FAR_N as f32 - 1.0) / 2.0 * FAR_STEP;
     let to = to.min(FAR_N);
     for k in from..to {
@@ -1905,10 +2297,10 @@ pub fn fill_far_rows(
                     .map(|s| s.0)
                     .filter(|k| !k.is_empty())
                     .unwrap_or(b.grass);
-                let tk = tile_key(ground_key);
-                let avg = *tile_cache
-                    .entry(tk)
-                    .or_insert_with(|| far_tile_avg(atlas, tk));
+                let material = catalog::ground_material(ground_key);
+                let avg = *material_cache
+                    .entry(material)
+                    .or_insert_with(|| far_material_avg(atlas, material));
                 let avg = if h < seab + 1.0 && !no_beach && island_h.is_none() {
                     sand_avg
                 } else {
@@ -2171,6 +2563,214 @@ mod tests {
     }
 
     #[test]
+    fn legacy_generator_baseline_fingerprints() {
+        fn fnv(bytes: &[u8]) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for &byte in bytes {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        }
+        // G01: frozen fingerprints of the pre-refactor generator. These cover
+        // the guaranteed origin village, negative coordinates, far cells and a
+        // hazard biome; they must not change when plans/streams are introduced.
+        let expected: [(u32, &str, i32, i32, u64); 18] = [
+            (11, "lush", 0, 0, 0x62e1b1d989367156),
+            (11, "lush", 1, -1, 0x4485d823e0a10acc),
+            (11, "lush", -2, 3, 0x71d90357ef4eebbf),
+            (11, "lush", 100, 50, 0x4008b0163e4d1a64),
+            (11, "lush", 40, 20, 0xff576db0681116f8),
+            (11, "lush", -1, -1, 0xf39374f50119c0ba),
+            (11, "ashen", 0, 0, 0x79fb0b4a4058cf69),
+            (11, "ashen", 1, -1, 0xa6425dd619a81ca8),
+            (11, "ashen", -2, 3, 0xb228c1e86566ee24),
+            (11, "ashen", 100, 50, 0x2cf9385fb9f7079f),
+            (11, "ashen", 40, 20, 0x2cf147c67bb0d475),
+            (11, "ashen", -1, -1, 0xdca775f3321bdf40),
+            (7777, "volcanic", 0, 0, 0x0de1fef95620fc97),
+            (7777, "volcanic", 1, -1, 0x61f754a68c0758f6),
+            (7777, "volcanic", -2, 3, 0x4b3d44698baf664e),
+            (7777, "volcanic", 100, 50, 0xa928a7c8ba364d39),
+            (7777, "volcanic", 40, 20, 0x53b876fcc0d56f23),
+            (7777, "volcanic", -1, -1, 0x8d1a85acf45869f4),
+        ];
+        for (seed, biome, cx, cz, hash) in expected {
+            let g = WorldGen::new(seed, data::biome_by_key(biome));
+            let data = g.gen_chunk_data(cx, cz);
+            assert_eq!(
+                fnv(data.as_slice()),
+                hash,
+                "generator drift: seed={seed} biome={biome} chunk=({cx},{cz})"
+            );
+        }
+    }
+
+    #[test]
+    fn structures_query_uses_real_aabb_without_cell_gaps() {
+        let g = WorldGen::new(11, data::biome_by_key("lush"));
+        let rects = [
+            (0, 0, 64, 64),
+            (-700, 300, -600, 380),
+            (639, 319, 700, 400),
+            (-1, -1, 16, 16),
+            (10_000, -20_000, 10_100, -19_900),
+        ];
+        for (x0, z0, x1, z1) in rects {
+            let query = PlanAabb::new(x0, z0, x1, z1);
+            let mut actual: Vec<String> = g
+                .structures_in_rect(x0, z0, x1, z1)
+                .iter()
+                .map(|layout| format!("{layout:?}"))
+                .collect();
+            actual.sort();
+
+            // Independent wide scan: every plan whose real footprint touches
+            // the rectangle must be in the result, whatever cell it lives in.
+            let scan = cell_range_for_rect(
+                x0 - 2048,
+                z0 - 2048,
+                x1 + 2048,
+                z1 + 2048,
+                0,
+                STRUCT_CELL_X,
+                STRUCT_CELL_Z,
+            );
+            let mut expected: Vec<String> = scan
+                .cells()
+                .filter_map(|(cx, cz)| g.plan_in_cell(cx, cz))
+                .filter(|plan| plan.aabb.overlaps(query))
+                .map(|plan| format!("{:?}", plan.layout))
+                .collect();
+            expected.sort();
+            assert_eq!(actual, expected, "query gap at rect {query:?}");
+
+            let mut reversed: Vec<String> = g
+                .structures_in_rect(x1, z1, x0, z0)
+                .iter()
+                .map(|layout| format!("{layout:?}"))
+                .collect();
+            reversed.sort();
+            assert_eq!(actual, reversed, "reversed rect must match");
+        }
+    }
+
+    #[test]
+    fn plan_generation_is_query_order_independent() {
+        let biome = data::biome_by_key("lush");
+        let a = WorldGen::new(12345, biome);
+        // The origin cell is the guaranteed village for habitable biomes.
+        let direct = a.plan_in_cell(0, 0).expect("plan").plan_fingerprint();
+        let b = WorldGen::new(12345, biome);
+        // Warm unrelated cells first; plans must not depend on query order.
+        for (cx, cz) in [(-9, 9), (100, 100), (1, -1), (-3, 0)] {
+            let _ = b.plan_in_cell(cx, cz);
+        }
+        let after = b.plan_in_cell(0, 0).expect("plan").plan_fingerprint();
+        assert_eq!(direct, after);
+        assert_eq!(
+            a.plan_in_cell(0, 0).expect("cached").id.stable_hash(),
+            b.plan_in_cell(0, 0).expect("cached").id.stable_hash()
+        );
+    }
+
+    #[test]
+    fn sampled_legacy_plans_pass_validation() {
+        let mut found = 0;
+        for (seed, biome) in [(11u32, "lush"), (7777, "volcanic")] {
+            let g = WorldGen::new(seed, data::biome_by_key(biome));
+            for cx in -4..=4 {
+                for cz in -4..=4 {
+                    if let Some(plan) = g.plan_in_cell(cx, cz) {
+                        assert_eq!(
+                            plan.validate(&crate::structures::LEGACY_LIMITS),
+                            Ok(()),
+                            "plan ({cx},{cz}) seed={seed} biome={biome} violates legacy limits"
+                        );
+                        found += 1;
+                    }
+                }
+            }
+        }
+        assert!(found > 0, "sample must contain structures");
+    }
+
+    #[test]
+    fn plan_cache_reports_hits_and_stays_bounded() {
+        let g = WorldGen::new(11, data::biome_by_key("lush"));
+        let _ = g.plan_in_cell(0, 0);
+        let before = g.plan_cache_stats();
+        let _ = g.plan_in_cell(0, 0);
+        let after = g.plan_cache_stats();
+        assert_eq!(after.hits, before.hits + 1);
+        assert_eq!(after.misses, before.misses);
+        assert!(after.len <= after.capacity);
+        assert!(after.capacity > 0);
+    }
+
+    #[test]
+    fn legacy_plan_fingerprints_baseline() {
+        // G01 golden hashes: wrapping the legacy generator in plans must not
+        // change a single layout, and future decoration work must not shift
+        // these layout/loot values.
+        let lush = WorldGen::new(11, data::biome_by_key("lush"));
+        let lush_expected: [(i32, i32, &str, u64, u64, u64); 2] = [
+            (
+                0,
+                0,
+                "village",
+                0xb396_89a3_34e1_2bca,
+                0xfd6c_41e7_b75c_fae6,
+                0x161c_f736_d7f5_19eb,
+            ),
+            (
+                1,
+                -1,
+                "village",
+                0xe881_911a_90f0_a642,
+                0xde13_b36b_bf0a_d823,
+                0xc8ac_19d2_f322_fd57,
+            ),
+        ];
+        for (cx, cz, kind, layout_hash, loot_hash, plan_hash) in lush_expected {
+            let plan = lush.plan_in_cell(cx, cz).expect("golden plan exists");
+            assert_eq!(plan.kind().key(), kind);
+            assert_eq!(plan.layout_fingerprint(), layout_hash, "layout ({cx},{cz})");
+            assert_eq!(plan.loot_fingerprint(), loot_hash, "loot ({cx},{cz})");
+            assert_eq!(plan.plan_fingerprint(), plan_hash, "plan ({cx},{cz})");
+        }
+        assert!(lush.plan_in_cell(-2, 3).is_none());
+        assert!(lush.plan_in_cell(40, 20).is_none());
+
+        let volcanic = WorldGen::new(7777, data::biome_by_key("volcanic"));
+        let volcanic_expected: [(i32, i32, &str, u64, u64, u64); 2] = [
+            (
+                0,
+                0,
+                "ruin",
+                0x185b_f642_9a91_453d,
+                0x4a7e_68bd_142b_146b,
+                0x2ff8_be30_d2a6_a677,
+            ),
+            (
+                2,
+                -3,
+                "ruin",
+                0x1b15_fe8d_b282_af4c,
+                0x284d_1bc7_9ae4_02ce,
+                0x64ae_323a_e9e6_3d7d,
+            ),
+        ];
+        for (cx, cz, kind, layout_hash, loot_hash, plan_hash) in volcanic_expected {
+            let plan = volcanic.plan_in_cell(cx, cz).expect("golden plan exists");
+            assert_eq!(plan.kind().key(), kind);
+            assert_eq!(plan.layout_fingerprint(), layout_hash, "layout ({cx},{cz})");
+            assert_eq!(plan.loot_fingerprint(), loot_hash, "loot ({cx},{cz})");
+            assert_eq!(plan.plan_fingerprint(), plan_hash, "plan ({cx},{cz})");
+        }
+    }
+
+    #[test]
     fn structures_deterministic_and_infinite() {
         // 无限地表：结构按格哈希确定性生成，任意远处都有结构可查。
         let biome = data::biome_by_key("lush");
@@ -2238,6 +2838,288 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn ambient_occlusion_darkens_enclosed_corners() {
+        use data::ids;
+        let mut w = World::new(7, "lush", 3);
+        // A simple pillar: the floor around it must get AO-darkened corners.
+        for y in 40..46 {
+            w.set(8, y, 8, ids::GRASS);
+            w.set(8, y, 9, ids::GRASS);
+        }
+        let c = w.get_chunk(0, 0).expect("chunk generated");
+        let (solid, _) = build_chunk_meshes(&w, c, &crate::textures::Atlas::build());
+        let mesh = solid.expect("mesh exists");
+        // Fully lit vertices use the face shade (<=1.0); occluded ones drop to
+        // 50% of it, so the minimum channel over the mesh must be clearly below
+        // the maximum.
+        let min = mesh
+            .colors
+            .iter()
+            .map(|c| c[0].min(c[1]).min(c[2]))
+            .fold(f32::MAX, f32::min);
+        let max = mesh
+            .colors
+            .iter()
+            .map(|c| c[0].max(c[1]).max(c[2]))
+            .fold(f32::MIN, f32::max);
+        assert!(
+            min < max * 0.9,
+            "AO did not darken any corner (min {min}, max {max})"
+        );
+        // AO levels stay inside the configured band.
+        assert!(min >= 0.0);
+    }
+
+    #[test]
+    fn face_tangents_are_perpendicular_to_normals() {
+        for (face, normal) in FACE_DIRS.iter().enumerate() {
+            let n = *normal;
+            let (a, b) = face_tangents(face);
+            let dot = |x: [i32; 3], y: [i32; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+            assert_eq!(dot(n, a), 0, "face {face}");
+            assert_eq!(dot(n, b), 0, "face {face}");
+            assert_eq!(dot(a, b), 0, "face {face}");
+        }
+    }
+
+    #[test]
+    fn face_winding_matches_declared_outward_normals() {
+        for (face, expected) in FACE_DIRS.iter().enumerate() {
+            let q = face_corners(0.0, 0.0, 0.0, 1.0, face);
+            let declared = Vec3::from_array(expected.map(|value| value as f32));
+            let mut mesh = VoxelMesh::new();
+            emit_quad(
+                &mut mesh,
+                q,
+                face_uvs(face, [0.0, 0.0, 1.0, 1.0]),
+                1.0,
+                declared.to_array(),
+                catalog::face_material(ids::GRASS, face),
+            );
+            let [a, b, c] = [
+                mesh.indices[0] as usize,
+                mesh.indices[1] as usize,
+                mesh.indices[2] as usize,
+            ];
+            let pa = Vec3::from_array(mesh.positions[a]);
+            let pb = Vec3::from_array(mesh.positions[b]);
+            let pc = Vec3::from_array(mesh.positions[c]);
+            let winding_normal = (pb - pa).cross(pc - pa).normalize();
+            assert!(winding_normal.dot(declared) > 0.999, "face {face}");
+        }
+    }
+
+    #[test]
+    fn c02_bucket_classification_is_render_compatible() {
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::GRASS)),
+            MeshBucket::Opaque
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::LEAVES)),
+            MeshBucket::Cutout
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::GLASS)),
+            MeshBucket::Transparent
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::LAMP)),
+            MeshBucket::Emissive
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::BELT)),
+            MeshBucket::Special
+        );
+        assert_eq!(
+            mesh_bucket(data::block_by_id(ids::WATER)),
+            MeshBucket::Liquid
+        );
+
+        let glass = data::block_by_id(ids::GLASS);
+        assert!(!should_emit_face(ids::GLASS, glass, ids::GLASS, glass, 0));
+        assert!(should_emit_face(
+            ids::GLASS,
+            glass,
+            ids::AIR,
+            data::block_by_id(ids::AIR),
+            0,
+        ));
+    }
+
+    #[test]
+    fn c02_vertex_streams_are_aligned_and_tangent_ready() {
+        let atlas = crate::textures::Atlas::build();
+        let mut w = World::new(19, "lush", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        for (x, id) in [
+            (2, ids::LEAVES),
+            (4, ids::GLASS),
+            (6, ids::LAMP),
+            (8, ids::BELT),
+            (10, ids::WATER),
+        ] {
+            w.set(x, WORLD_H - 1, 8, id);
+        }
+        let chunk = w.get_chunk(0, 0).expect("chunk");
+        let buckets = build_chunk_mesh_buckets(&w, chunk, &atlas);
+        assert!(buckets.opaque.is_some());
+        assert!(buckets.cutout.is_some());
+        assert!(buckets.transparent.is_some());
+        assert!(buckets.emissive.is_some());
+        assert!(buckets.special.is_some());
+        assert!(buckets.liquid.is_some());
+
+        for mesh in [
+            buckets.opaque,
+            buckets.cutout,
+            buckets.transparent,
+            buckets.emissive,
+            buckets.special,
+            buckets.liquid,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let vertex_count = mesh.positions.len();
+            assert_eq!(mesh.normals.len(), vertex_count);
+            assert_eq!(mesh.tangents.len(), vertex_count);
+            assert_eq!(mesh.uvs.len(), vertex_count);
+            assert_eq!(mesh.aos.len(), vertex_count);
+            assert_eq!(mesh.material_ids.len(), vertex_count);
+            assert_eq!(mesh.colors.len(), vertex_count);
+            for ((normal, tangent), material_id) in mesh
+                .normals
+                .iter()
+                .zip(&mesh.tangents)
+                .zip(&mesh.material_ids)
+            {
+                let n = Vec3::from_array(*normal);
+                let t = Vec3::from_array([tangent[0], tangent[1], tangent[2]]);
+                assert!((n.length() - 1.0).abs() < 1.0e-5);
+                assert!((t.length() - 1.0).abs() < 1.0e-5);
+                assert!(n.dot(t).abs() < 1.0e-5);
+                assert!(SurfaceMaterialId::new(*material_id as u16).is_known());
+            }
+            assert!(mesh.aos.iter().all(|ao| (0.5..=1.0).contains(ao)));
+        }
+    }
+
+    #[test]
+    fn corner_edits_dirty_the_diagonal_ao_neighbor() {
+        let mut w = World::new(23, "lush", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        for chunk in w.chunks.values_mut() {
+            chunk.dirty = false;
+        }
+        let old = w.get(0, WORLD_H - 1, 0);
+        let replacement = if old == ids::CONCRETE {
+            ids::GLASS
+        } else {
+            ids::CONCRETE
+        };
+        w.set(0, WORLD_H - 1, 0, replacement);
+        assert!(w.get_chunk(0, 0).unwrap().dirty);
+        assert!(w.get_chunk(-1, 0).unwrap().dirty);
+        assert!(w.get_chunk(0, -1).unwrap().dirty);
+        assert!(w.get_chunk(-1, -1).unwrap().dirty);
+        assert!(!w.get_chunk(1, 1).unwrap().dirty);
+    }
+
+    /// C01 golden regression: the MeshBuilder refactor must not change the
+    /// vertex/index stream for a fixed seed, biome and chunk. The hash covers
+    /// absolute positions, normals, tangents, UVs, explicit AO/material data,
+    /// colors and winding order. Re-run
+    /// this test after every meshing change; if it fails on purpose, update the
+    /// constant in the same commit as the visual review evidence.
+    #[test]
+    fn chunk_mesh_signature_is_stable() {
+        let atlas = crate::textures::Atlas::build();
+        let mut w = World::new(11, "lush", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        let c = w.get_chunk(0, 0).expect("chunk 0,0 generated");
+        let (solid, water) = build_chunk_meshes(&w, c, &atlas);
+        let solid = solid.expect("solid mesh");
+        let water_sig = water.as_ref().map(VoxelMesh::signature).unwrap_or(0);
+        let water_verts = water.as_ref().map(|m| m.positions.len()).unwrap_or(0);
+        println!(
+            "MESH_SIG solid={:#018x} verts={} water={:#018x} verts={}",
+            solid.signature(),
+            solid.positions.len(),
+            water_sig,
+            water_verts,
+        );
+        assert_eq!(solid.signature(), 0xbb38_a232_d823_adb3);
+        assert_eq!(solid.positions.len(), 6340);
+        assert_eq!(water_sig, 0);
+    }
+
+    /// C01 golden regression for the water bucket (separate mesh/material
+    /// path) so C02's bucket split cannot silently change the liquid output.
+    #[test]
+    fn ocean_water_mesh_signature_is_stable() {
+        let atlas = crate::textures::Atlas::build();
+        let mut w = World::new(11, "ocean", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        let c = w.get_chunk(0, 0).expect("chunk 0,0 generated");
+        let (solid, water) = build_chunk_meshes(&w, c, &atlas);
+        let water = water.expect("ocean chunk 0,0 has a water mesh");
+        println!(
+            "MESH_SIG ocean_solid={:#018x} water={:#018x} verts={}",
+            solid.as_ref().map(VoxelMesh::signature).unwrap_or(0),
+            water.signature(),
+            water.positions.len(),
+        );
+        assert_eq!(water.signature(), 0xee78_6d53_d2a6_87cd);
+        assert_eq!(water.positions.len(), 1248);
+    }
+
+    #[test]
+    fn mesh_signature_changes_after_an_edit() {
+        let atlas = crate::textures::Atlas::build();
+        let mut w = World::new(11, "lush", 3);
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                w.ensure_chunk(cx, cz);
+            }
+        }
+        let before = {
+            let c = w.get_chunk(0, 0).expect("chunk");
+            build_chunk_meshes(&w, c, &atlas)
+                .0
+                .expect("solid")
+                .signature()
+        };
+        // Place a marker block high above the terrain: it must add faces.
+        let ground = w.top_at(8, 8);
+        w.set(8, ground + 2, 8, data::ids::CONCRETE);
+        let after = {
+            let c = w.get_chunk(0, 0).expect("chunk");
+            build_chunk_meshes(&w, c, &atlas)
+                .0
+                .expect("solid")
+                .signature()
+        };
+        assert_ne!(before, after, "mesh signature ignored a voxel edit");
+    }
 }
 // ---------- Streaming ----------
 
@@ -2301,18 +3183,21 @@ pub fn stream_world_step(
                 let Some(c) = world.chunks.get(&key) else {
                     continue;
                 };
-                if (c.mesh.is_some() || c.water_mesh.is_some()) && !c.dirty {
+                if c.has_render_mesh() && !c.dirty {
                     continue;
                 }
-                let neighbors_exist = [(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)]
-                    .iter()
-                    .all(|(nx, nz)| world.get_chunk(*nx, *nz).is_some());
+                let neighbors_exist =
+                    chunk_neighbours(cx, cz).all(|(nx, nz)| world.get_chunk(nx, nz).is_some());
                 if !neighbors_exist {
                     continue;
                 }
                 let old_solid = c.mesh;
+                let old_cutout = c.cutout_mesh;
+                let old_transparent = c.transparent_mesh;
+                let old_emissive = c.emissive_mesh;
+                let old_special = c.special_mesh;
                 let old_water = c.water_mesh;
-                let (solid_m, water_m) = build_chunk_meshes(world, c, atlas);
+                let buckets = build_chunk_mesh_buckets(world, c, atlas);
                 // Conservative per-chunk AABB: static meshes with the full
                 // height range, so frustum culling never drops a chunk that
                 // is actually visible.
@@ -2324,8 +3209,52 @@ pub fn stream_world_step(
                     cx,
                     cz,
                     world.seed,
-                    solid_m,
+                    buckets.opaque,
                     mats.solid.clone(),
+                    y_min,
+                );
+                let cutout_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_cutout,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.cutout,
+                    mats.cutout.clone(),
+                    y_min,
+                );
+                let transparent_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_transparent,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.transparent,
+                    mats.transparent.clone(),
+                    y_min,
+                );
+                let emissive_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_emissive,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.emissive,
+                    mats.emissive.clone(),
+                    y_min,
+                );
+                let special_entity = upsert_chunk_mesh(
+                    commands,
+                    meshes,
+                    old_special,
+                    cx,
+                    cz,
+                    world.seed,
+                    buckets.special,
+                    mats.special.clone(),
                     y_min,
                 );
                 let water_entity = upsert_chunk_mesh(
@@ -2335,12 +3264,16 @@ pub fn stream_world_step(
                     cx,
                     cz,
                     world.seed,
-                    water_m,
+                    buckets.liquid,
                     mats.water.clone(),
                     y_min,
                 );
                 let c = world.chunks.get_mut(&key).unwrap();
                 c.mesh = solid_entity;
+                c.cutout_mesh = cutout_entity;
+                c.transparent_mesh = transparent_entity;
+                c.emissive_mesh = emissive_entity;
+                c.special_mesh = special_entity;
                 c.water_mesh = water_entity;
                 c.dirty = false;
                 mesh_left -= 1;
@@ -2352,10 +3285,20 @@ pub fn stream_world_step(
     }
     // unload far meshes (keep data)
     for c in world.chunks.values_mut() {
-        if (c.mesh.is_some() || c.water_mesh.is_some())
-            && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 3
-        {
+        if c.has_render_mesh() && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 3 {
             if let Some(e) = c.mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.cutout_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.transparent_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.emissive_mesh.take() {
+                commands.entity(e).despawn();
+            }
+            if let Some(e) = c.special_mesh.take() {
                 commands.entity(e).despawn();
             }
             if let Some(e) = c.water_mesh.take() {
@@ -2366,8 +3309,7 @@ pub fn stream_world_step(
     }
     // data eviction
     world.chunks.retain(|_, c| {
-        !(c.mesh.is_none()
-            && c.water_mesh.is_none()
+        !(!c.has_render_mesh()
             && World::cheb(c.cx, c.cz, pcx, pcz) > world.view_dist + 9
             && !c.modified)
     });
@@ -2382,7 +3324,7 @@ pub fn stream_world_step(
                 }
                 match world.get_chunk(cx, cz) {
                     Some(c) => {
-                        if (c.mesh.is_none() && c.water_mesh.is_none()) || c.dirty {
+                        if !c.has_render_mesh() || c.dirty {
                             ok = false;
                         }
                     }
@@ -2420,7 +3362,10 @@ fn upsert_chunk_mesh(
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vm.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vm.normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, vm.tangents);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vm.uvs);
+    mesh.insert_attribute(VOXEL_AO_ATTRIBUTE, vm.aos);
+    mesh.insert_attribute(VOXEL_MATERIAL_ATTRIBUTE, vm.material_ids);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vm.colors);
     mesh.insert_indices(Indices::U32(vm.indices));
     let handle = meshes.add(mesh);
@@ -2526,11 +3471,16 @@ fn stream_system(
 /// 远景地形状态：±1536 格低细节高度场，跟随玩家分帧重建；
 /// 缺失时高空/远望的地表在视距边缘戛然而止，流式区块边缘完全暴露（巨大闪动/残影）。
 #[derive(Component)]
-struct FarMesh {
+pub struct FarMesh {
     /// 已完成的网格中心（世界坐标，按 FAR_SNAP 对齐）
     cx: f32,
     cz: f32,
     seed: u32,
+    /// Visual lifetime token; two planets may intentionally share a seed.
+    epoch: u64,
+    /// Epoch represented by `active_mesh`. During a planet rebuild the old
+    /// mesh stays allocated but hidden until staging is complete.
+    active_epoch: u64,
     /// 待填充的下一行（< FAR_N 表示正在后台重建 staging_mesh）
     row: usize,
     target_cx: f32,
@@ -2542,6 +3492,35 @@ struct FarMesh {
     /// 上次写入挖空环的玩家位置（用于节流 CPU 顶点 alpha 更新）
     hole_x: f32,
     hole_z: f32,
+}
+
+/// C01 diagnostics view of the legacy far mesh (read-only).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FarMeshInfo {
+    pub cx: f32,
+    pub cz: f32,
+    pub seed: u32,
+    pub epoch: u64,
+    /// Staging row progress: `FAR_N` means the background rebuild finished.
+    pub row: usize,
+    pub staging: bool,
+    pub half_extent_meters: f32,
+    pub sink: f32,
+}
+
+impl FarMesh {
+    pub fn info(&self) -> FarMeshInfo {
+        FarMeshInfo {
+            cx: self.cx,
+            cz: self.cz,
+            seed: self.seed,
+            epoch: self.epoch,
+            row: self.row,
+            staging: self.row < FAR_N,
+            half_extent_meters: (FAR_N as f32 - 1.0) * 0.5 * FAR_STEP,
+            sink: FAR_SINK,
+        }
+    }
 }
 
 /// 远景挖空环（JS farHoleU 同口径）：玩家周围由真实区块覆盖，远景在 r0..r1 间淡出。
@@ -2556,6 +3535,7 @@ fn far_hole_radii(view_dist: i32) -> (f32, f32) {
 fn far_mesh_system(
     mut commands: Commands,
     world: Res<World>,
+    epoch: Res<crate::visual::WorldEpoch>,
     player: Query<&crate::player::Player>,
     ship: Res<crate::space::ShipState>,
     mode: Res<crate::space::FlightMode>,
@@ -2589,13 +3569,15 @@ fn far_mesh_system(
         // Rebuilding happens in a second mesh. The last complete mesh remains
         // visible until the replacement is ready, so crossing a FAR_SNAP
         // boundary can no longer expose the clear color for seven frames.
-        *vis = if show {
+        *vis = if show && fm.active_epoch == epoch.0 {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
-        // 换球/读档：世界种子变化 → 整体重刷
-        if fm.seed != world.seed {
+        // 换球/读档：epoch is authoritative because two planets may share a
+        // seed. Keep the seed too as a defensive generator-version check.
+        if fm.epoch != epoch.0 || fm.seed != world.seed {
+            fm.epoch = epoch.0;
             fm.seed = world.seed;
             fm.target_cx = tcx;
             fm.target_cz = tcz;
@@ -2643,6 +3625,7 @@ fn far_mesh_system(
                 let old_active = fm.active_mesh.clone();
                 fm.active_mesh = fm.staging_mesh.clone();
                 fm.staging_mesh = old_active;
+                fm.active_epoch = fm.epoch;
                 mesh3d.0 = fm.active_mesh.clone();
                 fm.cx = fm.target_cx;
                 fm.cz = fm.target_cz;
@@ -2701,6 +3684,8 @@ fn far_mesh_system(
                 cx: tcx,
                 cz: tcz,
                 seed: world.seed,
+                epoch: epoch.0,
+                active_epoch: epoch.0,
                 row: FAR_N,
                 target_cx: tcx,
                 target_cz: tcz,

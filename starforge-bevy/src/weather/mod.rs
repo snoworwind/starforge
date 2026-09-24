@@ -1,6 +1,15 @@
 //! Planet climate visuals: a depth-aware spherical cloud-shell raymarch,
 //! biome weather particles, and procedural cloud shells visible from space.
 
+mod diag;
+
+#[allow(unused_imports)]
+pub use diag::{
+    CLOUD_DIAGNOSTICS_SCHEMA_VERSION, CloudDebug, CloudDebugMode, CloudDiagnostics, DensityStats,
+    FACE_CULL_MARGIN, ShellIntervals, ShellRegion, ShellSegment, composite_premultiplied,
+    density_remap, density_threshold, ray_sphere, shell_intervals, truncate_to_scene,
+};
+
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::ecs::system::SystemParam;
@@ -14,9 +23,9 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use crate::player::Player;
 use crate::save::Settings;
 use crate::space::{FlightMode, SpaceScene};
+use crate::visual::{CelestialLighting, ResolvedQuality, VisualFrame};
 use crate::world::World;
 
 const CLOUD_BOTTOM: f32 = crate::planet_scale::PLANET_SCALE.cloud_bottom;
@@ -81,17 +90,9 @@ impl CloudTuning {
     }
 
     pub fn sanitize(&mut self) {
-        self.coverage = if self.coverage.is_finite() {
-            self.coverage.clamp(0.0, 1.0)
-        } else {
-            0.61
-        };
-        self.density = if self.density.is_finite() {
-            self.density.clamp(0.0, 1.0)
-        } else {
-            0.09
-        };
-        self.raymarch_steps = self.raymarch_steps.clamp(4, 64);
+        // A05: the runtime panel and the settings file share one registry, so
+        // a slider can never accept a value the loader would reject.
+        crate::visual::sanitize_cloud_tuning(self, None);
     }
 }
 
@@ -111,6 +112,8 @@ pub struct CloudShellUniform {
     pub quality: Vec4,
     /// xy = periodic wind offset.
     pub wind: Vec4,
+    /// x = E01 debug view (0 = shipping path), y = debug scale, zw reserved.
+    pub debug: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -174,11 +177,73 @@ pub struct SpaceCloud {
 
 #[derive(Resource, Default)]
 pub struct ClimateRuntime {
-    fingerprint: Option<(u32, &'static str, bool, bool)>,
+    fingerprint: Option<(u64, u32, &'static str, bool, bool)>,
     elapsed: f32,
     density: Option<Handle<Image>>,
     material: Option<Handle<CloudShellMaterial>>,
     volume: Option<Entity>,
+    density_stats: DensityStats,
+}
+
+impl ClimateRuntime {
+    pub(crate) fn lifecycle_owned_handles(&self) -> usize {
+        usize::from(self.density.is_some()) + usize::from(self.material.is_some())
+    }
+
+    fn release_after_world(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<CloudShellMaterial>,
+    ) {
+        if let Some(handle) = self.density.take() {
+            images.remove(&handle);
+        }
+        if let Some(handle) = self.material.take() {
+            materials.remove(&handle);
+        }
+        self.fingerprint = None;
+        self.elapsed = 0.0;
+        self.volume = None;
+    }
+}
+
+fn cleanup_climate_runtime(
+    mut runtime: ResMut<ClimateRuntime>,
+    mut rain: ResMut<RainAudio>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<CloudShellMaterial>>,
+) {
+    // Flow cleanup despawns every InGame entity first. Drop resource-side
+    // handles here so the asset stores can reclaim planet data while in menu.
+    runtime.release_after_world(&mut images, &mut materials);
+    rain.entity = None;
+}
+
+fn invalidate_climate_after_epoch_change(
+    epoch: Res<crate::visual::WorldEpoch>,
+    mut runtime: ResMut<ClimateRuntime>,
+    mut rain: ResMut<RainAudio>,
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<CloudShellMaterial>>,
+    stale_entities: Query<Entity, Or<(With<CloudVolume>, With<WeatherParticle>)>>,
+) {
+    let stale = runtime
+        .fingerprint
+        .is_some_and(|fingerprint| fingerprint.0 != epoch.0);
+    if !stale {
+        return;
+    }
+    // Planet switching happens after the regular climate system. Remove the
+    // old shell/precipitation in that same frame instead of showing one frame
+    // from the previous planet and waiting for next frame's fingerprint pass.
+    for entity in &stale_entities {
+        commands.entity(entity).despawn();
+    }
+    if let Some(entity) = rain.entity.take() {
+        commands.entity(entity).despawn();
+    }
+    runtime.release_after_world(&mut images, &mut materials);
 }
 
 /// Background rain loop owned by the current in-game climate.
@@ -190,14 +255,23 @@ pub struct RainAudio {
 /// Play the exterior city-rain bed while weather is visible on the ground.
 /// It is deliberately non-spatial so it follows the player as ambience.
 pub fn rain_audio_system(
-    settings: Res<Settings>,
+    quality: Res<ResolvedQuality>,
     mode: Res<FlightMode>,
     world: Option<Res<World>>,
+    storm: Res<crate::storms::StormState>,
     mut rain: ResMut<RainAudio>,
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
 ) {
-    let raining = world.is_some() && settings.weather && mode.ground_scene();
+    let raining = world.as_deref().is_some_and(|world| {
+        quality.weather.effective
+            && matches!(*mode, FlightMode::Planet | FlightMode::Seated)
+            && precipitation_active(world.biome().key, storm.kind)
+            && matches!(
+                world.biome().key,
+                "lush" | "ocean" | "murk" | "fungal" | "amber"
+            )
+    });
     if raining && rain.entity.is_none() {
         rain.entity = Some(crate::audio::play_loop(
             &mut commands,
@@ -244,6 +318,18 @@ fn weather_def(key: &str) -> WeatherDef {
     }
 }
 
+/// Climate particles follow a visible weather event. The setting only
+/// controls whether the effect may render; it does not itself mean rain.
+fn precipitation_active(biome: &str, storm: crate::storms::StormKind) -> bool {
+    use crate::storms::StormKind;
+    match biome {
+        "desert" | "salt" => storm == StormKind::Sandstorm,
+        "frozen" | "crystal" => storm == StormKind::Aurora,
+        "alien" | "redmoss" | "hive" => storm == StormKind::MeteorShower,
+        _ => storm == StormKind::Lightning,
+    }
+}
+
 fn particle_position(world: &World, player: Vec3, index: u32, generation: u32) -> Vec3 {
     let mut rng = crate::rng::Rng::new(
         world.seed ^ index.wrapping_mul(0x9E37_79B9) ^ generation.wrapping_mul(0x85EB_CA6B),
@@ -254,12 +340,6 @@ fn particle_position(world: &World, player: Vec3, index: u32, generation: u32) -
     Vec3::new(x, floor.max(player.y - 4.0) + 20.0 + rng.next() * 22.0, z)
 }
 
-type CloudSunFilter = (
-    With<crate::daynight::Sun>,
-    Without<CloudVolume>,
-    Without<WeatherParticle>,
-);
-
 #[derive(SystemParam)]
 pub struct ClimateAssets<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
@@ -268,34 +348,37 @@ pub struct ClimateAssets<'w> {
     cloud_materials: ResMut<'w, Assets<CloudShellMaterial>>,
 }
 
-fn sun_parameters(
-    sun: &Query<(&Transform, &DirectionalLight), CloudSunFilter>,
-) -> (Vec3, f32, Vec3) {
-    let Ok((transform, light)) = sun.single() else {
-        return (Vec3::new(0.25, 0.85, 0.35).normalize(), 1.0, Vec3::ONE);
-    };
-    // DirectionalLight travels along local -Z, so the direction toward the sun is +Z.
-    let direction_to_sun = (transform.rotation * Vec3::Z).normalize_or_zero();
-    let color = light.color.to_linear();
+/// Cloud shader inputs from the shared celestial snapshot: direction toward
+/// the sun, normalized energy and linear color.
+fn cloud_sun(light: &CelestialLighting) -> (Vec3, f32, Vec3) {
     (
-        direction_to_sun,
-        (light.illuminance / 120_000.0).clamp(0.0, 2.0),
-        Vec3::new(color.red, color.green, color.blue),
+        light.to_sun_direction,
+        light.cloud_energy(),
+        Vec3::new(
+            light.sun_color.red,
+            light.sun_color.green,
+            light.sun_color.blue,
+        ),
     )
 }
 
-/// Rebuilds planet-dependent climate assets and updates the spherical cloud shell.
+/// A02 consumer: the cloud shell reads the shared camera/planet snapshot and
+/// the celestial-light snapshot instead of querying the sun and player again.
+/// This removes the old `direction_to_sun` recomputation that could disagree
+/// with the actual directional light (R043).
 #[allow(clippy::too_many_arguments)]
 pub fn climate_system(
     time: Res<Time>,
-    settings: Res<Settings>,
+    quality: Res<ResolvedQuality>,
     mode: Res<FlightMode>,
     tuning: Res<CloudTuning>,
+    debug: Res<CloudDebug>,
     world: Res<World>,
-    player: Query<&Player>,
-    visual_frame: Res<crate::planet_scale::PlanetVisualFrame>,
+    storm: Res<crate::storms::StormState>,
+    epoch: Res<crate::visual::WorldEpoch>,
+    frame: Res<VisualFrame>,
+    light: Res<CelestialLighting>,
     clear: Res<ClearColor>,
-    sun: Query<(&Transform, &DirectionalLight), CloudSunFilter>,
     mut runtime: ResMut<ClimateRuntime>,
     mut commands: Commands,
     mut assets: ClimateAssets,
@@ -313,12 +396,17 @@ pub fn climate_system(
         Without<CloudVolume>,
     >,
 ) {
-    let Ok(player) = player.single() else { return };
+    let show_weather = quality.weather.effective
+        && matches!(*mode, FlightMode::Planet | FlightMode::Seated)
+        && precipitation_active(world.biome().key, storm.kind);
+    // Fingerprint the *effective* flags so a capability downgrade despawns the
+    // previous climate assets instead of leaving a half-updated scene.
     let fingerprint = (
+        epoch.0,
         world.seed,
         world.biome().key,
-        settings.clouds,
-        settings.weather,
+        quality.clouds.effective,
+        quality.weather.effective,
     );
     if runtime.fingerprint != Some(fingerprint) {
         for (entity, _, _, _) in &particles {
@@ -332,19 +420,20 @@ pub fn climate_system(
         runtime.density = None;
         runtime.material = None;
         runtime.volume = None;
+        runtime.density_stats = DensityStats::default();
 
-        if settings.clouds {
-            let density = assets
-                .images
-                .add(make_cloud_density_texture(world.seed, world.biome().key));
-            let (sun_direction, sun_energy, sun_color) = sun_parameters(&sun);
+        if quality.clouds.effective {
+            let (density_image, stats) = make_cloud_density_texture(world.seed, world.biome().key);
+            let density = assets.images.add(density_image);
+            runtime.density_stats = stats;
+            let (sun_direction, sun_energy, sun_color) = cloud_sun(&light);
             let sky = clear.0.to_linear();
             let material = assets.cloud_materials.add(CloudShellMaterial {
                 params: CloudShellUniform {
-                    center_radius: visual_frame.center.extend(visual_frame.radius),
+                    center_radius: frame.planet.center.extend(frame.planet.radius),
                     shell: Vec4::new(
-                        visual_frame.radius + CLOUD_BOTTOM,
-                        visual_frame.radius + CLOUD_TOP,
+                        frame.planet.radius + CLOUD_BOTTOM,
+                        frame.planet.radius + CLOUD_TOP,
                         CLOUD_WIDTH,
                         0.0,
                     ),
@@ -358,17 +447,17 @@ pub fn climate_system(
                         0.72,
                     ),
                     wind: Vec4::ZERO,
+                    debug: Vec4::new(debug.mode.shader_mode() as f32, 1.0, 0.0, 0.0),
                 },
                 density: density.clone(),
             });
-            let volume =
-                spawn_cloud_volume(&mut commands, &mut assets.meshes, &material, &visual_frame);
+            let volume = spawn_cloud_volume(&mut commands, &mut assets.meshes, &material, &frame);
             runtime.density = Some(density);
             runtime.material = Some(material);
             runtime.volume = Some(volume);
         }
 
-        if settings.weather {
+        if quality.weather.effective {
             let def = weather_def(world.biome().key);
             let mesh = assets
                 .meshes
@@ -385,11 +474,16 @@ pub fn climate_system(
                 commands.spawn((
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(material.clone()),
-                    Transform::from_translation(particle_position(&world, player.pos, index, 0)),
+                    Transform::from_translation(particle_position(&world, frame.eye, index, 0)),
                     WeatherParticle {
                         speed: def.speed,
                         index,
                         generation: 0,
+                    },
+                    if show_weather {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
                     },
                     crate::InGame,
                 ));
@@ -400,27 +494,27 @@ pub fn climate_system(
 
     let dt = time.delta_secs();
     runtime.elapsed += dt;
-    let show_clouds = settings.clouds && mode.ground_scene();
+    let show_clouds = quality.clouds.effective && mode.ground_scene();
 
-    if mode.ground_scene() && runtime.volume.is_none() && settings.clouds {
+    if mode.ground_scene() && runtime.volume.is_none() && quality.clouds.effective {
         let density = match runtime.density.clone() {
             Some(d) => d,
             None => {
-                let d = assets
-                    .images
-                    .add(make_cloud_density_texture(world.seed, world.biome().key));
+                let (image, stats) = make_cloud_density_texture(world.seed, world.biome().key);
+                runtime.density_stats = stats;
+                let d = assets.images.add(image);
                 runtime.density = Some(d.clone());
                 d
             }
         };
-        let (sun_direction, sun_energy, sun_color) = sun_parameters(&sun);
+        let (sun_direction, sun_energy, sun_color) = cloud_sun(&light);
         let sky = clear.0.to_linear();
         let material = assets.cloud_materials.add(CloudShellMaterial {
             params: CloudShellUniform {
-                center_radius: visual_frame.center.extend(visual_frame.radius),
+                center_radius: frame.planet.center.extend(frame.planet.radius),
                 shell: Vec4::new(
-                    visual_frame.radius + CLOUD_BOTTOM,
-                    visual_frame.radius + CLOUD_TOP,
+                    frame.planet.radius + CLOUD_BOTTOM,
+                    frame.planet.radius + CLOUD_TOP,
                     CLOUD_WIDTH,
                     runtime.elapsed,
                 ),
@@ -434,6 +528,7 @@ pub fn climate_system(
                     0.72,
                 ),
                 wind: Vec4::ZERO,
+                debug: Vec4::new(debug.mode.shader_mode() as f32, 1.0, 0.0, 0.0),
             },
             density,
         });
@@ -441,12 +536,10 @@ pub fn climate_system(
             &mut commands,
             &mut assets.meshes,
             &material,
-            &visual_frame,
+            &frame,
         ));
         runtime.material = Some(material);
     }
-
-    let show_weather = settings.weather && matches!(*mode, FlightMode::Planet | FlightMode::Seated);
 
     // Wind: scroll the repeating density texture in UV space. The texture is
     // toroidal, so the drift wraps around seamlessly.
@@ -456,7 +549,7 @@ pub fn climate_system(
         runtime.elapsed * WIND_UV_PER_SEC * 0.15,
     );
     let sky = clear.0.to_linear();
-    let (sun_direction, sun_energy, sun_color) = sun_parameters(&sun);
+    let (sun_direction, sun_energy, sun_color) = cloud_sun(&light);
     if let Some(mut material) = runtime
         .material
         .as_ref()
@@ -466,12 +559,12 @@ pub fn climate_system(
             - crate::planet_scale::smoothstep(
                 crate::planet_scale::PLANET_SCALE.sky_space_fade_start,
                 crate::planet_scale::PLANET_SCALE.sky_space_fade_end,
-                player.eye().y,
+                frame.eye.y,
             );
-        material.params.center_radius = visual_frame.center.extend(visual_frame.radius);
+        material.params.center_radius = frame.planet.center.extend(frame.planet.radius);
         material.params.shell = Vec4::new(
-            visual_frame.radius + CLOUD_BOTTOM,
-            visual_frame.radius + CLOUD_TOP,
+            frame.planet.radius + CLOUD_BOTTOM,
+            frame.planet.radius + CLOUD_TOP,
             CLOUD_WIDTH,
             runtime.elapsed,
         );
@@ -485,12 +578,15 @@ pub fn climate_system(
             0.72,
         );
         material.params.wind = wind.extend(0.0);
+        // E01: the debug view is read from the uniform every frame so a switch
+        // does not rebuild the material or the density asset.
+        material.params.debug = Vec4::new(debug.mode.shader_mode() as f32, 1.0, 0.0, 0.0);
     }
     for (entity, mut transform, mut visibility) in &mut volume_clouds {
         if runtime.volume != Some(entity) {
             continue;
         }
-        transform.translation = visual_frame.center;
+        transform.translation = frame.planet.center;
         *visibility = if show_clouds {
             Visibility::Visible
         } else {
@@ -516,29 +612,94 @@ pub fn climate_system(
         if transform.translation.y < floor {
             particle.generation = particle.generation.wrapping_add(1);
             transform.translation =
-                particle_position(&world, player.pos, particle.index, particle.generation);
+                particle_position(&world, frame.eye, particle.index, particle.generation);
         }
     }
+}
+
+/// E01: publish the settings truth check and the center-ray interval model
+/// every frame. Values are read back from the live material uniform, so the
+/// report cannot claim a request that the shader is not using (R061/R117).
+pub fn collect_cloud_diagnostics(
+    frame: Res<VisualFrame>,
+    runtime: Res<ClimateRuntime>,
+    tuning: Res<CloudTuning>,
+    debug: Res<CloudDebug>,
+    world: Option<Res<World>>,
+    materials: Res<Assets<CloudShellMaterial>>,
+    mut diagnostics: ResMut<CloudDiagnostics>,
+) {
+    let shell_inner = crate::planet_scale::PLANET_SCALE.cloud_bottom;
+    let shell_outer = crate::planet_scale::PLANET_SCALE.cloud_top;
+    let inner_radius = frame.planet.radius + shell_inner;
+    let outer_radius = frame.planet.radius + shell_outer;
+    let center_ray = shell_intervals(
+        frame.eye,
+        frame.forward,
+        frame.planet.center,
+        inner_radius,
+        outer_radius,
+    );
+    let effective = runtime
+        .material
+        .as_ref()
+        .and_then(|handle| materials.get(handle))
+        .map(|material| {
+            (
+                material.params.quality.x,
+                material.params.quality.y,
+                material.params.quality.z as u32,
+            )
+        });
+    let (coverage_effective, density_effective, steps_effective) = effective.unwrap_or_default();
+
+    diagnostics.cloud_active = effective.is_some();
+    diagnostics.biome = world
+        .as_deref()
+        .map(|world| world.biome().key.to_string())
+        .unwrap_or_default();
+    diagnostics.world_seed = world.as_deref().map(|world| world.seed).unwrap_or(0);
+    diagnostics.coverage_requested = tuning.coverage;
+    diagnostics.density_requested = tuning.density;
+    diagnostics.steps_requested = tuning.raymarch_steps;
+    diagnostics.coverage_effective = coverage_effective;
+    diagnostics.density_effective = density_effective;
+    diagnostics.steps_effective = steps_effective;
+    diagnostics.legacy_render_resolution = [tuning.render_resolution.x, tuning.render_resolution.y];
+    diagnostics.effective_render_resolution = [frame.viewport.x, frame.viewport.y];
+    diagnostics.render_resolution_inert = true;
+    diagnostics.shell_inner_altitude = shell_inner;
+    diagnostics.shell_outer_altitude = shell_outer;
+    diagnostics.center_ray = center_ray;
+    diagnostics.density_stats = runtime.density_stats;
+    diagnostics.debug_mode = debug.mode.key().to_string();
+    diagnostics.notes = vec![
+        "density stats are computed once, when the 3D texture is built".to_string(),
+        "the single-interval shader drops `far` when the ray crosses the cloud bottom; E04 decides whether to march it"
+            .to_string(),
+        "cloud_render_width/height are legacy save fields and do not resize any render target (R061)"
+            .to_string(),
+    ];
 }
 
 fn spawn_cloud_volume(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: &Handle<CloudShellMaterial>,
-    frame: &crate::planet_scale::PlanetVisualFrame,
+    frame: &VisualFrame,
 ) -> Entity {
     commands
         .spawn((
             Mesh3d(
                 meshes.add(
-                    Sphere::new(frame.radius + CLOUD_TOP + 16.0)
+                    Sphere::new(frame.planet.radius + CLOUD_TOP + 16.0)
                         .mesh()
                         .ico(5)
                         .expect("cloud shell sphere"),
                 ),
             ),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(frame.center),
+            Transform::from_translation(frame.planet.center),
             Visibility::Visible,
             NoFrustumCulling,
             CloudVolume,
@@ -586,7 +747,10 @@ fn repeat_sampler() -> ImageSampler {
 /// the wind scroll free of seams. Coverage comes from 2D Worley FBM in the
 /// x/z plane (a few large weather systems), erosion from 3D Worley FBM, and a
 /// vertical profile makes the deck soft at the bottom and top.
-fn make_cloud_density_texture(seed: u32, biome: &str) -> Image {
+///
+/// Returns the texture plus its statistics (E01): scanning the bytes here is
+/// free compared to rescanning 1.2M voxels every frame for diagnostics.
+fn make_cloud_density_texture(seed: u32, biome: &str) -> (Image, DensityStats) {
     let biome_seed = seed
         ^ biome.bytes().fold(0u32, |value, byte| {
             value.wrapping_mul(33).wrapping_add(byte as u32)
@@ -616,6 +780,7 @@ fn make_cloud_density_texture(seed: u32, biome: &str) -> Image {
             }
         }
     }
+    let stats = DensityStats::from_bytes(&bytes);
     let mut image = Image::new(
         Extent3d {
             width: DENSITY_W,
@@ -628,7 +793,7 @@ fn make_cloud_density_texture(seed: u32, biome: &str) -> Image {
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = repeat_sampler();
-    image
+    (image, stats)
 }
 
 #[inline]
@@ -807,7 +972,7 @@ fn cloud_texture(images: &mut Assets<Image>, key: &str, seed: u32) -> Handle<Ima
 #[allow(clippy::too_many_arguments)]
 pub fn space_cloud_system(
     time: Res<Time>,
-    settings: Res<Settings>,
+    quality: Res<ResolvedQuality>,
     scene: Option<Res<SpaceScene>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -816,7 +981,7 @@ pub fn space_cloud_system(
     existing: Query<(Entity, &SpaceCloud)>,
     mut clouds: Query<(&SpaceCloud, &mut Transform)>,
 ) {
-    if !settings.clouds {
+    if !quality.clouds.effective {
         for (entity, _) in &existing {
             commands.entity(entity).despawn();
         }
@@ -896,10 +1061,13 @@ impl Plugin for WeatherPlugin {
             .insert_resource(self.cloud)
             .init_resource::<ClimateRuntime>()
             .init_resource::<RainAudio>()
+            .init_resource::<CloudDebug>()
+            .init_resource::<CloudDiagnostics>()
             .add_systems(
                 Update,
-                (climate_system, rain_audio_system)
+                (climate_system, rain_audio_system, collect_cloud_diagnostics)
                     .chain()
+                    .after(crate::storms::storm_director_system)
                     .in_set(crate::schedule::GameSet::CommonWeather)
                     .run_if(in_state(crate::schedule::GameState::Playing)),
             )
@@ -909,10 +1077,20 @@ impl Plugin for WeatherPlugin {
                 space_cloud_system.run_if(in_state(crate::schedule::GameState::Playing)),
             )
             .add_systems(
+                Update,
+                invalidate_climate_after_epoch_change
+                    .after(crate::schedule::GameSet::LateSwitchFlow)
+                    .run_if(in_state(crate::schedule::GameState::Playing)),
+            )
+            .add_systems(
                 PostUpdate,
                 sync_cloud_visual_frame
                     .after(crate::planet_scale::update_visual_frame)
                     .before(bevy::transform::TransformSystems::Propagate),
+            )
+            .add_systems(
+                OnExit(crate::schedule::GameState::Playing),
+                cleanup_climate_runtime,
             );
     }
 }

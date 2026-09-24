@@ -18,6 +18,7 @@ use std::collections::HashMap;
 #[derive(Resource, Default)]
 pub struct UiState {
     pub panel: Panel,
+    pub frontier_tab: usize,
     pub prompt: Option<String>,
     pub selected_inv: Option<usize>,
     /// 背包拖拽手持物品（JS cursorStack 移植）
@@ -60,6 +61,14 @@ pub enum Panel {
     Station,
     /// 空间站买船中心（停泊服务菜单进入）
     BuyShip,
+    /// 边疆公会（L）：委托、远征、调查、里程碑。
+    Frontier,
+    /// 星际图鉴（K）：方块/物品/生态/生物/机器收录。
+    Codex,
+    /// 成就（J）。
+    Achievements,
+    /// 摄影模式（F2）。
+    Photo,
 }
 
 impl UiState {
@@ -256,6 +265,7 @@ pub fn research_system(
     mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
     mut commands: Commands,
     sfx: Res<audio::Sfx>,
+    mut screen: Option<ResMut<crate::screen_fx::ScreenFx>>,
 ) {
     let mut completed: Option<String> = None;
     if let Some((id, prog)) = research.active.as_mut() {
@@ -280,6 +290,9 @@ pub fn research_system(
             if let Ok(mut p) = player.single_mut() {
                 p.toast(format!("科技解锁：{}", tech.name));
             }
+            if let Some(screen) = screen.as_deref_mut() {
+                screen.level_up();
+            }
         }
     }
 }
@@ -296,7 +309,6 @@ pub fn hud_system(
     time: Res<Time>,
     settings: Res<Settings>,
     space: Res<crate::daynight::SpaceFactor>,
-    day: Res<crate::daynight::DayTime>,
     mode: Res<crate::space::FlightMode>,
     ship: Option<Res<crate::space::ShipState>>,
     game: Option<Res<crate::space::SpaceGame>>,
@@ -315,6 +327,35 @@ pub fn hud_system(
     let screen = ctx.content_rect();
     let flying =
         *mode != crate::space::FlightMode::Planet && *mode != crate::space::FlightMode::Seated;
+    let mut contextual_bars = Vec::new();
+    if p.in_liquid || p.stats.o2 < 82.0 {
+        contextual_bars.push((
+            "氧气",
+            p.stats.o2,
+            egui::Color32::from_rgb(0x5b, 0xc0, 0xff),
+        ));
+    }
+    if p.stats.haz < 82.0 {
+        contextual_bars.push((
+            "防护",
+            p.stats.haz,
+            egui::Color32::from_rgb(0xff, 0xb3, 0x47),
+        ));
+    }
+    if !p.on_ground && p.stats.jet < 82.0 {
+        contextual_bars.push((
+            "喷气",
+            p.stats.jet,
+            egui::Color32::from_rgb(0xff, 0xb3, 0x47),
+        ));
+    }
+    if p.hot_idx == -1 && p.stats.laser < 82.0 {
+        contextual_bars.push((
+            "激光",
+            p.stats.laser,
+            egui::Color32::from_rgb(0xff, 0x6a, 0x4d),
+        ));
+    }
 
     // crosshair
     egui::Area::new(egui::Id::new("crosshair"))
@@ -384,25 +425,38 @@ pub fn hud_system(
             });
         });
 
-    // vitals top-left（JS 段条/细条移植）
+    // Compact vitals panel: keep health/shield visible and reveal other meters
+    // only when their resource is currently relevant.
+    let vitals_height = 100.0 + contextual_bars.len() as f32 * 12.0;
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("vitals_backing"),
+    ))
+    .rect_filled(
+        egui::Rect::from_min_size(egui::pos2(8.0, 7.0), egui::vec2(258.0, vitals_height)),
+        egui::CornerRadius::same(8),
+        egui::Color32::from_rgba_unmultiplied(7, 13, 20, 190),
+    );
     egui::Area::new(egui::Id::new("vitals"))
         .fixed_pos(egui::pos2(12.0, 10.0))
         .interactable(false)
         .show(ctx, |ui| {
             {
                 let painter = ui.painter();
+                let origin = egui::pos2(12.0, 10.0);
+                let at = |x: f32, y: f32| origin + egui::vec2(x, y);
                 let bar_x = 44.0;
                 // 护盾段条（6 段）
                 painter.text(
-                    egui::pos2(0.0, 2.0),
+                    at(0.0, 2.0),
                     egui::Align2::LEFT_TOP,
                     "护盾",
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0xb8, 0xc7, 0xd2),
                 );
                 for i in 0..6 {
                     let r = egui::Rect::from_min_size(
-                        egui::pos2(bar_x + i as f32 * 14.0, 0.0),
+                        at(bar_x + i as f32 * 14.0, 0.0),
                         egui::vec2(12.0, 12.0),
                     );
                     let on = p.stats.shield as i32 > i;
@@ -418,15 +472,15 @@ pub fn hud_system(
                 }
                 // 生命段条（8 段）
                 painter.text(
-                    egui::pos2(0.0, 18.0),
+                    at(0.0, 18.0),
                     egui::Align2::LEFT_TOP,
                     "生命",
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0xb8, 0xc7, 0xd2),
                 );
                 for i in 0..8 {
                     let r = egui::Rect::from_min_size(
-                        egui::pos2(bar_x + i as f32 * 11.0, 16.0),
+                        at(bar_x + i as f32 * 11.0, 16.0),
                         egui::vec2(9.0, 12.0),
                     );
                     let on = p.stats.hp as i32 > i;
@@ -440,47 +494,22 @@ pub fn hud_system(
                         },
                     );
                 }
-                // 细条：氧气/防护/喷气/激光
-                for (label, val, color, y) in [
-                    (
-                        "氧气",
-                        p.stats.o2,
-                        egui::Color32::from_rgb(0x5b, 0xc0, 0xff),
-                        32.0,
-                    ),
-                    (
-                        "防护",
-                        p.stats.haz,
-                        egui::Color32::from_rgb(0xff, 0xb3, 0x47),
-                        44.0,
-                    ),
-                    (
-                        "喷气",
-                        p.stats.jet,
-                        egui::Color32::from_rgb(0xff, 0xb3, 0x47),
-                        56.0,
-                    ),
-                    (
-                        "激光",
-                        p.stats.laser,
-                        egui::Color32::from_rgb(0xff, 0x6a, 0x4d),
-                        68.0,
-                    ),
-                ] {
+                let mut y = 32.0;
+                for (label, val, color) in &contextual_bars {
                     painter.text(
-                        egui::pos2(0.0, y + 1.0),
+                        at(0.0, y + 1.0),
                         egui::Align2::LEFT_TOP,
                         label,
-                        egui::FontId::proportional(10.0),
-                        egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(0xb8, 0xc7, 0xd2),
                     );
-                    let r = egui::Rect::from_min_size(egui::pos2(bar_x, y), egui::vec2(170.0, 6.0));
+                    let r = egui::Rect::from_min_size(at(bar_x, y), egui::vec2(170.0, 6.0));
                     painter.rect_filled(
                         r,
                         egui::CornerRadius::same(2),
                         egui::Color32::from_rgb(0x12, 0x32, 0x4a),
                     );
-                    let w = (170.0 * (val / 100.0).clamp(0.0, 1.0)).max(if val > 0.0 {
+                    let w = (170.0 * (*val / 100.0).clamp(0.0, 1.0)).max(if *val > 0.0 {
                         2.0
                     } else {
                         0.0
@@ -488,27 +517,18 @@ pub fn hud_system(
                     painter.rect_filled(
                         egui::Rect::from_min_size(r.min, egui::vec2(w, 6.0)),
                         egui::CornerRadius::same(2),
-                        color,
+                        *color,
                     );
+                    y += 12.0;
                 }
             }
-            ui.add_space(80.0);
+            ui.add_space(34.0 + contextual_bars.len() as f32 * 12.0);
             if let Some(g) = game.as_ref() {
                 ui.label(
                     egui::RichText::new(format!("₪ {}   ·   {}", p.credits, g.galaxy.name))
-                        .size(14.0)
+                        .size(13.0)
                         .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
                 );
-                if !flying {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "第 {} 颗星球 · 已到访 {}",
-                            g.galaxy.planets.len(),
-                            g.galaxy_count
-                        ))
-                        .size(13.0),
-                    );
-                }
             }
             if let Some(w) = world.as_ref() {
                 let b = w.biome();
@@ -519,87 +539,136 @@ pub fn hud_system(
                 };
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} {}  ({:.0}, {:.0}, {:.0})",
-                        b.name, haz, p.pos.x, p.pos.y, p.pos.z
+                        "{}{}",
+                        b.name,
+                        if p.stats.haz < 82.0 {
+                            format!(" · {haz}")
+                        } else {
+                            String::new()
+                        }
                     ))
-                    .size(13.0),
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0xc9, 0xd5, 0xde)),
                 );
             }
-            let hh = (day.0 * 24.0) as i32;
-            let mm = ((day.0 * 24.0 * 60.0) as i32) % 60;
-            ui.label(egui::RichText::new(format!("⏰ {:02}:{:02}", hh, mm)).size(13.0));
             if space.0 > 0.01 && !flying {
                 ui.label(
                     egui::RichText::new(format!("🛰 轨道高度 {:.0}%", space.0 * 100.0)).size(13.0),
                 );
             }
-            // 电力
-            ui.label(
-                egui::RichText::new(format!(
-                    "⚡ {} / {:.0} kW",
-                    runtime.power.generation, runtime.power.used
-                ))
-                .size(13.0)
-                .color(if runtime.power.sat < 0.99 {
-                    egui::Color32::from_rgb(0xff, 0x55, 0x55)
-                } else {
-                    egui::Color32::from_rgb(0xff, 0xb3, 0x47)
-                }),
-            );
+            if runtime.power.used > 0.0 || runtime.power.generation > 0.0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "⚡ {} / {:.0} kW",
+                        runtime.power.generation, runtime.power.used
+                    ))
+                    .size(12.0)
+                    .color(if runtime.power.sat < 0.99 {
+                        egui::Color32::from_rgb(0xff, 0x70, 0x65)
+                    } else {
+                        egui::Color32::from_rgb(0xff, 0xd1, 0x66)
+                    }),
+                );
+            }
         });
 
-    // 任务日志 top-right
+    // Keep only the active quest in the persistent view; history belongs in L.
     if let Some(qs) = quests.as_ref() {
         egui::Area::new(egui::Id::new("quests"))
-            .fixed_pos(egui::pos2((screen.max.x - 262.0).max(8.0), 12.0))
+            .fixed_pos(egui::pos2((screen.max.x - 286.0).max(8.0), 7.0))
             .interactable(false)
             .show(ctx, |ui| {
-                ui.set_max_width(254.0_f32.min(screen.width().max(180.0)));
-                ui.label(
-                    egui::RichText::new("◈ 任务日志")
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
-                );
-                let lo = qs.idx.saturating_sub(1);
-                let hi = (qs.idx + 1).min(data::QUESTS.len());
-                for i in lo..hi {
-                    let q = &data::QUESTS[i];
-                    let done = i < qs.idx;
-                    let text = if done {
-                        format!("✓ {}", q.title)
-                    } else if i == qs.idx {
-                        match qs.progress(p) {
-                            Some(pr) => format!("▸ {} · {}", q.title, pr),
-                            None => format!("▸ {}", q.title),
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(7, 13, 20, 192))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(254.0_f32.min((screen.width() - 40.0).max(120.0)));
+                        ui.label(
+                            egui::RichText::new("◈ 任务日志")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+                        );
+                        let lo = qs.idx.min(data::QUESTS.len());
+                        let hi = (lo + 1).min(data::QUESTS.len());
+                        for i in lo..hi {
+                            let q = &data::QUESTS[i];
+                            let done = i < qs.idx;
+                            let text = if done {
+                                format!("✓ {}", q.title)
+                            } else if i == qs.idx {
+                                match qs.progress(p) {
+                                    Some(pr) => format!("▸ {} · {}", q.title, pr),
+                                    None => format!("▸ {}", q.title),
+                                }
+                            } else {
+                                q.title.to_string()
+                            };
+                            let mut rt = egui::RichText::new(text).size(13.0).color(if done {
+                                egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
+                            } else {
+                                egui::Color32::WHITE
+                            });
+                            if done {
+                                rt = rt.strikethrough();
+                            }
+                            ui.label(rt);
                         }
-                    } else {
-                        q.title.to_string()
-                    };
-                    let mut rt = egui::RichText::new(text).size(12.0).color(if done {
-                        egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
-                    } else {
-                        egui::Color32::WHITE
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "L 边疆公会 · {}",
+                                crate::frontier::RANKS[qs.frontier.rank()].0
+                            ))
+                            .size(13.0),
+                        );
+                        if let Some(id) = qs.frontier.tracked.as_deref()
+                            && let Some(route) =
+                                crate::frontier::EXPEDITIONS.iter().find(|r| r.id == id)
+                            && let Some(progress) = qs.frontier.routes.get(id)
+                            && let Some(step) = route.steps.get(progress.stage)
+                        {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "▸ {} · {}/4",
+                                    route.name,
+                                    progress.stage + 1
+                                ))
+                                .size(13.0),
+                            );
+                            let (have, need) =
+                                qs.frontier
+                                    .route_progress(route, p, &qs.placed, &research.techs);
+                            ui.label(
+                                egui::RichText::new(format!("{} · {have}/{need}", step.title))
+                                    .size(13.0),
+                            );
+                        }
+                        let orders = qs.frontier.active.iter().flatten().count();
+                        if orders > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("补给委托：{orders}/3 进行中"))
+                                    .size(13.0),
+                            );
+                        }
+                        if let Some(sq) = &qs.side
+                            && !sq.done
+                        {
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "✦ 村庄委托：{} ×{}（奖励 ₪{}）{}/{}",
+                                    item_name(&sq.item),
+                                    sq.need,
+                                    sq.reward,
+                                    p.inv.count_item(&sq.item).min(sq.need),
+                                    sq.need
+                                ))
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+                            );
+                        }
                     });
-                    if done {
-                        rt = rt.strikethrough();
-                    }
-                    ui.label(rt);
-                }
-                if let Some(sq) = &qs.side {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "✦ 村庄委托：{} ×{}（奖励 ₪{}）{}/{}",
-                            item_name(&sq.item),
-                            sq.need,
-                            sq.reward,
-                            p.inv.count_item(&sq.item).min(sq.need),
-                            sq.need
-                        ))
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
-                    );
-                }
             });
     }
 
@@ -889,10 +958,20 @@ pub fn hud_system(
     if let Some(qs) = quests.as_ref() {
         if let Some(d) = &qs.dialog {
             let cur = &d.lines[d.idx];
-            dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
+            dialog = Some((
+                d.name.clone(),
+                cur.clone(),
+                d.chars as usize,
+                cur.chars().count(),
+            ));
         } else if let Some(d) = &qs.side_dialog {
             let cur = &d.lines[d.idx];
-            dialog = Some((d.name.clone(), cur.clone(), d.chars, cur.chars().count()));
+            dialog = Some((
+                d.name.clone(),
+                cur.clone(),
+                d.chars as usize,
+                cur.chars().count(),
+            ));
         }
     }
     if let Some((name, text, chars, total)) = dialog {
@@ -1071,6 +1150,7 @@ pub fn lighting_panel_system(
 pub fn ship_label_system(
     mut contexts: EguiContexts,
     mode: Res<crate::space::FlightMode>,
+    visual_qa: Option<Res<crate::visual_qa::VisualQaRun>>,
     game: Option<Res<crate::space::SpaceGame>>,
     ship_asset: Res<crate::space::ShipAsset>,
     ui_state: Res<UiState>,
@@ -1078,7 +1158,7 @@ pub fn ship_label_system(
     gt_q: Query<&GlobalTransform>,
     tf_q: Query<&Transform>,
 ) {
-    if *mode != crate::space::FlightMode::Planet || ui_state.locked() {
+    if *mode != crate::space::FlightMode::Planet || ui_state.locked() || visual_qa.is_some() {
         return;
     }
     let Some(game) = game else { return };
@@ -1109,11 +1189,7 @@ pub fn ship_label_system(
     let screen = ctx.content_rect();
     let ppp = ctx.pixels_per_point().max(1.0);
     let pos = egui::pos2(viewport.x / ppp, viewport.y / ppp);
-    if pos.x <= -180.0
-        || pos.x >= screen.width() + 180.0
-        || pos.y <= -60.0
-        || pos.y >= screen.height() + 60.0
-    {
+    if pos.x < 0.0 || pos.x > screen.width() || pos.y < 0.0 || pos.y > screen.height() {
         return;
     }
     let label_width = 300.0_f32.min(screen.width().max(220.0));
@@ -3036,11 +3112,73 @@ pub fn setup_egui(
 
 // ---------- Pause menu ----------
 
+/// Checkbox bound to the resolved quality: unsupported features are disabled,
+/// show the effective (off) value and explain the reason on hover.
+fn resolved_checkbox(
+    ui: &mut egui::Ui,
+    label: &str,
+    requested: &mut bool,
+    resolution: &crate::visual::FeatureResolution,
+) -> bool {
+    let enabled = resolution.supported;
+    let response = ui.add_enabled(enabled, egui::Checkbox::new(requested, label));
+    if !enabled {
+        response.on_hover_text(
+            resolution
+                .reason
+                .clone()
+                .unwrap_or_else(|| "设备不支持".to_string()),
+        );
+        ui.label(
+            egui::RichText::new("设备不支持，已按关闭生效")
+                .size(10.0)
+                .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+        );
+        return false;
+    }
+    response.changed()
+}
+
+/// A05: slider range/label come from the one settings registry, so the UI can
+/// never show a different range than the sanitizer accepts.
+fn setting_slider_f32(key: &str) -> std::ops::RangeInclusive<f32> {
+    crate::visual::spec(key)
+        .map(|spec| spec.slider_range())
+        .unwrap_or(0.0..=1.0)
+}
+
+fn setting_slider_i32(key: &str) -> std::ops::RangeInclusive<i32> {
+    crate::visual::spec(key)
+        .map(|spec| spec.min as i32..=spec.max as i32)
+        .unwrap_or(0..=1)
+}
+
+fn setting_slider_u32(key: &str) -> std::ops::RangeInclusive<u32> {
+    crate::visual::spec(key)
+        .map(|spec| spec.min as u32..=spec.max as u32)
+        .unwrap_or(0..=1)
+}
+
+fn setting_label(key: &str) -> String {
+    crate::visual::spec(key)
+        .map(|spec| {
+            if spec.unit.is_empty() {
+                spec.label.to_string()
+            } else {
+                format!("{} ({})", spec.label, spec.unit)
+            }
+        })
+        .unwrap_or_else(|| key.to_string())
+}
+
 pub fn pause_panel_system(
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UiState>,
     mut settings: ResMut<Settings>,
     mut cloud_tuning: ResMut<crate::weather::CloudTuning>,
+    mut lighting: ResMut<crate::daynight::LightingTuning>,
+    quality: Res<crate::visual::ResolvedQuality>,
+    diagnostics: Res<crate::visual::VisualDiagnostics>,
     world: Option<ResMut<World>>,
     player: Query<&Player>,
     research: Res<Research>,
@@ -3081,16 +3219,58 @@ pub fn pause_panel_system(
                 do_save = true;
             }
             ui.add_space(8.0);
+            let mut view_dist_changed = false;
             ui.horizontal(|ui| {
-                ui.label("渲染距离 (区块)");
+                ui.label(setting_label("view_dist"));
                 if ui
-                    .add(egui::Slider::new(&mut settings.view_dist, 3..=16))
+                    .add(egui::Slider::new(
+                        &mut settings.view_dist,
+                        setting_slider_i32("view_dist"),
+                    ))
                     .changed()
-                    && let Some(mut w) = world
                 {
-                    w.view_dist = settings.view_dist;
+                    view_dist_changed = true;
                 }
             });
+            let mut preset = crate::visual::detect_visual_preset(&settings);
+            ui.horizontal(|ui| {
+                ui.label("画质预设");
+                egui::ComboBox::from_id_salt("visual_preset")
+                    .selected_text(preset.label())
+                    .show_ui(ui, |ui| {
+                        for option in crate::visual::VisualPreset::SELECTABLE {
+                            if ui
+                                .selectable_label(preset == option, option.label())
+                                .clicked()
+                            {
+                                crate::visual::apply_visual_preset(&mut settings, option);
+                                *cloud_tuning =
+                                    crate::weather::CloudTuning::from_settings(&settings);
+                                view_dist_changed = true;
+                                preset = option;
+                                let _ = crate::save::save_settings(&settings);
+                            }
+                        }
+                    });
+                if preset == crate::visual::VisualPreset::Custom {
+                    ui.label(
+                        egui::RichText::new("手动调整")
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+            if ui
+                .button("恢复默认画质")
+                .on_hover_text("重置渲染距离/云/光照调参，保留音量与灵敏度")
+                .clicked()
+            {
+                crate::visual::reset_visual_settings(&mut settings);
+                *cloud_tuning = crate::weather::CloudTuning::from_settings(&settings);
+                *lighting = settings.lighting;
+                view_dist_changed = true;
+                let _ = crate::save::save_settings(&settings);
+            }
             let mut hierarchical = settings.lod_mode == crate::save::LodMode::Hierarchical;
             if ui
                 .checkbox(&mut hierarchical, "层级体素远景（Voxy 模式）")
@@ -3104,19 +3284,50 @@ pub fn pause_panel_system(
                 let _ = crate::save::save_settings(&settings);
             }
             ui.horizontal(|ui| {
-                ui.label("鼠标灵敏度");
-                ui.add(egui::Slider::new(&mut settings.mouse_sens, 0.3..=2.5));
+                ui.label(setting_label("mouse_sens"));
+                ui.add(egui::Slider::new(
+                    &mut settings.mouse_sens,
+                    setting_slider_f32("mouse_sens"),
+                ));
             });
             ui.horizontal(|ui| {
                 ui.label("音量");
                 if ui
-                    .add(egui::Slider::new(&mut settings.volume, 0.0..=1.0))
+                    .add(egui::Slider::new(
+                        &mut settings.volume,
+                        setting_slider_f32("volume"),
+                    ))
                     .changed()
                 {
                     crate::audio::set_master_volume(settings.volume);
                     let _ = crate::save::save_settings(&settings);
                 }
             });
+            let mut audio_changed = false;
+            audio_changed |= ui.checkbox(&mut settings.music, "程序化音乐").changed();
+            ui.add_enabled_ui(settings.music, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(setting_label("music_volume"));
+                    audio_changed |= ui
+                        .add(egui::Slider::new(
+                            &mut settings.music_volume,
+                            setting_slider_f32("music_volume"),
+                        ))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label(setting_label("ambience_volume"));
+                    audio_changed |= ui
+                        .add(egui::Slider::new(
+                            &mut settings.ambience_volume,
+                            setting_slider_f32("ambience_volume"),
+                        ))
+                        .changed();
+                });
+            });
+            if audio_changed {
+                let _ = crate::save::save_settings(&settings);
+            }
             ui.checkbox(&mut settings.show_fps, "显示 FPS");
             if ui
                 .checkbox(&mut settings.pixelated, "像素风渲染（重启生效）")
@@ -3124,42 +3335,106 @@ pub fn pause_panel_system(
             {
                 let _ = crate::save::save_settings(&settings);
             }
+            // A03: toggles show the resolved state, not the raw request. An
+            // unsupported feature is disabled and explains the fallback.
             let mut climate_changed = false;
-            climate_changed |= ui.checkbox(&mut settings.clouds, "体积云层").changed();
-            climate_changed |= ui.checkbox(&mut settings.weather, "生态天气粒子").changed();
+            climate_changed |=
+                resolved_checkbox(ui, "体积云层", &mut settings.clouds, &quality.clouds);
+            climate_changed |=
+                resolved_checkbox(ui, "生态天气粒子", &mut settings.weather, &quality.weather);
             if climate_changed {
                 let _ = crate::save::save_settings(&settings);
+            }
+            if quality.has_downgrades() {
+                ui.collapsing("⚙ 设备画质降级", |ui| {
+                    for reason in &quality.downgrades {
+                        ui.label(
+                            egui::RichText::new(reason)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+                        );
+                    }
+                });
+            }
+            // A05: advanced counters stay collapsed so the product UI does not
+            // leak type names or shader paths (04 §UI), while QA can see the
+            // same numbers that the unified diagnostics export contains.
+            ui.collapsing("🛠 高级诊断", |ui| {
+                let tasks = &diagnostics.lifecycle.tasks;
+                let rejected = tasks.rejected_queue_full
+                    + tasks.rejected_unknown
+                    + tasks.rejected_stale_epoch
+                    + tasks.rejected_stale_revision;
+                ui.label(format!(
+                    "视觉任务 {}/{} · 拒绝旧结果 {} · epoch {}",
+                    tasks.pending, tasks.capacity, rejected, diagnostics.lifecycle.world_epoch
+                ));
+                ui.label(format!(
+                    "资产 mesh {} / image {} / 材质 {} · 历史重置 {}",
+                    diagnostics.lifecycle.assets.meshes,
+                    diagnostics.lifecycle.assets.images,
+                    diagnostics.lifecycle.assets.standard_materials
+                        + diagnostics.lifecycle.assets.curved_materials
+                        + diagnostics.lifecycle.assets.cloud_materials,
+                    diagnostics.lifecycle.history_resets
+                ));
+                for warning in &diagnostics.warnings {
+                    ui.label(
+                        egui::RichText::new(warning)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0xff, 0xb3, 0x47)),
+                    );
+                }
+                for inert in &diagnostics.inert_settings {
+                    ui.label(
+                        egui::RichText::new(inert)
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+            if view_dist_changed && let Some(mut w) = world {
+                w.view_dist = settings.view_dist;
             }
             ui.separator();
             let mut cloud_changed = false;
             ui.collapsing("☁ 体积云实时参数", |ui| {
                 ui.horizontal(|ui| {
                     let value = cloud_tuning.coverage;
-                    ui.label("覆盖率");
+                    ui.label(setting_label("cloud_coverage"));
                     cloud_changed |= ui
                         .add(
-                            egui::Slider::new(&mut cloud_tuning.coverage, 0.0..=1.0)
-                                .text(format!("{value:.2}")),
+                            egui::Slider::new(
+                                &mut cloud_tuning.coverage,
+                                setting_slider_f32("cloud_coverage"),
+                            )
+                            .text(format!("{value:.2}")),
                         )
                         .changed();
                 });
                 ui.horizontal(|ui| {
                     let value = cloud_tuning.density;
-                    ui.label("体积密度");
+                    ui.label(setting_label("cloud_density"));
                     cloud_changed |= ui
                         .add(
-                            egui::Slider::new(&mut cloud_tuning.density, 0.0..=1.0)
-                                .text(format!("{value:.2}")),
+                            egui::Slider::new(
+                                &mut cloud_tuning.density,
+                                setting_slider_f32("cloud_density"),
+                            )
+                            .text(format!("{value:.2}")),
                         )
                         .changed();
                 });
                 ui.horizontal(|ui| {
                     let value = cloud_tuning.raymarch_steps;
-                    ui.label("主 Raymarch");
+                    ui.label(setting_label("cloud_raymarch_steps"));
                     cloud_changed |= ui
                         .add(
-                            egui::Slider::new(&mut cloud_tuning.raymarch_steps, 4..=64)
-                                .text(format!("{value} 步")),
+                            egui::Slider::new(
+                                &mut cloud_tuning.raymarch_steps,
+                                setting_slider_u32("cloud_raymarch_steps"),
+                            )
+                            .text(format!("{value} 步")),
                         )
                         .changed();
                 });
@@ -3315,6 +3590,13 @@ pub fn panel_hotkeys_system(
     {
         ui_state.panel = Panel::Tech;
     }
+    if keys.just_pressed(KeyCode::KeyL) {
+        if ui_state.panel == Panel::Frontier {
+            ui_state.close_panel();
+        } else if !ui_state.locked() {
+            ui_state.panel = Panel::Frontier;
+        }
+    }
     // O：Bevy 原生联机面板
     if keys.just_pressed(KeyCode::KeyO) && !ui_state.locked() {
         ui_state.panel = Panel::Network;
@@ -3421,7 +3703,7 @@ pub fn scan_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<ScanState>,
     time: Res<Time>,
-    player: Query<&Player>,
+    mut player: Query<&mut Player>,
     ui: Res<UiState>,
     world: Res<World>,
     research: Res<Research>,
@@ -3432,10 +3714,14 @@ pub fn scan_system(
     mut markers: Query<(Entity, &mut ScanMarker, &Transform), Without<ScanRing>>,
     mut rings: Query<(Entity, &mut ScanRing, &mut Transform), Without<ScanMarker>>,
     sfx: Res<audio::Sfx>,
+    mut quests: ResMut<crate::quests::Quests>,
+    mut screen: Option<ResMut<crate::screen_fx::ScreenFx>>,
 ) {
     let dt = time.delta_secs();
     state.cd = (state.cd - dt).max(0.0);
-    let Ok(p) = player.single() else { return };
+    let Ok(mut p) = player.single_mut() else {
+        return;
+    };
     // 扫描环动画：扩张 + 淡出（JS 同口径：r = t*480，1.4s 生命周期）
     for (e, mut ring, mut tf) in &mut rings {
         ring.t += dt;
@@ -3459,12 +3745,28 @@ pub fn scan_system(
             commands.entity(e).despawn();
         }
     }
-    if keys.just_pressed(KeyCode::KeyC) && !ui.locked() {
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if keys.just_pressed(KeyCode::KeyC) && !ui.locked() && !ctrl_held {
         if state.cd > 0.0 {
             return;
         }
         state.cd = 6.0;
+        if !p.creative() && !p.dead {
+            let sample = crate::frontier::Sample {
+                seed: world.seed,
+                x: p.pos.x,
+                z: p.pos.z,
+            };
+            let biome = world.biome();
+            if quests.frontier.scan(biome.key, sample) {
+                let count = quests.frontier.samples[biome.key].len();
+                p.toast(format!("{} · 调查 {count}/3 · L 打开生态图鉴", biome.name));
+            }
+        }
         audio::play(&mut commands, sfx.pickup.clone(), 0.6, None);
+        if let Some(screen) = screen.as_deref_mut() {
+            screen.scanned();
+        }
         let range: i32 = if research.techs.iter().any(|t| t == "scan2") {
             80
         } else if research.techs.iter().any(|t| t == "scan1") {
@@ -4000,6 +4302,9 @@ pub fn station_services_panel_system(
                 .clicked()
             {
                 ui_state.panel = Panel::Garage;
+            }
+            if ui.button("边疆公会 · 委托与远征").clicked() {
+                ui_state.panel = Panel::Frontier;
             }
             ui.separator();
             ui.label(egui::RichText::new("Esc 关闭 · W 离站").size(12.0));
@@ -4752,6 +5057,14 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
+        // A06 single-pass guard: this plugin owns the only manual egui pass
+        // (`egui_manual_pass` + `egui_begin_pass`/`egui_end_pass`). Registering
+        // the UI without its context would leave a dangling pass owner, and a
+        // second EguiPlugin would fight over the same contexts.
+        assert!(
+            app.is_plugin_added::<bevy_egui::EguiPlugin>(),
+            "UiPlugin requires exactly one EguiPlugin registered before it"
+        );
         app.add_message::<SaveEvent>()
             .add_message::<QuitToMenuEvent>()
             .init_resource::<UiState>()
@@ -4817,7 +5130,12 @@ impl Plugin for UiPlugin {
                     pause_panel_system.in_set(GameSet::PanelPause),
                     trade_panel_system.in_set(GameSet::PanelTrade),
                     garage_panel_system.in_set(GameSet::PanelGarage),
-                    station_services_panel_system.in_set(GameSet::PanelStationServices),
+                    (
+                        station_services_panel_system,
+                        crate::frontier_ui::panel_system,
+                    )
+                        .chain()
+                        .in_set(GameSet::PanelStationServices),
                 )
                     .chain()
                     .run_if(in_state(GameState::Playing)),

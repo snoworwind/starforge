@@ -11,6 +11,7 @@ use crate::schedule::{GameSet, GameState};
 /// 先写入 flags，再由每帧的 quest_tick 检查推进。
 #[derive(Resource)]
 pub struct Quests {
+    pub frontier: crate::frontier::Frontier,
     pub flags: HashMap<String, bool>,
     pub idx: usize,
     pub side: Option<SideQuest>,
@@ -30,6 +31,7 @@ pub struct Quests {
 impl Default for Quests {
     fn default() -> Self {
         Self {
+            frontier: crate::frontier::Frontier::default(),
             flags: HashMap::new(),
             idx: 0,
             side: None,
@@ -60,7 +62,8 @@ pub struct QuestDialog {
     pub name: String,
     pub lines: Vec<String>,
     pub idx: usize,
-    pub chars: usize,
+    /// Fractional reveal progress; truncate only when displaying characters.
+    pub chars: f32,
     pub on_close: Option<DialogAction>,
 }
 
@@ -213,15 +216,10 @@ pub fn quest_tick_system(
     mut quests: ResMut<Quests>,
     mut player: Query<&mut Player>,
     research: Res<crate::ui::Research>,
-    mut placed_ev: MessageReader<PlacedEvent>,
     mut flag_ev: MessageReader<FlagEvent>,
     mut big_ev: MessageWriter<BigMessageEvent>,
 ) {
     let dt = time.delta_secs();
-    for ev in placed_ev.read() {
-        let n = quests.placed.entry(ev.block.clone()).or_insert(0);
-        *n += 1;
-    }
     for ev in flag_ev.read() {
         quests.flags.insert(ev.flag.clone(), true);
     }
@@ -239,18 +237,12 @@ pub fn quest_tick_system(
     }
     // 主线对话框打字机（JS 26 字符/秒）
     if let Some(d) = quests.dialog.as_mut() {
-        d.chars += (dt * 26.0) as usize;
         let cur = &d.lines[d.idx];
-        if d.chars > cur.chars().count() + 8 {
-            d.chars = cur.chars().count();
-        }
+        d.chars = (d.chars + dt * 26.0).min(cur.chars().count() as f32);
     }
     if let Some(d) = quests.side_dialog.as_mut() {
-        d.chars += (dt * 26.0) as usize;
         let cur = &d.lines[d.idx];
-        if d.chars > cur.chars().count() + 8 {
-            d.chars = cur.chars().count();
-        }
+        d.chars = (d.chars + dt * 26.0).min(cur.chars().count() as f32);
     }
     // 大字提示
     if let Some((t, s, dur)) = quests.announce.take() {
@@ -282,7 +274,7 @@ pub fn side_quest_system(
         return;
     }
     let cur = &d.lines[d.idx];
-    let fully_shown = d.chars >= cur.chars().count();
+    let fully_shown = d.chars >= cur.chars().count() as f32;
     let advance = if keys.just_pressed(KeyCode::KeyE) && !ui.locked() {
         if fully_shown {
             if d.idx + 1 < d.lines.len() {
@@ -306,6 +298,10 @@ pub fn side_quest_system(
                                     if let Some(side) = quests.side.as_mut() {
                                         side.done = true;
                                     }
+                                    quests.frontier.village_deliveries =
+                                        quests.frontier.village_deliveries.saturating_add(1);
+                                    quests.frontier.reputation =
+                                        quests.frontier.reputation.saturating_add(4);
                                     crate::audio::play(
                                         &mut commands,
                                         sfx.pickup.clone(),
@@ -333,7 +329,7 @@ pub fn side_quest_system(
     };
     if advance && let Some(d) = quests.side_dialog.as_mut() {
         d.idx += 1;
-        d.chars = 0;
+        d.chars = 0.0;
     }
 }
 
@@ -348,7 +344,8 @@ pub fn village_side_quest_system(
     player: Query<&Player>,
     world: Option<Res<crate::world::World>>,
     ui: Res<crate::ui::UiState>,
-    asset_server: Res<AssetServer>,
+    npc_art: Res<crate::char::NpcArt>,
+    mut npc_materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
     if *mode != crate::space::FlightMode::Planet {
@@ -388,12 +385,15 @@ pub fn village_side_quest_system(
     let villager_pos = Vec3::new(vx as f32 + 0.5, vh as f32 + 1.0, vz as f32 + 0.5);
     if quests.villager.is_none() {
         let app = crate::save::Appearance::random((vx as u32) ^ (vz as u32));
-        let human = crate::char::spawn_humanoid(
+        let village_seed = (vx as u32).wrapping_mul(31) ^ (vz as u32).wrapping_mul(57);
+        let human = crate::char::spawn_villager(
             &mut commands,
-            &asset_server,
+            &npc_art,
+            &mut npc_materials,
             &app,
             villager_pos,
             std::f32::consts::PI,
+            village_seed,
         );
         quests.villager = Some(human.root);
         quests.villager_pos = Some(villager_pos);
@@ -420,7 +420,7 @@ pub fn village_side_quest_system(
         return;
     }
     match quests.side.as_ref().map(|s| s.done) {
-        None => {
+        None | Some(true) => {
             // 生成委托
             let pool = [
                 "sodium",
@@ -431,10 +431,13 @@ pub fn village_side_quest_system(
                 "copper_ore",
                 "stone",
             ];
-            let item = pool
-                [crate::rng::Rng::new((vx as u32) ^ 0x5EED ^ (vz as u32)).range(pool.len())]
+            let cycle = quests.frontier.village_deliveries;
+            let item = pool[crate::rng::Rng::new(
+                (vx as u32) ^ 0x5EED ^ (vz as u32) ^ cycle.wrapping_mul(0x9E3779B9),
+            )
+            .range(pool.len())]
             .to_string();
-            let need = 3 + (crate::rng::Rng::new((vz as u32) ^ 0x77).next() * 6.0) as i32;
+            let need = 3 + (crate::rng::Rng::new((vz as u32) ^ 0x77 ^ cycle).next() * 6.0) as i32;
             let reward = 100 + need * 25;
             quests.side = Some(SideQuest {
                 item: item.clone(),
@@ -449,21 +452,12 @@ pub fn village_side_quest_system(
                 name: "村民".into(),
                 lines: vec![
                     format!("旅行者！我们村庄急需 {name} ×{need}。"),
-                    format!("带回来给你 ₪{reward} 报酬。"),
+                    format!("带回来给你 ₪{reward} 报酬和 4 点公会声望。完成后可继续接单。"),
                     "再按一次 E 交付。".into(),
                 ],
                 idx: 0,
-                chars: 0,
+                chars: 0.0,
                 on_close: Some(DialogAction::SideReward),
-            });
-        }
-        Some(true) => {
-            quests.side_dialog = Some(QuestDialog {
-                name: "村民".into(),
-                lines: vec!["谢谢！".into(), "村庄永远不会忘记你。".into()],
-                idx: 0,
-                chars: 0,
-                on_close: None,
             });
         }
         Some(false) => {
@@ -472,14 +466,34 @@ pub fn village_side_quest_system(
             quests.side_dialog = Some(QuestDialog {
                 name: "村民".into(),
                 lines: vec![
-                    format!("还差 {} 个，我在这里等你。", sq.item),
+                    format!(
+                        "还需要 {} ×{}，我在这里等你。",
+                        crate::frontier::item_name(&sq.item),
+                        (sq.need - p.inv.count_item(&sq.item)).max(0)
+                    ),
                     "采够了再按一次 E 交付。".into(),
                 ],
                 idx: 0,
-                chars: 0,
+                chars: 0.0,
                 on_close: Some(DialogAction::SideReward),
             });
         }
+    }
+}
+
+/// Drain gameplay messages after production/combat/placement, but before UI
+/// claims and saves. Stage baselines must include actions from this very frame.
+fn frontier_progress_system(
+    mut quests: ResMut<Quests>,
+    mut flags: MessageReader<FlagEvent>,
+    mut placed: MessageReader<PlacedEvent>,
+) {
+    for event in flags.read() {
+        quests.frontier.record_event(&event.flag);
+    }
+    for event in placed.read() {
+        let n = quests.placed.entry(event.block.clone()).or_default();
+        *n = n.saturating_add(1);
     }
 }
 
@@ -492,6 +506,12 @@ impl Plugin for QuestsPlugin {
             .add_message::<PlacedEvent>()
             .add_message::<FlagEvent>()
             .add_message::<BigMessageEvent>()
+            .add_systems(
+                Update,
+                frontier_progress_system
+                    .in_set(GameSet::FrontierProgress)
+                    .run_if(in_state(GameState::Playing)),
+            )
             .add_systems(
                 Update,
                 (
@@ -510,6 +530,32 @@ impl Plugin for QuestsPlugin {
 mod tests {
     use super::*;
 
+    #[test]
+    fn late_progress_counts_each_frame_event_once_and_preserves_main_flags() {
+        let mut app = dialog_test_app(60);
+        app.add_systems(Update, frontier_progress_system.after(quest_tick_system));
+        app.world_mut().write_message(FlagEvent {
+            flag: "pirateDefeated".into(),
+        });
+        app.world_mut().write_message(FlagEvent {
+            flag: "pirateDefeated".into(),
+        });
+        app.world_mut().write_message(PlacedEvent {
+            block: "beacon".into(),
+        });
+        app.update();
+        let q = app.world().resource::<Quests>();
+        assert_eq!(q.frontier.events["pirateDefeated"], 2);
+        assert!(q.flags["pirateDefeated"]);
+        assert_eq!(q.placed["beacon"], 1);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Quests>().frontier.events["pirateDefeated"],
+            2
+        );
+        assert_eq!(app.world().resource::<Quests>().placed["beacon"], 1);
+    }
+
     fn test_player(creative: bool) -> Player {
         let mut p = Player::new(if creative {
             crate::data::Difficulty::Creative
@@ -520,6 +566,130 @@ mod tests {
         p.inv.add_item("sodium", 10);
         p.inv.add_item("stone", 20);
         p
+    }
+
+    fn dialog_test_app(fps: u32) -> App {
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f64(1.0 / fps as f64));
+        let mut app = App::new();
+        app.insert_resource(time)
+            .init_resource::<Quests>()
+            .init_resource::<crate::ui::Research>()
+            .add_message::<PlacedEvent>()
+            .add_message::<FlagEvent>()
+            .add_message::<BigMessageEvent>()
+            .add_systems(Update, quest_tick_system);
+        app
+    }
+
+    #[test]
+    fn dialog_typewriter_progresses_at_common_frame_rates() {
+        for fps in [15, 30, 60, 144] {
+            let mut app = dialog_test_app(fps);
+            let dialog = QuestDialog {
+                name: "村民".into(),
+                lines: vec!["星".repeat(80)],
+                idx: 0,
+                chars: Default::default(),
+                on_close: None,
+            };
+            {
+                let mut quests = app.world_mut().resource_mut::<Quests>();
+                quests.dialog = Some(dialog.clone());
+                quests.side_dialog = Some(dialog);
+            }
+            for _ in 0..fps {
+                app.update();
+            }
+            {
+                let quests = app.world().resource::<Quests>();
+                for dialog in [&quests.dialog, &quests.side_dialog] {
+                    let shown = dialog.as_ref().unwrap().chars as usize;
+                    assert!(
+                        (25..=26).contains(&shown),
+                        "{fps} FPS must reveal about 26 characters in one second, got {shown}"
+                    );
+                }
+            }
+            for _ in 0..fps * 3 {
+                app.update();
+            }
+            let quests = app.world().resource::<Quests>();
+            for dialog in [&quests.dialog, &quests.side_dialog] {
+                assert_eq!(dialog.as_ref().unwrap().chars as usize, 80);
+            }
+        }
+    }
+
+    #[test]
+    fn dialog_typewriter_allows_side_quest_completion_at_sixty_fps() {
+        let mut app = dialog_test_app(60);
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::ui::UiState>()
+            .insert_resource(crate::audio::Sfx::build(&mut Assets::default(), 0.0))
+            .add_systems(Update, side_quest_system.after(quest_tick_system));
+        let player = app.world_mut().spawn(test_player(false)).id();
+        {
+            let mut quests = app.world_mut().resource_mut::<Quests>();
+            quests.side = Some(SideQuest {
+                item: "carbon".into(),
+                need: 10,
+                reward: 150,
+                x: 0,
+                z: 0,
+                done: false,
+            });
+            quests.side_dialog = Some(QuestDialog {
+                name: "村民".into(),
+                lines: vec!["旅行者，请带来十块碳。".into(), "谢谢你的帮助！".into()],
+                idx: 0,
+                chars: Default::default(),
+                on_close: Some(DialogAction::SideReward),
+            });
+        }
+        for line in 0..2 {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyE);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset_all();
+            assert_eq!(
+                app.world()
+                    .resource::<Quests>()
+                    .side_dialog
+                    .as_ref()
+                    .unwrap()
+                    .idx,
+                line,
+                "E must wait for the current line to finish appearing"
+            );
+            for _ in 0..120 {
+                app.update();
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyE);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset_all();
+            if line == 0 {
+                let quests = app.world().resource::<Quests>();
+                let dialog = quests.side_dialog.as_ref().unwrap();
+                assert_eq!(dialog.idx, 1, "E must advance the completed first line");
+                assert_eq!(dialog.chars as usize, 0);
+            }
+        }
+        let quests = app.world().resource::<Quests>();
+        assert!(quests.side_dialog.is_none());
+        assert!(quests.side.as_ref().unwrap().done);
+        assert_eq!(quests.frontier.village_deliveries, 1);
+        assert_eq!(quests.frontier.reputation, 4);
+        let player = app.world().get::<Player>(player).unwrap();
+        assert_eq!(player.inv.count_item("carbon"), 20);
+        assert_eq!(player.credits, 150);
     }
 
     #[test]
@@ -630,7 +800,7 @@ mod tests {
             name: "村民".into(),
             lines: vec!["交付".into()],
             idx: 0,
-            chars: 0,
+            chars: 0.0,
             on_close: Some(DialogAction::SideReward),
         });
         let before = p.inv.count_item("carbon");

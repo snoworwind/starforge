@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://starforge.local/schemas/acceptance-report-v1.schema.json",
+  "title": "Starforge visual acceptance report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_kind",
+    "run_label",
+    "commit",
+    "execution_status",
+    "release_status",
+    "counts",
+    "checks",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "report_kind": { "const": "starforge.visual_acceptance" },
+    "run_label": { "type": "string", "minLength": 1 },
+    "commit": { "type": ["string", "null"] },
+    "execution_status": { "$ref": "#/$defs/status" },
+    "release_status": { "$ref": "#/$defs/status" },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "fail", "skipped", "not_run"],
+      "properties": {
+        "pass": { "type": "integer", "minimum": 0 },
+        "fail": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "not_run": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/check" }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "status": {
+      "enum": ["pass", "fail", "skipped", "not_run"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\].*"
+        },
+        "kind": { "type": "string", "minLength": 1 }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "required_for_release",
+        "status",
+        "evidence"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "required_for_release": { "type": "boolean" },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": { "enum": ["fail", "skipped", "not_run"] }
+            },
+            "required": ["status"]
+          },
+          "then": { "required": ["reason"] }
+        }
+      ]
+    }
+  }
+}

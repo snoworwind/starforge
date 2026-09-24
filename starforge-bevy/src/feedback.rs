@@ -1,15 +1,16 @@
-//! Shared audiovisual feedback: block-break shards, flashes and lightweight impact cues.
+//! Shared audiovisual feedback: block-break shards and lightweight impact cues.
 //! Keeping these effects separate from world mutation makes them safe to spawn from
 //! mining, combat and creature systems without coupling gameplay state to rendering.
+//!
+//! Block breaks intentionally avoid any full-screen or camera-filling flash:
+//! close-range mining must stay comfortable, so only physical shards are used.
 
 use bevy::prelude::*;
 
 #[derive(Resource, Default)]
 pub struct FeedbackAssets {
     pub shard_mesh: Option<Handle<Mesh>>,
-    pub flash_mesh: Option<Handle<Mesh>>,
     pub shard_materials: Vec<Option<Handle<StandardMaterial>>>,
-    pub flash_materials: Vec<Option<Handle<StandardMaterial>>>,
 }
 
 #[derive(Component)]
@@ -17,12 +18,6 @@ pub struct BreakShard {
     pub velocity: Vec3,
     pub life: f32,
     pub spin: Vec3,
-}
-
-#[derive(Component)]
-pub struct BreakFlash {
-    pub life: f32,
-    pub max_life: f32,
 }
 
 /// Spawn a compact burst whose palette follows the broken block family.
@@ -47,14 +42,8 @@ pub fn spawn_block_burst(
     if cache.shard_mesh.is_none() {
         cache.shard_mesh = Some(meshes.add(Cuboid::new(0.12, 0.12, 0.12)));
     }
-    if cache.flash_mesh.is_none() {
-        cache.flash_mesh = Some(meshes.add(Cuboid::new(1.02, 1.02, 1.02)));
-    }
     if cache.shard_materials.len() < 6 {
         cache.shard_materials.resize_with(6, || None);
-    }
-    if cache.flash_materials.len() < 6 {
-        cache.flash_materials.resize_with(6, || None);
     }
     if cache.shard_materials[palette].is_none() {
         cache.shard_materials[palette] = Some(materials.add(StandardMaterial {
@@ -63,39 +52,12 @@ pub fn spawn_block_burst(
             ..default()
         }));
     }
-    if cache.flash_materials[palette].is_none() {
-        let rgba = color.to_srgba();
-        cache.flash_materials[palette] = Some(materials.add(StandardMaterial {
-            base_color: Color::srgba(rgba.red, rgba.green, rgba.blue, 0.24),
-            emissive: color.to_linear() * 0.55,
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            cull_mode: None,
-            ..default()
-        }));
-    }
     let Some(shard_mesh) = cache.shard_mesh.clone() else {
-        return;
-    };
-    let Some(flash_mesh) = cache.flash_mesh.clone() else {
         return;
     };
     let Some(shard_material) = cache.shard_materials.get(palette).and_then(Clone::clone) else {
         return;
     };
-    let Some(flash_material) = cache.flash_materials.get(palette).and_then(Clone::clone) else {
-        return;
-    };
-    commands.spawn((
-        Mesh3d(flash_mesh),
-        MeshMaterial3d(flash_material),
-        Transform::from_translation(pos),
-        BreakFlash {
-            life: 0.18,
-            max_life: 0.18,
-        },
-        crate::InGame,
-    ));
     let mut rng = crate::rng::Rng::new(seed ^ (block_id as u32).wrapping_mul(0x9E37_79B9));
     for _ in 0..10 {
         let velocity = Vec3::new(
@@ -125,8 +87,7 @@ pub fn spawn_block_burst(
 pub fn particle_system(
     time: Res<Time>,
     mut commands: Commands,
-    mut shards: Query<(Entity, &mut BreakShard, &mut Transform), Without<BreakFlash>>,
-    mut flashes: Query<(Entity, &mut BreakFlash, &mut Transform), Without<BreakShard>>,
+    mut shards: Query<(Entity, &mut BreakShard, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut shard, mut transform) in &mut shards {
@@ -141,18 +102,9 @@ pub fn particle_system(
         transform.rotate_y(shard.spin.y * dt);
         transform.rotate_z(shard.spin.z * dt);
     }
-    for (entity, mut flash, mut transform) in &mut flashes {
-        flash.life -= dt;
-        if flash.life <= 0.0 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        let k = (flash.life / flash.max_life).clamp(0.0, 1.0);
-        transform.scale = Vec3::splat(1.0 + (1.0 - k) * 0.18);
-    }
 }
 
-/// Effects plugin: cached burst assets + shard/flash lifetime step.
+/// Effects plugin: cached burst assets + shard lifetime step.
 pub struct FeedbackPlugin;
 
 impl Plugin for FeedbackPlugin {

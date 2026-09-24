@@ -80,7 +80,7 @@ impl TerrainMaterials {
         curved_materials: &mut Assets<CurvedTerrainMaterial>,
         images: &mut Assets<Image>,
         atlas: &crate::textures::Atlas,
-        water_tint: u32,
+        _water_tint: u32,
     ) -> Self {
         let mut image = Image::new(
             bevy::render::render_resource::Extent3d {
@@ -171,15 +171,11 @@ impl TerrainMaterials {
         // intensity and bloom coordination, avoiding double amplification.
         let emissive = materials.add(opaque_material.clone());
         let special = materials.add(opaque_material);
-        let (tr, tg, tb) = (
-            ((water_tint >> 16) & 0xFF) as f32 / 255.0,
-            ((water_tint >> 8) & 0xFF) as f32 / 255.0,
-            (water_tint & 0xFF) as f32 / 255.0,
-        );
         let water = materials.add(StandardMaterial {
-            // The tint is applied per-vertex in the water mesh (COLOR attribute,
-            // alpha 0.72); the material color is just a fallback.
-            base_color: Color::srgba(tr, tg, tb, 0.72),
+            // The biome tint and alpha already live in the water mesh's vertex
+            // colors. StandardMaterial multiplies them by base_color, so a
+            // second tint here made pools almost black and halved their alpha.
+            base_color: Color::WHITE,
             base_color_texture: Some(atlas_image.clone()),
             double_sided: true,
             cull_mode: None,
@@ -304,15 +300,24 @@ pub fn lamp_pool_system(
         };
         if let Some((_, cell, id)) = found.get(i) {
             // JS: l.position.set(x+0.5, y+0.9, z+0.5) —— 光必须跟随灯块
+            // A ceiling fixture needs to shine from below its block, into the
+            // room. Ground and exposed fixtures keep the source near center.
+            let hanging = world.get(cell[0], cell[1] + 1, cell[2]) != crate::data::ids::AIR
+                && world.get(cell[0], cell[1] - 1, cell[2]) == crate::data::ids::AIR;
             tf.translation = Vec3::new(
                 cell[0] as f32 + 0.5,
-                cell[1] as f32 + 0.9,
+                cell[1] as f32 + if hanging { -0.15 } else { 0.5 },
                 cell[2] as f32 + 0.5,
             );
-            let (r, g, b) = glow_color(crate::data::block_by_id(*id).key);
+            let key = crate::data::block_by_id(*id).key;
+            let (r, g, b) = glow_color(key);
             l.color = Color::srgb(r / 255.0, g / 255.0, b / 255.0);
-            l.intensity = 220.0;
-            l.range = 11.0;
+            l.intensity = match key {
+                "lamp" => 18_000.0,
+                "crystal" => 9_000.0,
+                _ => 4_000.0,
+            };
+            l.range = 9.0;
         } else {
             l.intensity = 0.0;
         }

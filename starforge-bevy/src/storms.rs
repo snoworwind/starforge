@@ -152,7 +152,6 @@ pub fn storm_director_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut screen: Option<ResMut<crate::screen_fx::ScreenFx>>,
     mut big_ev: MessageWriter<crate::quests::BigMessageEvent>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
@@ -211,9 +210,6 @@ pub fn storm_director_system(
             dur: 3.0,
         });
         state.announced = true;
-        if let Some(screen) = screen.as_deref_mut() {
-            screen.discover();
-        }
     }
 }
 
@@ -319,7 +315,7 @@ pub fn lightning_system(
     fx.explosion(Vec3::new(strike.x, ground + 0.4, strike.z), 0.9);
     state.thunder_queue.push((0.4 + distance * 0.03, 0.5));
     if let Some(screen) = screen.as_deref_mut() {
-        screen.lightning = 1.0;
+        screen.lightning = 0.32;
     }
     let near = player.pos.distance(Vec3::new(strike.x, ground, strike.z));
     if near < 3.5 {

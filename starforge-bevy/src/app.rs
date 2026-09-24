@@ -579,6 +579,9 @@ pub fn run() {
     if options.smoke {
         app.insert_resource(crate::SmokeFlag { frames: 0 });
     }
+    if options.play || options.smoke || options.visual_qa.is_some() {
+        app.insert_resource(crate::player::CursorCaptureDisabled);
+    }
     app.run();
 }
 

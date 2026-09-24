@@ -318,13 +318,10 @@ pub fn screen_fx_draw_system(
             tint.gamma_multiply(alpha),
         );
     };
-    let ambient = 0.22 + fx.low_hp * 0.25;
+    let ambient = fx.low_hp * 0.08;
     draw_vignette(egui::Color32::BLACK, ambient);
     let damage = fx.damage_flash;
     draw_vignette(egui::Color32::from_rgb(200, 20, 20), damage * 0.85);
-    if fx.hurt_flash() > 0.0 {
-        draw_vignette(egui::Color32::from_rgb(255, 60, 40), fx.hurt_flash() * 0.5);
-    }
     draw_vignette(egui::Color32::from_rgb(120, 0, 0), fx.low_hp * 0.75);
     draw_vignette(egui::Color32::from_rgb(255, 30, 10), fx.death * 0.95);
     draw_vignette(
@@ -338,7 +335,7 @@ pub fn screen_fx_draw_system(
             painter.rect_filled(
                 full,
                 egui::CornerRadius::ZERO,
-                color.gamma_multiply(amount.min(1.0) * 0.6),
+                color.gamma_multiply(amount.min(1.0) * 0.28),
             );
         }
     };
@@ -379,12 +376,6 @@ pub fn screen_fx_draw_system(
             color,
             egui::Stroke::NONE,
         ));
-    }
-}
-
-impl ScreenFx {
-    fn hurt_flash(&self) -> f32 {
-        self.damage_flash * 0.5
     }
 }
 

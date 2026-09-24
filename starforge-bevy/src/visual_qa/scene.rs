@@ -88,7 +88,10 @@ impl SceneId {
     /// Frames allowed for dirty chunks to be re-meshed before capture.
     pub fn settle_frames(self) -> u32 {
         match self {
-            SceneId::S01 | SceneId::S02 | SceneId::B01 | SceneId::D01 | SceneId::B04 => 45,
+            // The voxel material courtyard rewrites a full stage chunk; give
+            // its dirty meshes time to settle before the first wide capture.
+            SceneId::S01 => 120,
+            SceneId::S02 | SceneId::B01 | SceneId::D01 | SceneId::B04 => 45,
             SceneId::E01 => 60,
             SceneId::S06 => 60,
         }
@@ -134,9 +137,9 @@ pub struct SampleRef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SceneProp {
-    /// A specific NPC GLB spawned through `char::spawn_humanoid_model`.
+    /// An original voxel NPC with its role-specific outfit and rig.
     Humanoid {
-        model: &'static str,
+        role: crate::char::NpcRole,
         pos: [f32; 3],
         yaw: f32,
     },
@@ -390,15 +393,16 @@ fn build_courtyard(world: &mut World) -> BuiltScene {
     }
 
     modified += build_sphere(world, (cx, base + 4, cz + 7), 3, ids::METAL);
-    modified += build_tree(world, cx - 9, base + 1, cz + 7);
+    modified += build_tree(world, cx - 10, base + 1, cz + 2);
 
     for step in 0..4 {
         world.set(cx + 6 + step, base + 1 + step, cz + 7, ids::SLAB);
         modified += 1;
     }
-    for dz in 0..3 {
-        for dx in 0..3 {
-            let (x, z) = (cx - 6 + dx, cz + 6 + dz);
+    // Give water a broad, sunlit patch away from the metal sphere's shadow.
+    for dz in 0..4 {
+        for dx in 0..4 {
+            let (x, z) = (cx - 10 + dx, cz + 6 + dz);
             world.set(x, base, z, ids::WATER);
             world.set(x, base - 1, z, ids::WATER);
             modified += 2;
@@ -407,28 +411,23 @@ fn build_courtyard(world: &mut World) -> BuiltScene {
 
     let f = |x: i32, y: i32, z: i32| Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5);
     let poses = vec![
-        pose_from_look(
-            "wide",
-            f(cx - 18, base + 14, cz - 18),
-            f(cx, base + 2, cz),
-            60.0,
-        ),
+        pose_from_look("wide", f(cx, base + 16, cz - 24), f(cx, base + 2, cz), 60.0),
         pose_from_look(
             "samples",
-            f(cx - 11, base + 7, cz - 8),
-            f(cx, base + 1, cz - 7),
+            f(cx, base + 10, cz - 18),
+            f(cx, base + 1, cz - 3),
             60.0,
         ),
         pose_from_look(
             "sphere",
-            f(cx + 5, base + 6, cz + 1),
+            f(cx, base + 8, cz - 6),
             f(cx, base + 4, cz + 7),
             50.0,
         ),
         pose_from_look(
             "water",
-            f(cx + 4, base + 6, cz + 10),
-            f(cx - 5, base, cz + 7),
+            f(cx - 8, base + 8, cz + 16),
+            f(cx - 8, base, cz + 7),
             55.0,
         ),
     ];
@@ -472,7 +471,7 @@ fn build_calibration(world: &mut World) -> BuiltScene {
     ];
     let mut props = Vec::new();
     for (index, key) in machines.iter().enumerate() {
-        let x = cx - 9 + index as i32 * 3;
+        let x = cx - 8 + index as i32 * 3;
         let z = cz - 5;
         if place_sample(world, x, base + 1, z, key).is_some() {
             modified += 1;
@@ -485,7 +484,7 @@ fn build_calibration(world: &mut World) -> BuiltScene {
     }
 
     // Building sample: 7×7 plank/log hut with a 2-high door, windows and lamp.
-    modified += build_calibration_hut(world, cx + 8, base, cz + 5);
+    modified += build_calibration_hut(world, cx + 11, base, cz + 5);
 
     // Scale ladder: 1..=5 block pillars two cells apart (z = cz + 10).
     for step in 0..5i32 {
@@ -497,23 +496,15 @@ fn build_calibration(world: &mut World) -> BuiltScene {
         }
     }
 
-    // Character family: fixed lineup, feet on the platform surface (base+1).
+    // Original voxel character family: fixed role lineup, feet on the platform.
     let feet = base as f32 + 1.0;
-    props.push(SceneProp::Humanoid {
-        model: "models/npc/adventurer_knight.glb",
-        pos: [cx as f32 - 3.5, feet, cz as f32 - 0.5],
-        yaw: std::f32::consts::PI,
-    });
-    props.push(SceneProp::Humanoid {
-        model: "models/npc/astronaut_a.glb",
-        pos: [cx as f32 - 0.5, feet, cz as f32 - 0.5],
-        yaw: std::f32::consts::PI,
-    });
-    props.push(SceneProp::Humanoid {
-        model: "models/npc/alien.glb",
-        pos: [cx as f32 + 2.5, feet, cz as f32 - 0.5],
-        yaw: std::f32::consts::PI,
-    });
+    for (index, role) in crate::char::NpcRole::SHOWCASE.into_iter().enumerate() {
+        props.push(SceneProp::Humanoid {
+            role,
+            pos: [cx as f32 - 4.0 + index as f32 * 2.0, feet, cz as f32 - 0.5],
+            yaw: 0.0,
+        });
+    }
 
     let f = |x: f32, y: f32, z: f32| Vec3::new(x + 0.5, y, z + 0.5);
     let poses = vec![
@@ -532,7 +523,7 @@ fn build_calibration(world: &mut World) -> BuiltScene {
         pose_from_look(
             "machines",
             f(cx as f32 - 10.0, base as f32 + 4.0, cz as f32 - 1.0),
-            f(cx as f32 - 2.0, base as f32 + 2.0, cz as f32 - 5.0),
+            f(cx as f32, base as f32 + 2.0, cz as f32 - 5.0),
             55.0,
         ),
         pose_from_look(
@@ -543,8 +534,8 @@ fn build_calibration(world: &mut World) -> BuiltScene {
         ),
         pose_from_look(
             "building",
-            f(cx as f32 + 8.0, base as f32 + 6.0, cz as f32 + 22.0),
-            f(cx as f32 + 8.0, base as f32 + 1.5, cz as f32 + 5.0),
+            f(cx as f32 + 11.0, base as f32 + 6.0, cz as f32 + 22.0),
+            f(cx as f32 + 11.0, base as f32 + 1.5, cz as f32 + 5.0),
             50.0,
         ),
     ];
@@ -736,15 +727,16 @@ fn build_pbr_courtyard(world: &mut World) -> BuiltScene {
         }
     }
 
-    // Small interior room: log corners, plank walls/roof, one lamp; two
-    // samples inside for the indoor pose.
+    // Open-front interior cutaway: log corners, plank walls/roof, one lamp;
+    // two samples inside remain visible to the diagnostic camera.
     let (rx, rz) = (cx + 15, cz + 12);
     let s = 2;
     for dx in -s..=s {
         for dz in -s..=s {
             world.set(rx + dx, base, rz + dz, ids::CONCRETE);
             modified += 1;
-            if dx.abs() == s || dz.abs() == s {
+            // The camera looks along +Z, so the near (-Z) side stays open.
+            if dx.abs() == s || dz == s {
                 let corner = dx.abs() == s && dz.abs() == s;
                 for y in 1..=3 {
                     world.set(
@@ -759,10 +751,6 @@ fn build_pbr_courtyard(world: &mut World) -> BuiltScene {
             world.set(rx + dx, base + 4, rz + dz, ids::PLANKS);
             modified += 1;
         }
-    }
-    for y in 1..=2 {
-        world.set(rx, base + y, rz - s, ids::AIR);
-        modified += 1;
     }
     world.set(rx, base + 3, rz, ids::LAMP);
     modified += 1;
@@ -795,8 +783,9 @@ fn build_pbr_courtyard(world: &mut World) -> BuiltScene {
     };
     let closeup = |name: &str, family: MaterialFamily, day: f32| {
         let x = family_x(index_of(family)) as f32 + 0.5;
-        let f = |dx: f32, y: f32, dz: f32| Vec3::new(x + dx, base as f32 + y, cz as f32 + dz);
-        let mut pose = pose_from_look(name, f(-2.4, 2.2, -4.6), f(0.0, 1.3, 0.0), 42.0);
+        let eye = Vec3::new(x, base as f32 + 3.3, cz as f32 - 7.5);
+        let target = Vec3::new(x, base as f32 + 1.5, cz as f32 + 0.5);
+        let mut pose = pose_from_look(name, eye, target, 48.0);
         pose.variant = Some("full".to_string());
         pose.day_time = Some(day);
         pose
@@ -805,7 +794,7 @@ fn build_pbr_courtyard(world: &mut World) -> BuiltScene {
     let grid = |name: &str, variant: &str, day: f32| {
         let mut pose = pose_from_look(
             name,
-            Vec3::new(cx as f32 + 0.5, base as f32 + 30.0, cz as f32 - 46.0),
+            Vec3::new(cx as f32 + 0.5, base as f32 + 22.0, cz as f32 - 34.0),
             Vec3::new(cx as f32 + 0.5, base as f32 + 2.0, cz as f32),
             58.0,
         );
@@ -815,9 +804,9 @@ fn build_pbr_courtyard(world: &mut World) -> BuiltScene {
     };
     let mut interior = pose_from_look(
         "interior",
-        Vec3::new(rx as f32 + 0.5, base as f32 + 2.0, rz as f32 + 1.0),
-        Vec3::new(rx as f32 + 0.5, base as f32 + 1.2, rz as f32 - 3.0),
-        65.0,
+        Vec3::new(rx as f32 + 0.5, base as f32 + 1.75, rz as f32 - 5.0),
+        Vec3::new(rx as f32 + 0.5, base as f32 + 1.5, rz as f32 + 0.5),
+        58.0,
     );
     interior.variant = Some("full".to_string());
     interior.day_time = Some(0.94);
@@ -905,7 +894,7 @@ fn build_cloud_diagnostics(_world: &World) -> BuiltScene {
 
 fn build_room(world: &mut World) -> BuiltScene {
     let (ax, az) = (176, 96);
-    let (base_a, mut modified) = prepare_stage(world, ax, az, 9, ids::CONCRETE);
+    let (base_a, mut modified) = prepare_stage(world, ax, az, 6, ids::CONCRETE);
 
     for dx in -4i32..=4 {
         for dz in -4i32..=4 {
@@ -913,8 +902,14 @@ fn build_room(world: &mut World) -> BuiltScene {
                 continue;
             }
             let corner = dx.abs() == 4 && dz.abs() == 4;
-            let id = if corner { ids::METAL } else { ids::CONCRETE };
             for y in 1..=3 {
+                let id = if corner {
+                    ids::METAL
+                } else if y == 1 {
+                    ids::PLANKS
+                } else {
+                    ids::CONCRETE
+                };
                 world.set(ax + dx, base_a + y, az + dz, id);
                 modified += 1;
             }
@@ -923,6 +918,20 @@ fn build_room(world: &mut World) -> BuiltScene {
     for dx in -4i32..=4 {
         for dz in -4i32..=4 {
             world.set(ax + dx, base_a + 4, az + dz, ids::CONCRETE);
+            modified += 1;
+        }
+    }
+    // A warmer floor and a glazed skylight give the room material contrast
+    // while keeping its shell closed for the lighting check.
+    for dx in -3i32..=3 {
+        for dz in -3i32..=3 {
+            world.set(ax + dx, base_a, az + dz, ids::PLANKS);
+            modified += 1;
+        }
+    }
+    for dx in -1i32..=0 {
+        for dz in -1i32..=0 {
+            world.set(ax + dx, base_a + 4, az + dz, ids::GLASS);
             modified += 1;
         }
     }
@@ -943,8 +952,10 @@ fn build_room(world: &mut World) -> BuiltScene {
         world.set(ax + 4, base_a + 2, az + dz, ids::GLASS);
         modified += 1;
     }
-    world.set(ax, base_a + 3, az, ids::LAMP);
-    modified += 1;
+    for (dx, dz) in [(-3, -2), (-3, 2)] {
+        world.set(ax + dx, base_a + 3, az + dz, ids::LAMP);
+        modified += 1;
+    }
 
     let (bx, bz) = (176, 110);
     let (base_b, mut modified_b) = prepare_stage(world, bx, bz, 4, ids::METAL);
@@ -1007,10 +1018,32 @@ fn build_room(world: &mut World) -> BuiltScene {
 
 fn build_route(world: &World) -> BuiltScene {
     let mut route = Vec::new();
-    for step in 0..=12 {
-        let x = 96 + step * 24;
+    for step in 0..=24 {
+        let x = 96 + step * 12;
         let z = 192;
-        let y = world.g.height_at(x as f32 + 0.5, z as f32 + 0.5) as f32 + 3.0;
+        // This route crosses sea-level terrain and dense forest. Keep each
+        // waypoint above both the water surface and nearby generated canopy so
+        // captures cannot begin underwater or inside a trunk.
+        let mut top = world.g.sea();
+        for dz in -6..=6 {
+            for dx in -6..=6 {
+                let wx = x + dx;
+                let wz = z + dz;
+                let ground = world.g.height_at(wx as f32 + 0.5, wz as f32 + 0.5);
+                top = top.max(ground);
+                let tree_mul = world
+                    .g
+                    .sub_at(wx as f32 + 0.5, wz as f32 + 0.5)
+                    .map(|sub| sub.1)
+                    .unwrap_or(1.0);
+                if let Some((tree_ground, trunk_height, _)) = world.g.tree_at(wx, wz, tree_mul) {
+                    top = top.max(tree_ground + trunk_height + 2);
+                }
+            }
+        }
+        // Leave room for the view frustum below the eye. A 2.5-block gap
+        // still put the nearest crowns across the bottom of each capture.
+        let y = top as f32 + 8.0;
         route.push(Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5));
     }
     let anchor = route.first().copied().unwrap_or(Vec3::ZERO);

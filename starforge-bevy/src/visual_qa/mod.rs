@@ -47,7 +47,8 @@ pub use scene::{BuiltScene, SCENE_VERSION, SceneId, ScenePose};
 
 const MANIFEST_SCHEMA_VERSION: u32 = 5;
 /// Frames between two capture poses of a staged scene.
-const POSE_GAP_FRAMES: u32 = 15;
+const POSE_GAP_FRAMES: u32 = 30;
+const POSE_CAPTURE_DELAY_FRAMES: u32 = 12;
 const ROUTE_CAPTURE_FRACTIONS: [f32; 3] = [0.1, 0.5, 0.9];
 const ROUTE_FOV: f32 = 70.0;
 /// Frames kept alive after the last capture so the async screenshot writer can
@@ -561,7 +562,7 @@ struct SceneResult {
 }
 
 #[derive(Resource)]
-struct VisualQaRun {
+pub(crate) struct VisualQaRun {
     config: VisualQaConfig,
     baseline: baseline::Baseline,
     scene_index: usize,
@@ -1361,6 +1362,8 @@ fn visual_qa_driver(
         capabilities,
         clouds,
         mut cloud_debug,
+        npc_art,
+        mut npc_materials,
     ): (
         Res<VisualLifecycleDiagnostics>,
         Res<VisualDiagnostics>,
@@ -1374,8 +1377,9 @@ fn visual_qa_driver(
         Res<RenderCapabilities>,
         Res<CloudDiagnostics>,
         ResMut<CloudDebug>,
+        Res<crate::char::NpcArt>,
+        ResMut<Assets<StandardMaterial>>,
     ),
-    asset_server: Res<AssetServer>,
 ) {
     // B04 poses can override the day clock; other scenes keep the run-level
     // `--visual-qa-day`.
@@ -1407,17 +1411,21 @@ fn visual_qa_driver(
                 return;
             };
             let built = scene::build(scene, world, run.config.seed);
-            // B01 props use the real asset pipeline (GLB load, machine visual)
-            // instead of a private runner copy.
+            // B01 props use the same procedural role rigs as live NPCs.
             for prop in &built.props {
                 match prop {
-                    scene::SceneProp::Humanoid { model, pos, yaw } => {
-                        crate::char::spawn_humanoid_model(
+                    scene::SceneProp::Humanoid { role, pos, yaw } => {
+                        let seed = (pos[0].floor() as i32 as u32).wrapping_mul(31)
+                            ^ (pos[2].floor() as i32 as u32).wrapping_mul(57);
+                        let appearance = crate::save::Appearance::random(seed);
+                        crate::char::spawn_humanoid(
                             &mut commands,
-                            &asset_server,
-                            model,
+                            &npc_art,
+                            &mut npc_materials,
+                            &appearance,
                             Vec3::from_array(*pos),
                             *yaw,
+                            *role,
                         );
                     }
                     scene::SceneProp::Machine { key, pos, dir } => {
@@ -1571,7 +1579,7 @@ fn visual_qa_driver(
                     run.applied_variant = Some(variant);
                 }
                 let last_capture = (pose_count as u32 - 1) * POSE_GAP_FRAMES;
-                if elapsed >= last_capture + 8 {
+                if elapsed >= last_capture + POSE_CAPTURE_DELAY_FRAMES + 8 {
                     run.stage = next_after_poses(&run);
                     run.stage_frame = 0;
                     run.captured = 0;
@@ -1672,10 +1680,9 @@ fn visual_qa_driver(
         match run.stage {
             Stage::Poses => {
                 let elapsed = run.scene_frame.saturating_sub(run.poses_base);
-                // Capture one frame after the pose switch: `clouds`/`VisualFrame`
-                // are sampled in `Last`, so frame N carries the camera of N-1.
-                // Waiting one frame pairs each image with its own pose data.
-                if elapsed % POSE_GAP_FRAMES == 1
+                // Let camera exposure, cloud uniforms and streamed geometry
+                // settle before capture; frame N carries the camera of N-1.
+                if elapsed % POSE_GAP_FRAMES == POSE_CAPTURE_DELAY_FRAMES
                     && let Some(pose) = run.last_pose.clone()
                 {
                     spawn_capture(&mut commands, &mut run, scene, &pose.name, Some(&clouds));
@@ -1876,6 +1883,7 @@ impl Plugin for VisualQaPlugin {
             return;
         };
         app.insert_resource(VisualQaRun::new(config))
+            .insert_resource(crate::player::CursorCaptureDisabled)
             .add_systems(
                 OnEnter(GameState::Playing),
                 (visual_qa_on_play, write_capabilities_report),
@@ -1891,6 +1899,7 @@ impl Plugin for VisualQaPlugin {
                 visual_qa_driver
                     .in_set(GameSet::CameraFx)
                     .after(crate::photo::photo_camera_system)
+                    .after(crate::camera_fx::camera_shake_system)
                     .run_if(in_state(GameState::Playing)),
             );
     }

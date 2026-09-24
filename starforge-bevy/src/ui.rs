@@ -309,7 +309,6 @@ pub fn hud_system(
     time: Res<Time>,
     settings: Res<Settings>,
     space: Res<crate::daynight::SpaceFactor>,
-    day: Res<crate::daynight::DayTime>,
     mode: Res<crate::space::FlightMode>,
     ship: Option<Res<crate::space::ShipState>>,
     game: Option<Res<crate::space::SpaceGame>>,
@@ -328,6 +327,35 @@ pub fn hud_system(
     let screen = ctx.content_rect();
     let flying =
         *mode != crate::space::FlightMode::Planet && *mode != crate::space::FlightMode::Seated;
+    let mut contextual_bars = Vec::new();
+    if p.in_liquid || p.stats.o2 < 82.0 {
+        contextual_bars.push((
+            "氧气",
+            p.stats.o2,
+            egui::Color32::from_rgb(0x5b, 0xc0, 0xff),
+        ));
+    }
+    if p.stats.haz < 82.0 {
+        contextual_bars.push((
+            "防护",
+            p.stats.haz,
+            egui::Color32::from_rgb(0xff, 0xb3, 0x47),
+        ));
+    }
+    if !p.on_ground && p.stats.jet < 82.0 {
+        contextual_bars.push((
+            "喷气",
+            p.stats.jet,
+            egui::Color32::from_rgb(0xff, 0xb3, 0x47),
+        ));
+    }
+    if p.hot_idx == -1 && p.stats.laser < 82.0 {
+        contextual_bars.push((
+            "激光",
+            p.stats.laser,
+            egui::Color32::from_rgb(0xff, 0x6a, 0x4d),
+        ));
+    }
 
     // crosshair
     egui::Area::new(egui::Id::new("crosshair"))
@@ -397,25 +425,38 @@ pub fn hud_system(
             });
         });
 
-    // vitals top-left（JS 段条/细条移植）
+    // Compact vitals panel: keep health/shield visible and reveal other meters
+    // only when their resource is currently relevant.
+    let vitals_height = 100.0 + contextual_bars.len() as f32 * 12.0;
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("vitals_backing"),
+    ))
+    .rect_filled(
+        egui::Rect::from_min_size(egui::pos2(8.0, 7.0), egui::vec2(258.0, vitals_height)),
+        egui::CornerRadius::same(8),
+        egui::Color32::from_rgba_unmultiplied(7, 13, 20, 190),
+    );
     egui::Area::new(egui::Id::new("vitals"))
         .fixed_pos(egui::pos2(12.0, 10.0))
         .interactable(false)
         .show(ctx, |ui| {
             {
                 let painter = ui.painter();
+                let origin = egui::pos2(12.0, 10.0);
+                let at = |x: f32, y: f32| origin + egui::vec2(x, y);
                 let bar_x = 44.0;
                 // 护盾段条（6 段）
                 painter.text(
-                    egui::pos2(0.0, 2.0),
+                    at(0.0, 2.0),
                     egui::Align2::LEFT_TOP,
                     "护盾",
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0xb8, 0xc7, 0xd2),
                 );
                 for i in 0..6 {
                     let r = egui::Rect::from_min_size(
-                        egui::pos2(bar_x + i as f32 * 14.0, 0.0),
+                        at(bar_x + i as f32 * 14.0, 0.0),
                         egui::vec2(12.0, 12.0),
                     );
                     let on = p.stats.shield as i32 > i;
@@ -431,15 +472,15 @@ pub fn hud_system(
                 }
                 // 生命段条（8 段）
                 painter.text(
-                    egui::pos2(0.0, 18.0),
+                    at(0.0, 18.0),
                     egui::Align2::LEFT_TOP,
                     "生命",
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(0xb8, 0xc7, 0xd2),
                 );
                 for i in 0..8 {
                     let r = egui::Rect::from_min_size(
-                        egui::pos2(bar_x + i as f32 * 11.0, 16.0),
+                        at(bar_x + i as f32 * 11.0, 16.0),
                         egui::vec2(9.0, 12.0),
                     );
                     let on = p.stats.hp as i32 > i;
@@ -453,47 +494,22 @@ pub fn hud_system(
                         },
                     );
                 }
-                // 细条：氧气/防护/喷气/激光
-                for (label, val, color, y) in [
-                    (
-                        "氧气",
-                        p.stats.o2,
-                        egui::Color32::from_rgb(0x5b, 0xc0, 0xff),
-                        32.0,
-                    ),
-                    (
-                        "防护",
-                        p.stats.haz,
-                        egui::Color32::from_rgb(0xff, 0xb3, 0x47),
-                        44.0,
-                    ),
-                    (
-                        "喷气",
-                        p.stats.jet,
-                        egui::Color32::from_rgb(0xff, 0xb3, 0x47),
-                        56.0,
-                    ),
-                    (
-                        "激光",
-                        p.stats.laser,
-                        egui::Color32::from_rgb(0xff, 0x6a, 0x4d),
-                        68.0,
-                    ),
-                ] {
+                let mut y = 32.0;
+                for (label, val, color) in &contextual_bars {
                     painter.text(
-                        egui::pos2(0.0, y + 1.0),
+                        at(0.0, y + 1.0),
                         egui::Align2::LEFT_TOP,
                         label,
-                        egui::FontId::proportional(10.0),
-                        egui::Color32::from_rgb(0x7f, 0x9d, 0xb0),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(0xb8, 0xc7, 0xd2),
                     );
-                    let r = egui::Rect::from_min_size(egui::pos2(bar_x, y), egui::vec2(170.0, 6.0));
+                    let r = egui::Rect::from_min_size(at(bar_x, y), egui::vec2(170.0, 6.0));
                     painter.rect_filled(
                         r,
                         egui::CornerRadius::same(2),
                         egui::Color32::from_rgb(0x12, 0x32, 0x4a),
                     );
-                    let w = (170.0 * (val / 100.0).clamp(0.0, 1.0)).max(if val > 0.0 {
+                    let w = (170.0 * (*val / 100.0).clamp(0.0, 1.0)).max(if *val > 0.0 {
                         2.0
                     } else {
                         0.0
@@ -501,27 +517,18 @@ pub fn hud_system(
                     painter.rect_filled(
                         egui::Rect::from_min_size(r.min, egui::vec2(w, 6.0)),
                         egui::CornerRadius::same(2),
-                        color,
+                        *color,
                     );
+                    y += 12.0;
                 }
             }
-            ui.add_space(80.0);
+            ui.add_space(34.0 + contextual_bars.len() as f32 * 12.0);
             if let Some(g) = game.as_ref() {
                 ui.label(
                     egui::RichText::new(format!("₪ {}   ·   {}", p.credits, g.galaxy.name))
-                        .size(14.0)
+                        .size(13.0)
                         .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
                 );
-                if !flying {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "第 {} 颗星球 · 已到访 {}",
-                            g.galaxy.planets.len(),
-                            g.galaxy_count
-                        ))
-                        .size(13.0),
-                    );
-                }
             }
             if let Some(w) = world.as_ref() {
                 let b = w.biome();
@@ -532,37 +539,53 @@ pub fn hud_system(
                 };
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} {}  ({:.0}, {:.0}, {:.0})",
-                        b.name, haz, p.pos.x, p.pos.y, p.pos.z
+                        "{}{}",
+                        b.name,
+                        if p.stats.haz < 82.0 {
+                            format!(" · {haz}")
+                        } else {
+                            String::new()
+                        }
                     ))
-                    .size(13.0),
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(0xc9, 0xd5, 0xde)),
                 );
             }
-            let hh = (day.0 * 24.0) as i32;
-            let mm = ((day.0 * 24.0 * 60.0) as i32) % 60;
-            ui.label(egui::RichText::new(format!("⏰ {:02}:{:02}", hh, mm)).size(13.0));
             if space.0 > 0.01 && !flying {
                 ui.label(
                     egui::RichText::new(format!("🛰 轨道高度 {:.0}%", space.0 * 100.0)).size(13.0),
                 );
             }
-            // 电力
-            ui.label(
-                egui::RichText::new(format!(
-                    "⚡ {} / {:.0} kW",
-                    runtime.power.generation, runtime.power.used
-                ))
-                .size(13.0)
-                .color(if runtime.power.sat < 0.99 {
-                    egui::Color32::from_rgb(0xff, 0x55, 0x55)
-                } else {
-                    egui::Color32::from_rgb(0xff, 0xb3, 0x47)
-                }),
-            );
+            if runtime.power.used > 0.0 || runtime.power.generation > 0.0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "⚡ {} / {:.0} kW",
+                        runtime.power.generation, runtime.power.used
+                    ))
+                    .size(12.0)
+                    .color(if runtime.power.sat < 0.99 {
+                        egui::Color32::from_rgb(0xff, 0x70, 0x65)
+                    } else {
+                        egui::Color32::from_rgb(0xff, 0xd1, 0x66)
+                    }),
+                );
+            }
         });
 
-    // 任务日志 top-right
+    // Keep only the active quest in the persistent view; history belongs in L.
     if let Some(qs) = quests.as_ref() {
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("quest_backing"),
+        ))
+        .rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2((screen.max.x - 274.0).max(4.0), 7.0),
+                egui::vec2(266.0, 66.0),
+            ),
+            egui::CornerRadius::same(8),
+            egui::Color32::from_rgba_unmultiplied(7, 13, 20, 180),
+        );
         egui::Area::new(egui::Id::new("quests"))
             .fixed_pos(egui::pos2((screen.max.x - 262.0).max(8.0), 12.0))
             .interactable(false)
@@ -573,8 +596,8 @@ pub fn hud_system(
                         .size(13.0)
                         .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
                 );
-                let lo = qs.idx.saturating_sub(1);
-                let hi = (qs.idx + 1).min(data::QUESTS.len());
+                let lo = qs.idx.min(data::QUESTS.len());
+                let hi = (lo + 1).min(data::QUESTS.len());
                 for i in lo..hi {
                     let q = &data::QUESTS[i];
                     let done = i < qs.idx;
@@ -1126,6 +1149,7 @@ pub fn lighting_panel_system(
 pub fn ship_label_system(
     mut contexts: EguiContexts,
     mode: Res<crate::space::FlightMode>,
+    visual_qa: Option<Res<crate::visual_qa::VisualQaRun>>,
     game: Option<Res<crate::space::SpaceGame>>,
     ship_asset: Res<crate::space::ShipAsset>,
     ui_state: Res<UiState>,
@@ -1133,7 +1157,7 @@ pub fn ship_label_system(
     gt_q: Query<&GlobalTransform>,
     tf_q: Query<&Transform>,
 ) {
-    if *mode != crate::space::FlightMode::Planet || ui_state.locked() {
+    if *mode != crate::space::FlightMode::Planet || ui_state.locked() || visual_qa.is_some() {
         return;
     }
     let Some(game) = game else { return };
@@ -1164,11 +1188,7 @@ pub fn ship_label_system(
     let screen = ctx.content_rect();
     let ppp = ctx.pixels_per_point().max(1.0);
     let pos = egui::pos2(viewport.x / ppp, viewport.y / ppp);
-    if pos.x <= -180.0
-        || pos.x >= screen.width() + 180.0
-        || pos.y <= -60.0
-        || pos.y >= screen.height() + 60.0
-    {
+    if pos.x < 0.0 || pos.x > screen.width() || pos.y < 0.0 || pos.y > screen.height() {
         return;
     }
     let label_width = 300.0_f32.min(screen.width().max(220.0));

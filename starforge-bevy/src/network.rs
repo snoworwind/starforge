@@ -984,7 +984,8 @@ pub fn network_system(
     time: Res<Time>,
     mut net: ResMut<NetworkState>,
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    npc_art: Res<crate::char::NpcArt>,
+    mut npc_materials: ResMut<Assets<StandardMaterial>>,
     player: Query<&Player>,
     ship: Res<ShipState>,
     mode: Res<FlightMode>,
@@ -1113,10 +1114,12 @@ pub fn network_system(
                 let appearance = crate::save::Appearance::random(remote.id as u32);
                 let parts = crate::char::spawn_humanoid(
                     &mut commands,
-                    &asset_server,
+                    &npc_art,
+                    &mut npc_materials,
                     &appearance,
                     Vec3::from(remote.pos),
                     remote.yaw,
+                    crate::char::NpcRole::Traveler,
                 );
                 commands.entity(parts.root).insert(RemoteAvatar {
                     id: remote.id,

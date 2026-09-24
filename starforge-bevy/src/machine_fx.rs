@@ -157,7 +157,9 @@ pub fn machine_particle_system(
                     particles.steam(base + Vec3::Y * 1.15, 0.7);
                 }
             }
-            (MachineKind::Miner, MachineState::Miner(miner)) => {
+            (MachineKind::Miner, MachineState::Miner(miner))
+                if machine.active && (miner.prog > 0.0 || miner.output.is_some()) =>
+            {
                 // Drill beam down to the deposit plus contact sparks.
                 if tick(0.16) {
                     particles.emit(
@@ -171,7 +173,6 @@ pub fn machine_particle_system(
                             .size_scale(0.8),
                     );
                 }
-                let _ = miner;
             }
             (MachineKind::Assembler | MachineKind::Refinery, MachineState::Crafter(crafter))
                 if crafter.prog > 0.0 =>

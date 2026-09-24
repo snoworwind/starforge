@@ -17,6 +17,11 @@ pub const H: f32 = 1.8;
 pub const EYE: f32 = 1.62;
 pub const JETPACK_CEILING: f32 = 118.0;
 
+/// Test launches keep the desktop cursor available instead of capturing it
+/// for first-person look. Inserted only for explicit test/play harness modes.
+#[derive(Resource, Default)]
+pub(crate) struct CursorCaptureDisabled;
+
 #[derive(Clone, Debug)]
 pub struct Stats {
     pub hp: f32,
@@ -1446,7 +1451,15 @@ pub fn break_system(
 pub fn cursor_system(
     mut q: Query<(&mut Window, &mut CursorOptions), With<bevy::window::PrimaryWindow>>,
     ui: Res<UiState>,
+    capture_disabled: Option<Res<CursorCaptureDisabled>>,
 ) {
+    if capture_disabled.is_some() {
+        for (_window, mut opts) in &mut q {
+            opts.grab_mode = CursorGrabMode::None;
+            opts.visible = true;
+        }
+        return;
+    }
     let want_lock = !ui.locked();
     for (_w, mut opts) in &mut q {
         let mode = if want_lock {
@@ -1531,10 +1544,18 @@ pub fn prompt_system(
 
 // ---------- Enter/exit cursor handling ----------
 
-fn on_enter_playing(mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>) {
+fn on_enter_playing(
+    mut windows: Query<&mut CursorOptions, With<bevy::window::PrimaryWindow>>,
+    capture_disabled: Option<Res<CursorCaptureDisabled>>,
+) {
     for mut opts in &mut windows {
-        opts.grab_mode = CursorGrabMode::Locked;
-        opts.visible = false;
+        let capture = capture_disabled.is_none();
+        opts.grab_mode = if capture {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        opts.visible = !capture;
     }
 }
 

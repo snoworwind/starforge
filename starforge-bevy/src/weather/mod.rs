@@ -258,11 +258,20 @@ pub fn rain_audio_system(
     quality: Res<ResolvedQuality>,
     mode: Res<FlightMode>,
     world: Option<Res<World>>,
+    storm: Res<crate::storms::StormState>,
     mut rain: ResMut<RainAudio>,
     mut commands: Commands,
     sfx: Res<crate::audio::Sfx>,
 ) {
-    let raining = world.is_some() && quality.weather.effective && mode.ground_scene();
+    let raining = world.as_deref().is_some_and(|world| {
+        quality.weather.effective
+            && matches!(*mode, FlightMode::Planet | FlightMode::Seated)
+            && precipitation_active(world.biome().key, storm.kind)
+            && matches!(
+                world.biome().key,
+                "lush" | "ocean" | "murk" | "fungal" | "amber"
+            )
+    });
     if raining && rain.entity.is_none() {
         rain.entity = Some(crate::audio::play_loop(
             &mut commands,
@@ -306,6 +315,18 @@ fn weather_def(key: &str) -> WeatherDef {
         speed,
         count,
         size: Vec3::new(size.0, size.1, size.2),
+    }
+}
+
+/// Climate particles follow a visible weather event. The setting only
+/// controls whether the effect may render; it does not itself mean rain.
+fn precipitation_active(biome: &str, storm: crate::storms::StormKind) -> bool {
+    use crate::storms::StormKind;
+    match biome {
+        "desert" | "salt" => storm == StormKind::Sandstorm,
+        "frozen" | "crystal" => storm == StormKind::Aurora,
+        "alien" | "redmoss" | "hive" => storm == StormKind::MeteorShower,
+        _ => storm == StormKind::Lightning,
     }
 }
 
@@ -353,6 +374,7 @@ pub fn climate_system(
     tuning: Res<CloudTuning>,
     debug: Res<CloudDebug>,
     world: Res<World>,
+    storm: Res<crate::storms::StormState>,
     epoch: Res<crate::visual::WorldEpoch>,
     frame: Res<VisualFrame>,
     light: Res<CelestialLighting>,
@@ -374,6 +396,9 @@ pub fn climate_system(
         Without<CloudVolume>,
     >,
 ) {
+    let show_weather = quality.weather.effective
+        && matches!(*mode, FlightMode::Planet | FlightMode::Seated)
+        && precipitation_active(world.biome().key, storm.kind);
     // Fingerprint the *effective* flags so a capability downgrade despawns the
     // previous climate assets instead of leaving a half-updated scene.
     let fingerprint = (
@@ -455,6 +480,11 @@ pub fn climate_system(
                         index,
                         generation: 0,
                     },
+                    if show_weather {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    },
                     crate::InGame,
                 ));
             }
@@ -510,9 +540,6 @@ pub fn climate_system(
         ));
         runtime.material = Some(material);
     }
-
-    let show_weather =
-        quality.weather.effective && matches!(*mode, FlightMode::Planet | FlightMode::Seated);
 
     // Wind: scroll the repeating density texture in UV space. The texture is
     // toroidal, so the drift wraps around seamlessly.
@@ -1040,6 +1067,7 @@ impl Plugin for WeatherPlugin {
                 Update,
                 (climate_system, rain_audio_system, collect_cloud_diagnostics)
                     .chain()
+                    .after(crate::storms::storm_director_system)
                     .in_set(crate::schedule::GameSet::CommonWeather)
                     .run_if(in_state(crate::schedule::GameState::Playing)),
             )

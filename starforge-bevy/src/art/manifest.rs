@@ -113,7 +113,7 @@ pub fn builtin_manifest() -> Vec<ArtAsset> {
         }
     };
 
-    for path in crate::char::NPC_MODELS {
+    for path in crate::char::RESERVED_NPC_MODELS {
         let (source, license_file, notes) = if path.contains("adventurer_") {
             (
                 ArtSource::KayKit,
@@ -133,8 +133,8 @@ pub fn builtin_manifest() -> Vec<ArtAsset> {
             source,
             "CC0-1.0",
             license_file,
-            ArtRole::Live,
-            notes,
+            ArtRole::Reserve,
+            &format!("{notes}; retired from runtime NPCs in favor of the original voxel rig"),
         ));
     }
 
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn code_referenced_models_are_catalogued() {
-        for path in crate::char::NPC_MODELS {
+        for path in crate::char::RESERVED_NPC_MODELS {
             assert!(
                 manifest_by_path(path).is_some(),
                 "NPC model not in manifest: {path}"

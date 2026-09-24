@@ -116,7 +116,7 @@
 
 - 程序化贴图（方块/物品图标）与程序化星球/空间站几何属于原版 1:1 移植的一部分，保持程序生成。
 - 被动生物使用 Quaternius 的带骨骼动画 glTF（CC0）；生物 AI 状态会在 Idle 与 Walk 之间切换，模型自带四肢、尾巴和头部动作随动画播放。
-- 旧版 Poly Pizza 生物文件仍保留在仓库中，但不再作为当前被动生物的默认模型；玩家飞船与访客飞船模型来自 Kenney Space Kit（CC0）；哨兵（sentinel）来自 KayKit Skeletons（CC0）；冒险者 NPC 来自 KayKit Adventurers（CC0）。
+- 旧版 Poly Pizza 生物文件仍保留在仓库中，但不再作为当前被动生物的默认模型；玩家飞船与访客飞船模型来自 Kenney Space Kit（CC0）；哨兵（sentinel）来自 KayKit Skeletons（CC0）。旧 NPC 角色模型保留为备用；当前村民与联机角色使用项目自制体素模型。
 - 素材进入仓库前已做轻量清洗：移除 Kenney GLB 根节点平移、修正 blob 节点缩放（100 倍）造成的渲染尺寸偏差；仅修改变换，未改动任何网格/材质/动画数据。
 
 ## 发行与署名要求

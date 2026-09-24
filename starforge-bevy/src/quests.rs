@@ -344,7 +344,8 @@ pub fn village_side_quest_system(
     player: Query<&Player>,
     world: Option<Res<crate::world::World>>,
     ui: Res<crate::ui::UiState>,
-    asset_server: Res<AssetServer>,
+    npc_art: Res<crate::char::NpcArt>,
+    mut npc_materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
     if *mode != crate::space::FlightMode::Planet {
@@ -384,12 +385,15 @@ pub fn village_side_quest_system(
     let villager_pos = Vec3::new(vx as f32 + 0.5, vh as f32 + 1.0, vz as f32 + 0.5);
     if quests.villager.is_none() {
         let app = crate::save::Appearance::random((vx as u32) ^ (vz as u32));
-        let human = crate::char::spawn_humanoid(
+        let village_seed = (vx as u32).wrapping_mul(31) ^ (vz as u32).wrapping_mul(57);
+        let human = crate::char::spawn_villager(
             &mut commands,
-            &asset_server,
+            &npc_art,
+            &mut npc_materials,
             &app,
             villager_pos,
             std::f32::consts::PI,
+            village_seed,
         );
         quests.villager = Some(human.root);
         quests.villager_pos = Some(villager_pos);

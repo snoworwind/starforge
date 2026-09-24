@@ -36,6 +36,24 @@ pub const DIRECT_SUNLIGHT_BOOST: f32 = 1.0;
 /// migration.
 const GROUND_ATMOSPHERE_FILL_BASE: f32 = 0.75;
 const GROUND_AMBIENT_BASE: f32 = 0.75;
+const GROUND_DAY_EXPOSURE_EV100: f32 = 13.0;
+const GROUND_NIGHT_EXPOSURE_BIAS: f32 = 5.5;
+const GROUND_SHELTER_EXPOSURE_BIAS: f32 = 2.0;
+
+fn camera_has_opaque_roof(world: Option<&World>, position: Vec3) -> bool {
+    let Some(world) = world else { return false };
+    let x = position.x.floor() as i32;
+    let z = position.z.floor() as i32;
+    let first_y = position.y.floor() as i32 + 1;
+    let last_y = (first_y + 12).min(crate::data::WORLD_H - 1);
+    for y in first_y..=last_y {
+        let block = crate::data::block_by_id(world.get(x, y, z));
+        if block.solid && !block.transparent && !block.liquid {
+            return true;
+        }
+    }
+    false
+}
 
 /// Runtime lighting controls exposed by the in-game F3 panel. These are
 /// deliberately kept separate from the physical scene setup so artists can
@@ -122,6 +140,9 @@ pub struct SpaceFactor(pub f32);
 pub struct Sun;
 
 #[derive(Component)]
+pub struct GroundMoon;
+
+#[derive(Component)]
 pub struct Star;
 
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
@@ -186,6 +207,15 @@ pub fn daynight_system(
         ),
         (With<SunDisk>, Without<Star>, Without<GroundAtmosphere>),
     >,
+    mut moon_q: Query<
+        (&mut Transform, &mut DirectionalLight, &mut Visibility),
+        (
+            With<GroundMoon>,
+            Without<SunDisk>,
+            Without<Star>,
+            Without<GroundAtmosphere>,
+        ),
+    >,
     mut stars: Query<&mut Visibility, (With<Star>, Without<Sun>)>,
     mut ground_atmosphere: Query<&mut Transform, (With<GroundAtmosphere>, Without<Sun>)>,
     frame: Res<crate::visual::VisualFrame>,
@@ -200,7 +230,8 @@ pub fn daynight_system(
             &mut AtmosphereEnvironmentMapLight,
             &mut Bloom,
             &mut DistanceFog,
-            Option<&Exposure>,
+            Option<&mut Exposure>,
+            &GlobalTransform,
         ),
         (With<Camera3d>, Without<Player>),
     >,
@@ -251,12 +282,11 @@ pub fn daynight_system(
         // into the sky and leave the terrain unlit).
         tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, sun_direction);
         tf.translation = Vec3::ZERO;
-        // Keep night illumination low, but scale the daytime direct beam up
-        // aggressively. This affects direct sunlight only, not ambient fill.
-        // A 2% night floor is still bright enough to turn the raymarched
-        // atmosphere blue. Keep only a tiny residual for moonless ambience.
+        // Keep a subtle moonlit direct beam at night so PBR surfaces remain
+        // legible; the atmosphere still carries the cool night palette.
+        // Daylight retains the full physical sunlight range.
         let sun_illuminance =
-            lux::RAW_SUNLIGHT * (0.0001 + f * 0.9999) * daylight_boost.max(0.0) * sun_scale;
+            lux::RAW_SUNLIGHT * (0.003 + f * 0.997) * daylight_boost.max(0.0) * sun_scale;
         light.illuminance = sun_illuminance;
         // 日出/日落（f≈0.5，太阳贴近地平线）阳光是暖橙红色，正午（f=1）
         // 是暖白，夜间（f<0.5）是冷蓝。旧曲线方向反了：f=0.5 处给冷色、
@@ -286,6 +316,22 @@ pub fn daynight_system(
             Visibility::Hidden
         } else {
             Visibility::Visible
+        };
+    }
+
+    // Moonlight comes from above the horizon, independently of the sun's
+    // below-horizon direction. A low blue key light keeps terrain and PBR
+    // surfaces readable without lifting the whole night sky.
+    let moon_direction = Vec3::new(0.35, -0.82, 0.45).normalize();
+    for (mut transform, mut light, mut visibility) in &mut moon_q {
+        transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, moon_direction);
+        transform.translation = Vec3::ZERO;
+        light.illuminance = lux::RAW_SUNLIGHT * 0.002 * (1.0 - f) * sun_scale;
+        light.color = Color::srgb(0.58, 0.70, 1.0);
+        *visibility = if mode.ground_scene() && f < 0.98 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
         };
     }
 
@@ -348,8 +394,9 @@ pub fn daynight_system(
     } else {
         GROUND_ATMOSPHERE_FILL_BASE * tuning.atmosphere_fill.max(0.0)
     } * environment_scale;
-    let mut exposure_ev100 = 13.0;
-    for (mut fill, mut bloom, mut fog, exposure) in &mut cameras {
+    let mut exposure_ev100 = GROUND_DAY_EXPOSURE_EV100;
+    let exposure_blend = (1.0 - (-time.delta_secs().clamp(0.0, 0.1) * 12.0).exp()).clamp(0.0, 1.0);
+    for (mut fill, mut bloom, mut fog, mut exposure, camera_transform) in &mut cameras {
         if mode.space_scene() {
             fog.falloff = FogFalloff::Linear {
                 start: 1e9,
@@ -366,7 +413,17 @@ pub fn daynight_system(
         bloom.low_frequency_boost = tuning.bloom_low_frequency_boost.max(0.0);
         bloom.prefilter.threshold = tuning.bloom_threshold.max(0.0);
         bloom.prefilter.threshold_softness = tuning.bloom_threshold_softness.clamp(0.0, 1.0);
-        if let Some(exposure) = exposure {
+        let shelter_bias =
+            if camera_has_opaque_roof(world.as_deref(), camera_transform.translation()) {
+                GROUND_SHELTER_EXPOSURE_BIAS
+            } else {
+                0.0
+            };
+        let target_exposure =
+            (GROUND_DAY_EXPOSURE_EV100 - (1.0 - f) * GROUND_NIGHT_EXPOSURE_BIAS - shelter_bias)
+                .max(7.5);
+        if let Some(exposure) = exposure.as_deref_mut() {
+            exposure.ev100 += (target_exposure - exposure.ev100) * exposure_blend;
             exposure_ev100 = exposure.ev100;
         }
     }
@@ -377,7 +434,7 @@ pub fn daynight_system(
     // 保留夜间暗部层次，同时把默认环境光降低 25%，让实时方向光阴影在
     // 地形顶面可读。体素侧/底面的 FACE_SHADE 也同步抬高，避免降低补光后
     // 背光面重新变成纯黑；F3 ambient_multiplier 仍可整体缩放。
-    ambient.brightness = (12.0 + f * 68.0)
+    ambient.brightness = (20.0 + f * 60.0)
         * GROUND_AMBIENT_BASE
         * tuning.ambient_multiplier.max(0.0)
         * ambient_scale;
@@ -453,6 +510,16 @@ pub fn spawn_sky(
         // spherical cloud shader reads the same live sun transform directly.
         VolumetricLight,
         Sun,
+        crate::InGame,
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 0.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::IDENTITY,
+        GroundMoon,
         crate::InGame,
     ));
     // stars: small emissive quads on a dome

@@ -574,100 +574,101 @@ pub fn hud_system(
 
     // Keep only the active quest in the persistent view; history belongs in L.
     if let Some(qs) = quests.as_ref() {
-        ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Background,
-            egui::Id::new("quest_backing"),
-        ))
-        .rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2((screen.max.x - 274.0).max(4.0), 7.0),
-                egui::vec2(266.0, 66.0),
-            ),
-            egui::CornerRadius::same(8),
-            egui::Color32::from_rgba_unmultiplied(7, 13, 20, 180),
-        );
         egui::Area::new(egui::Id::new("quests"))
-            .fixed_pos(egui::pos2((screen.max.x - 262.0).max(8.0), 12.0))
+            .fixed_pos(egui::pos2((screen.max.x - 286.0).max(8.0), 7.0))
             .interactable(false)
             .show(ctx, |ui| {
-                ui.set_max_width(254.0_f32.min(screen.width().max(180.0)));
-                ui.label(
-                    egui::RichText::new("◈ 任务日志")
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
-                );
-                let lo = qs.idx.min(data::QUESTS.len());
-                let hi = (lo + 1).min(data::QUESTS.len());
-                for i in lo..hi {
-                    let q = &data::QUESTS[i];
-                    let done = i < qs.idx;
-                    let text = if done {
-                        format!("✓ {}", q.title)
-                    } else if i == qs.idx {
-                        match qs.progress(p) {
-                            Some(pr) => format!("▸ {} · {}", q.title, pr),
-                            None => format!("▸ {}", q.title),
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(7, 13, 20, 192))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(254.0_f32.min((screen.width() - 40.0).max(120.0)));
+                        ui.label(
+                            egui::RichText::new("◈ 任务日志")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
+                        );
+                        let lo = qs.idx.min(data::QUESTS.len());
+                        let hi = (lo + 1).min(data::QUESTS.len());
+                        for i in lo..hi {
+                            let q = &data::QUESTS[i];
+                            let done = i < qs.idx;
+                            let text = if done {
+                                format!("✓ {}", q.title)
+                            } else if i == qs.idx {
+                                match qs.progress(p) {
+                                    Some(pr) => format!("▸ {} · {}", q.title, pr),
+                                    None => format!("▸ {}", q.title),
+                                }
+                            } else {
+                                q.title.to_string()
+                            };
+                            let mut rt = egui::RichText::new(text).size(13.0).color(if done {
+                                egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
+                            } else {
+                                egui::Color32::WHITE
+                            });
+                            if done {
+                                rt = rt.strikethrough();
+                            }
+                            ui.label(rt);
                         }
-                    } else {
-                        q.title.to_string()
-                    };
-                    let mut rt = egui::RichText::new(text).size(12.0).color(if done {
-                        egui::Color32::from_rgb(0x7d, 0xff, 0x8a)
-                    } else {
-                        egui::Color32::WHITE
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "L 边疆公会 · {}",
+                                crate::frontier::RANKS[qs.frontier.rank()].0
+                            ))
+                            .size(13.0),
+                        );
+                        if let Some(id) = qs.frontier.tracked.as_deref()
+                            && let Some(route) =
+                                crate::frontier::EXPEDITIONS.iter().find(|r| r.id == id)
+                            && let Some(progress) = qs.frontier.routes.get(id)
+                            && let Some(step) = route.steps.get(progress.stage)
+                        {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "▸ {} · {}/4",
+                                    route.name,
+                                    progress.stage + 1
+                                ))
+                                .size(13.0),
+                            );
+                            let (have, need) =
+                                qs.frontier
+                                    .route_progress(route, p, &qs.placed, &research.techs);
+                            ui.label(
+                                egui::RichText::new(format!("{} · {have}/{need}", step.title))
+                                    .size(13.0),
+                            );
+                        }
+                        let orders = qs.frontier.active.iter().flatten().count();
+                        if orders > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("补给委托：{orders}/3 进行中"))
+                                    .size(13.0),
+                            );
+                        }
+                        if let Some(sq) = &qs.side
+                            && !sq.done
+                        {
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "✦ 村庄委托：{} ×{}（奖励 ₪{}）{}/{}",
+                                    item_name(&sq.item),
+                                    sq.need,
+                                    sq.reward,
+                                    p.inv.count_item(&sq.item).min(sq.need),
+                                    sq.need
+                                ))
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+                            );
+                        }
                     });
-                    if done {
-                        rt = rt.strikethrough();
-                    }
-                    ui.label(rt);
-                }
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "L 边疆公会 · {}",
-                        crate::frontier::RANKS[qs.frontier.rank()].0
-                    ))
-                    .size(12.0),
-                );
-                if let Some(id) = qs.frontier.tracked.as_deref()
-                    && let Some(route) = crate::frontier::EXPEDITIONS.iter().find(|r| r.id == id)
-                    && let Some(progress) = qs.frontier.routes.get(id)
-                    && let Some(step) = route.steps.get(progress.stage)
-                {
-                    ui.label(
-                        egui::RichText::new(format!("▸ {} · {}/4", route.name, progress.stage + 1))
-                            .size(12.0),
-                    );
-                    let (have, need) =
-                        qs.frontier
-                            .route_progress(route, p, &qs.placed, &research.techs);
-                    ui.label(
-                        egui::RichText::new(format!("{} · {have}/{need}", step.title)).size(12.0),
-                    );
-                }
-                let orders = qs.frontier.active.iter().flatten().count();
-                if orders > 0 {
-                    ui.label(
-                        egui::RichText::new(format!("补给委托：{orders}/3 进行中")).size(12.0),
-                    );
-                }
-                if let Some(sq) = &qs.side
-                    && !sq.done
-                {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "✦ 村庄委托：{} ×{}（奖励 ₪{}）{}/{}",
-                            item_name(&sq.item),
-                            sq.need,
-                            sq.reward,
-                            p.inv.count_item(&sq.item).min(sq.need),
-                            sq.need
-                        ))
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
-                    );
-                }
             });
     }
 

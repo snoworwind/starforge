@@ -495,7 +495,7 @@ pub fn run() {
                 })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "STARFORGE 星穹熔炉 · Bevy 移植版".into(),
+                        title: "STARFORGE · 星穹熔炉".into(),
                         resolution: (1280, 720).into(),
                         present_mode: PresentMode::AutoVsync,
                         ..default()

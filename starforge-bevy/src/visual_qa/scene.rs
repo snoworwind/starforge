@@ -1103,7 +1103,11 @@ mod tests {
             .filter(|prop| matches!(prop, SceneProp::Humanoid { .. }))
             .count();
         assert!(machines >= 5, "machine family row");
-        assert_eq!(humanoids, 3, "character lineup");
+        assert_eq!(
+            humanoids,
+            crate::char::NpcRole::SHOWCASE.len(),
+            "character lineup"
+        );
         assert!(built.modified_voxels > 0);
         assert!(built.route.is_empty());
     }

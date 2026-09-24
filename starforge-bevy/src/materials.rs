@@ -288,7 +288,21 @@ pub fn lamp_pool_system(
             }
         }
     }
-    found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // A built lamp must retain a point-light slot when nearby natural glow
+    // blocks fill the six-light pool. Otherwise a visibly bright fixture can
+    // leave its room almost black.
+    found.sort_by(|a, b| {
+        let rank = |entry: &(f32, [i32; 3], u8)| {
+            if entry.0 < 1_600.0 && crate::data::block_by_id(entry.2).key == "lamp" {
+                0
+            } else {
+                1
+            }
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
     let glow_color = |key: &str| match key {
         "crystal" => (0x7f as f32, 0xe8 as f32, 0xe0 as f32),
         "glow_shroom" => (0x4e as f32, 0xe8 as f32, 0xb8 as f32),
@@ -313,13 +327,17 @@ pub fn lamp_pool_system(
             let (r, g, b) = glow_color(key);
             l.color = Color::srgb(r / 255.0, g / 255.0, b / 255.0);
             l.intensity = match key {
-                "lamp" => 18_000.0,
-                "crystal" => 9_000.0,
-                _ => 4_000.0,
+                "lamp" => 12_000.0,
+                "crystal" => 6_000.0,
+                _ => 2_500.0,
             };
             l.range = 9.0;
+            // Keep local fixtures from lighting the far side of walls. Only
+            // the two nearest lamps need cubemap shadows around the player.
+            l.shadow_maps_enabled = key == "lamp" && i < 2;
         } else {
             l.intensity = 0.0;
+            l.shadow_maps_enabled = false;
         }
     }
 }

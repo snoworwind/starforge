@@ -267,61 +267,100 @@ fn menu_system(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
-    egui::CentralPanel::default().show(&mut root, |ui| {
+    let panel =
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT));
+    panel.show(&mut root, |ui| {
+        paint_menu_backdrop(ui, menu.screen != MenuScreen::Title);
         match menu.screen {
             MenuScreen::Title => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(120.0);
-                    ui.label(
-                        egui::RichText::new("STARFORGE")
-                            .size(56.0)
-                            .strong()
-                            .color(egui::Color32::from_rgb(0x35, 0xe0, 0xe8)),
-                    );
-                    ui.label(egui::RichText::new("星穹熔炉 · 体素星际工厂").size(22.0));
-                    ui.label(
-                        egui::RichText::new("Bevy (Rust) 移植版")
-                            .size(14.0)
-                            .color(egui::Color32::GRAY),
-                    );
-                    ui.add_space(48.0);
-                    let r_new = ui.add_sized([260.0, 40.0], egui::Button::new("🚀 新世界"));
-                    if r_new.clicked() {
-                        menu.screen = MenuScreen::NewWorld;
-                        menu.world_name = random_planet_name();
-                        menu.char_name = "探险家".into();
-                        menu.seed_text = format!("{}", rand_seed());
-                        menu.biome_idx = 0;
-                        menu.difficulty = 1;
-                        menu.creative = false;
-                        menu.error = None;
-                    }
-                    if ui
-                        .add_sized([260.0, 40.0], egui::Button::new("📂 读取世界"))
-                        .clicked()
-                    {
-                        menu.screen = MenuScreen::LoadWorld;
-                    }
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.label(format!("渲染距离: {} 区块", settings.view_dist));
-                        ui.label(format!("灵敏度: {:.1}", settings.mouse_sens));
-                        ui.label(format!(
-                            "渲染: {}",
-                            if settings.pixelated {
-                                "像素"
-                            } else {
-                                "现代"
-                            }
-                        ));
+                let left_margin = (ui.available_width() * 0.10).clamp(32.0, 150.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(left_margin);
+                    ui.vertical(|ui| {
+                        ui.set_width(380.0);
+                        ui.add_space((ui.available_height() * 0.16).clamp(55.0, 130.0));
+                        ui.label(
+                            egui::RichText::new("探索  /  建造  /  远航")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(0x8b, 0xc4, 0xd0)),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("STARFORGE")
+                                .size(62.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(0xd8, 0xfa, 0xff)),
+                        );
+                        ui.label(
+                            egui::RichText::new("星穹熔炉 · 体素星际工厂")
+                                .size(21.0)
+                                .color(egui::Color32::from_rgb(0x9e, 0xd0, 0xd8)),
+                        );
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new("在陌生星球点亮第一座工厂")
+                                .size(15.0)
+                                .color(egui::Color32::from_rgb(0x9a, 0xa9, 0xb9)),
+                        );
+                        ui.add_space(48.0);
+                        let r_new = ui.add_sized(
+                            [300.0, 48.0],
+                            egui::Button::new(egui::RichText::new("开始新世界  →").size(18.0))
+                                .fill(egui::Color32::from_rgb(0x13, 0x8e, 0xa3))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(0x5a, 0xdf, 0xea),
+                                )),
+                        );
+                        if r_new.clicked() {
+                            menu.screen = MenuScreen::NewWorld;
+                            menu.world_name = random_planet_name();
+                            menu.char_name = "探险家".into();
+                            menu.seed_text = format!("{}", rand_seed());
+                            menu.biome_idx = 0;
+                            menu.difficulty = 1;
+                            menu.creative = false;
+                            menu.error = None;
+                        }
+                        ui.add_space(7.0);
+                        if ui
+                            .add_sized(
+                                [300.0, 45.0],
+                                egui::Button::new(
+                                    egui::RichText::new("继续旅程  /  读取世界").size(16.0),
+                                )
+                                .fill(egui::Color32::from_rgb(0x18, 0x2b, 0x3b))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(0x38, 0x65, 0x75),
+                                )),
+                            )
+                            .clicked()
+                        {
+                            menu.screen = MenuScreen::LoadWorld;
+                        }
+                        ui.add_space(22.0);
+                        if ui
+                            .add_sized([300.0, 36.0], egui::Button::new("退出游戏"))
+                            .clicked()
+                        {
+                            std::process::exit(0);
+                        }
+                        ui.add_space(16.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "视距 {} 区块   ·   {}渲染",
+                                settings.view_dist,
+                                if settings.pixelated {
+                                    "像素"
+                                } else {
+                                    "现代"
+                                }
+                            ))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(0x72, 0x8a, 0x99)),
+                        );
                     });
-                    ui.add_space(20.0);
-                    if ui
-                        .add_sized([260.0, 36.0], egui::Button::new("🚪 退出"))
-                        .clicked()
-                    {
-                        std::process::exit(0);
-                    }
                 });
             }
             MenuScreen::NewWorld => {
@@ -575,6 +614,104 @@ fn menu_system(
             }
         }
     });
+}
+
+fn paint_menu_backdrop(ui: &egui::Ui, show_form_panel: bool) {
+    let rect = ui.max_rect();
+    let painter = ui.painter();
+    let bands = 32;
+    for i in 0..bands {
+        let t = i as f32 / bands as f32;
+        let y0 = rect.top() + rect.height() * t;
+        let y1 = rect.top() + rect.height() * (i + 1) as f32 / bands as f32 + 1.0;
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
+            0.0,
+            egui::Color32::from_rgb(
+                (9.0 + t * 5.0) as u8,
+                (22.0 + t * 13.0) as u8,
+                (38.0 + t * 18.0) as u8,
+            ),
+        );
+    }
+
+    // A sparse, fixed star field keeps the menu still and readable.
+    let mut seed = 0x73ad_5e21u32;
+    for _ in 0..110 {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let x = rect.left() + (seed as f32 / u32::MAX as f32) * rect.width();
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let y = rect.top() + (seed as f32 / u32::MAX as f32) * rect.height();
+        painter.circle_filled(
+            egui::pos2(x, y),
+            if seed & 7 == 0 { 1.3 } else { 0.7 },
+            egui::Color32::from_rgba_unmultiplied(167, 219, 235, 80),
+        );
+    }
+
+    let planet_radius = (rect.width() * 0.19).clamp(120.0, 260.0);
+    let planet = egui::pos2(rect.right() - planet_radius * 1.04, rect.center().y + 35.0);
+    for i in (0..5).rev() {
+        painter.circle_filled(
+            planet,
+            planet_radius + 18.0 + i as f32 * 16.0,
+            egui::Color32::from_rgba_unmultiplied(39, 147, 177, 7),
+        );
+    }
+    let ring: Vec<egui::Pos2> = (0..=96)
+        .map(|i| {
+            let a = i as f32 / 96.0 * std::f32::consts::TAU;
+            let x = a.cos() * planet_radius * 1.48;
+            let y = a.sin() * planet_radius * 0.47;
+            egui::pos2(planet.x + x + y * 0.28, planet.y + y - x * 0.16)
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        ring.clone(),
+        egui::Stroke::new(
+            1.4,
+            egui::Color32::from_rgba_unmultiplied(143, 213, 222, 118),
+        ),
+    ));
+    painter.circle_filled(planet, planet_radius, egui::Color32::from_rgb(19, 61, 76));
+    painter.circle_stroke(
+        planet,
+        planet_radius,
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(83, 184, 196)),
+    );
+    for (offset, alpha) in [(-0.42, 22), (-0.12, 30), (0.24, 18), (0.55, 24)] {
+        let y = planet.y + planet_radius * offset;
+        let half = (planet_radius * planet_radius - (y - planet.y).powi(2)).sqrt();
+        painter.line_segment(
+            [
+                egui::pos2(planet.x - half, y),
+                egui::pos2(planet.x + half, y),
+            ],
+            egui::Stroke::new(
+                12.0,
+                egui::Color32::from_rgba_unmultiplied(84, 177, 177, alpha),
+            ),
+        );
+    }
+    painter.add(egui::Shape::line(
+        ring[..=48].to_vec(),
+        egui::Stroke::new(
+            1.4,
+            egui::Color32::from_rgba_unmultiplied(173, 238, 244, 190),
+        ),
+    ));
+
+    if show_form_panel {
+        let size = egui::vec2(
+            700.0_f32.min(rect.width() - 32.0),
+            660.0_f32.min(rect.height() - 24.0),
+        );
+        painter.rect_filled(
+            egui::Rect::from_center_size(rect.center(), size),
+            egui::CornerRadius::same(12),
+            egui::Color32::from_rgba_unmultiplied(8, 17, 27, 225),
+        );
+    }
 }
 
 fn swatch_row(ui: &mut egui::Ui, label: &str, opts: &[&str], current: &mut String) {

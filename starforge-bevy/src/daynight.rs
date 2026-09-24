@@ -30,12 +30,11 @@ pub const GROUND_ATMOSPHERE_OUTER_RADIUS: f32 =
 /// fixed `Exposure { ev100: 13.0 }` baseline (Bevy's atmosphere example
 /// configuration), RAW_SUNLIGHT × 1.0 is the correct physical value.
 pub const DIRECT_SUNLIGHT_BOOST: f32 = 1.0;
-/// Presentation baselines keep indirect light from washing out cast shadows.
-/// The runtime F3 values remain multipliers, so an existing saved value of
-/// 1.0 automatically receives the balanced baseline without a settings
+/// Indirect fill keeps shadowed voxel faces and night terrain readable.
+/// The runtime F3 values remain multipliers, so saved settings need no
 /// migration.
-const GROUND_ATMOSPHERE_FILL_BASE: f32 = 0.75;
-const GROUND_AMBIENT_BASE: f32 = 0.75;
+const GROUND_ATMOSPHERE_FILL_BASE: f32 = 0.90;
+const GROUND_AMBIENT_BASE: f32 = 0.90;
 const GROUND_DAY_EXPOSURE_EV100: f32 = 13.0;
 const GROUND_NIGHT_EXPOSURE_BIAS: f32 = 5.5;
 const GROUND_SHELTER_EXPOSURE_BIAS: f32 = 2.0;
@@ -431,10 +430,9 @@ pub fn daynight_system(
     let day_amb = Color::srgb(0.75, 0.8, 0.9);
     let night_amb = Color::srgb(0.16, 0.17, 0.26);
     ambient.color = lerp_color(day_amb, night_amb, 1.0 - f);
-    // 保留夜间暗部层次，同时把默认环境光降低 25%，让实时方向光阴影在
-    // 地形顶面可读。体素侧/底面的 FACE_SHADE 也同步抬高，避免降低补光后
-    // 背光面重新变成纯黑；F3 ambient_multiplier 仍可整体缩放。
-    ambient.brightness = (20.0 + f * 60.0)
+    // 夜间保留暗部层次，并为阴影中的地形留出可辨识的亮度。
+    // F3 ambient_multiplier 仍可整体缩放。
+    ambient.brightness = (30.0 + f * 50.0)
         * GROUND_AMBIENT_BASE
         * tuning.ambient_multiplier.max(0.0)
         * ambient_scale;

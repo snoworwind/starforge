@@ -166,11 +166,11 @@ fn painters() -> Vec<(&'static str, Painter)> {
                 b,
                 r,
                 &[
-                    hex("#3f9b72"),
-                    hex("#2d8068"),
-                    hex("#56b982"),
-                    hex("#347f70"),
-                    hex("#65c58d"),
+                    hex("#528b45"),
+                    hex("#477d3c"),
+                    hex("#64964e"),
+                    hex("#3f7538"),
+                    hex("#73a45b"),
                 ],
             )
         }),
@@ -205,7 +205,7 @@ fn painters() -> Vec<(&'static str, Painter)> {
                         b,
                         x,
                         y,
-                        [hex("#3f9b72"), hex("#2d8068"), hex("#56b982")]
+                        [hex("#528b45"), hex("#477d3c"), hex("#64964e")]
                             [((r.next() * 3.0) as usize).min(2)],
                     );
                 }
@@ -301,21 +301,31 @@ fn painters() -> Vec<(&'static str, Painter)> {
         }),
         ("leaves", |b, r| {
             let pal = [
-                hex("#3f7d2c"),
-                hex("#357024"),
-                hex("#488a33"),
-                hex("#2e6420"),
+                hex("#4c8134"),
+                hex("#3e722d"),
+                hex("#629744"),
+                hex("#315f28"),
+                hex("#78a755"),
             ];
+            // Four-pixel patches make the canopy read as leaf clusters instead
+            // of a uniform field of independent bright and dark pixels.
+            let mut patches = [0usize; 16];
+            for patch in &mut patches {
+                *patch = ((r.next() * pal.len() as f32) as usize).min(pal.len() - 1);
+            }
             for y in 0..16 {
                 for x in 0..16 {
-                    if r.next() < 0.24 {
+                    if r.next() < 0.30 {
                         set(b, x, y, [0, 0, 0, 0]);
                         continue;
                     }
-                    set(b, x, y, pal[((r.next() * 4.0) as usize).min(3)]);
-                    if r.next() < 0.06 {
-                        set(b, x, y, hex("#5aa93f"));
-                    }
+                    let patch = (y / 4 * 4 + x / 4) as usize;
+                    let tone = if r.next() < 0.18 {
+                        ((r.next() * pal.len() as f32) as usize).min(pal.len() - 1)
+                    } else {
+                        patches[patch]
+                    };
+                    set(b, x, y, pal[tone]);
                 }
             }
         }),

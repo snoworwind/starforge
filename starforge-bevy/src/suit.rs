@@ -464,7 +464,12 @@ pub fn suit_hud_system(
     const SIZE: f32 = 34.0;
     const GAP: f32 = 6.0;
     let total = abilities.len() as f32 * SIZE + (abilities.len() as f32 - 1.0) * GAP;
-    let start = egui::pos2(viewport.center().x - total * 0.5, viewport.bottom() - 108.0);
+    let hotbar_top =
+        viewport.bottom() - crate::ui::HOTBAR_BOTTOM_INSET - crate::ui::HOTBAR_SLOT_SIZE;
+    let start = egui::pos2(
+        viewport.center().x - total * 0.5,
+        hotbar_top - SIZE - crate::ui::SUIT_CHIP_GAP,
+    );
     for (index, ability) in abilities.iter().enumerate() {
         let rect = egui::Rect::from_min_size(
             egui::pos2(start.x + index as f32 * (SIZE + GAP), start.y),
@@ -523,12 +528,33 @@ pub fn suit_hud_system(
         // Medkit count badge.
         if *ability == Ability::Medkit {
             let count = player.inv.count_item("medkit");
-            painter.text(
-                egui::pos2(rect.max.x - 4.0, rect.max.y - 3.0),
-                egui::Align2::RIGHT_BOTTOM,
+            let text_color = egui::Color32::from_gray(235);
+            let count_galley = painter.layout_no_wrap(
                 format!("{count}"),
-                egui::FontId::proportional(10.0),
-                egui::Color32::from_gray(200),
+                egui::FontId::proportional(9.0),
+                text_color,
+            );
+            let badge_size = egui::vec2((count_galley.size().x + 4.0).max(15.0), 14.0);
+            // Keep the count below the key label and fit multi-stack totals.
+            let badge = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - badge_size.x * 0.5, rect.bottom() - 2.0),
+                badge_size,
+            );
+            painter.rect_filled(
+                badge,
+                egui::CornerRadius::same(4),
+                egui::Color32::from_rgba_unmultiplied(5, 9, 15, 240),
+            );
+            painter.rect_stroke(
+                badge,
+                egui::CornerRadius::same(4),
+                egui::Stroke::new(0.75, accent),
+                egui::StrokeKind::Middle,
+            );
+            painter.galley(
+                badge.center() - count_galley.size() * 0.5,
+                count_galley,
+                text_color,
             );
         }
     }

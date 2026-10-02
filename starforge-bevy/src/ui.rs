@@ -13,6 +13,10 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
 
+pub(crate) const HOTBAR_SLOT_SIZE: f32 = 48.0;
+pub(crate) const HOTBAR_BOTTOM_INSET: f32 = 24.0;
+pub(crate) const SUIT_CHIP_GAP: f32 = 8.0;
+
 // ---------- In-game panel state ----------
 
 #[derive(Resource, Default)]
@@ -399,11 +403,11 @@ pub fn hud_system(
         });
 
     // hotbar
-    let slot_px = 48.0;
+    let slot_px = HOTBAR_SLOT_SIZE;
     let total = slot_px * 10.0 + 11.0 * 4.0;
     let origin = egui::pos2(
         screen.center().x - total / 2.0,
-        screen.max.y - slot_px - 24.0,
+        screen.max.y - slot_px - HOTBAR_BOTTOM_INSET,
     );
     egui::Area::new(egui::Id::new("hotbar"))
         .fixed_pos(origin)

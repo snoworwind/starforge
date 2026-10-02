@@ -169,7 +169,14 @@ pub fn minimap_system(
     };
     let viewport = ctx.viewport_rect();
     let map_size = 176.0;
-    let origin = egui::pos2(viewport.left() + 16.0, viewport.bottom() - map_size - 16.0);
+    // Reserve room for the caption below the map and the viewport safe area.
+    const BOTTOM_MARGIN: f32 = 16.0;
+    const CAPTION_GAP: f32 = 6.0;
+    const CAPTION_HEIGHT: f32 = 14.0;
+    let origin = egui::pos2(
+        viewport.left() + 16.0,
+        viewport.bottom() - map_size - BOTTOM_MARGIN - CAPTION_GAP - CAPTION_HEIGHT,
+    );
     let rect = egui::Rect::from_min_size(origin, egui::vec2(map_size, map_size));
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Middle,
@@ -275,7 +282,7 @@ pub fn minimap_system(
     label("E", egui::pos2(rect.right() - 9.0, rect.center().y));
     // Biome caption.
     painter.text(
-        egui::pos2(rect.left(), rect.bottom() + 6.0),
+        egui::pos2(rect.left(), rect.bottom() + CAPTION_GAP),
         egui::Align2::LEFT_TOP,
         format!("{} · N 隐藏", world.biome().name),
         egui::FontId::proportional(11.0),

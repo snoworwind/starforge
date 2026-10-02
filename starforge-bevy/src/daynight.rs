@@ -215,7 +215,6 @@ pub fn daynight_system(
             Without<GroundAtmosphere>,
         ),
     >,
-    mut stars: Query<&mut Visibility, (With<Star>, Without<Sun>)>,
     mut ground_atmosphere: Query<&mut Transform, (With<GroundAtmosphere>, Without<Sun>)>,
     frame: Res<crate::visual::VisualFrame>,
     mut celestial: ResMut<crate::visual::CelestialLighting>,
@@ -441,14 +440,6 @@ pub fn daynight_system(
     celestial.ambient_brightness = ambient.brightness;
     celestial.environment_fill = atmosphere_fill;
     celestial.exposure_ev100 = exposure_ev100;
-
-    for mut vis in &mut stars {
-        *vis = if sf > 0.6 {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
 }
 
 /// Spawn the sun, stars and lamp pool lights.
@@ -611,11 +602,14 @@ impl Plugin for DayNightPlugin {
 }
 fn space_sky_sync_system(
     mode: Res<crate::space::FlightMode>,
+    day: Res<DayTime>,
+    space: Res<SpaceFactor>,
     mut stars: Query<&mut Visibility, With<Star>>,
 ) {
-    let show = mode.ground_scene();
+    let daylight = day_factor(day.0);
+    let show = mode.ground_scene() && stars_ok(space.0, daylight);
     for mut vis in &mut stars {
-        *vis = if show && stars_ok() {
+        *vis = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -623,8 +617,10 @@ fn space_sky_sync_system(
     }
 }
 
-fn stars_ok() -> bool {
-    true
+/// Stars are hidden in full daylight, but remain visible at night and through
+/// the dim dusk/dawn transition when the atmosphere is thin.
+fn stars_ok(space_factor: f32, daylight: f32) -> bool {
+    daylight < 0.2 || (space_factor > 0.6 && daylight < 0.65)
 }
 
 #[cfg(test)]
@@ -642,5 +638,50 @@ mod tests {
         );
         let (sun, ambient, environment) = probe_scales(LightingProbeMode::Overcast);
         assert!(sun < 0.5 && ambient > 1.0 && environment == 1.0);
+    }
+
+    #[test]
+    fn stars_follow_night_and_thin_atmosphere_without_showing_in_daylight() {
+        assert!(!stars_ok(0.0, 1.0));
+        assert!(stars_ok(0.0, 0.0));
+        assert!(stars_ok(0.8, 0.5));
+        assert!(!stars_ok(0.8, 0.9));
+    }
+
+    #[test]
+    fn ground_stars_sync_across_daylight_and_flight_transitions() {
+        let mut app = App::new();
+        app.insert_resource(FlightMode::Planet)
+            .insert_resource(DayTime(0.0))
+            .insert_resource(SpaceFactor(0.0))
+            .add_systems(Update, space_sky_sync_system);
+        let star = app.world_mut().spawn((Star, Visibility::Hidden)).id();
+        let unrelated = app.world_mut().spawn(Visibility::Visible).id();
+
+        let cases = [
+            (FlightMode::Planet, 0.0, 0.0, Visibility::Visible),
+            (FlightMode::Planet, 0.5, 0.0, Visibility::Hidden),
+            (FlightMode::Atmo, 0.25, 0.8, Visibility::Visible),
+            (FlightMode::AtmoLand, 0.25, 0.0, Visibility::Hidden),
+            (FlightMode::Space, 0.0, 1.0, Visibility::Hidden),
+            (FlightMode::Warping, 0.0, 1.0, Visibility::Hidden),
+            (FlightMode::Station, 0.0, 1.0, Visibility::Hidden),
+            (FlightMode::Seated, 0.0, 0.0, Visibility::Visible),
+        ];
+        for (mode, day, space, expected) in cases {
+            *app.world_mut().resource_mut::<FlightMode>() = mode;
+            app.world_mut().resource_mut::<DayTime>().0 = day;
+            app.world_mut().resource_mut::<SpaceFactor>().0 = space;
+            app.update();
+            assert_eq!(
+                *app.world().get::<Visibility>(star).unwrap(),
+                expected,
+                "mode={mode:?}, day={day}, space={space}",
+            );
+            assert_eq!(
+                *app.world().get::<Visibility>(unrelated).unwrap(),
+                Visibility::Visible,
+            );
+        }
     }
 }

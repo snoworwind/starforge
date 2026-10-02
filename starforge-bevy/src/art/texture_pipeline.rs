@@ -244,7 +244,12 @@ pub fn threshold_coverage(pixels: &[u8], cutoff: u8) -> f32 {
     if count == 0 {
         return 0.0;
     }
-    let covered = pixels.chunks_exact(4).filter(|p| p[3] >= cutoff).count();
+    let covered = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[3] >= cutoff)
+        .count();
     covered as f32 / count as f32
 }
 
@@ -267,7 +272,9 @@ pub fn preserve_alpha_coverage(level: &mut SourceImage, target: f32) -> f32 {
     }
     let mean: f32 = level
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| pixel[3] as f32 / 255.0)
         .sum::<f32>()
         / count as f32;
@@ -276,7 +283,7 @@ pub fn preserve_alpha_coverage(level: &mut SourceImage, target: f32) -> f32 {
     }
     let scale = (target / mean).clamp(0.0, 4.0);
     let width = level.width.max(1) as usize;
-    for (index, pixel) in level.pixels.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in level.pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let x = index % width;
         let y = index / width;
         let probability = (pixel[3] as f32 / 255.0 * scale).clamp(0.0, 1.0);
@@ -767,8 +774,10 @@ pub fn coverage_stats(chains: &[MipChain]) -> Vec<CoverageStats> {
             let mut worst = 0.0f32;
             for (a, b) in actual
                 .pixels
-                .chunks_exact(4)
-                .zip(naive.pixels.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(naive.pixels.as_chunks::<4>().0.iter())
             {
                 if b[3] > 0 && b[3] < 255 {
                     let delta = (0..3)

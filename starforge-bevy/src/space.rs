@@ -1937,14 +1937,13 @@ pub fn spawn_ship(
 
 /// Spawn a licensed glTF ship from `assets/models/external`.
 ///
-/// The old procedural builder above is kept as a reference for the original
-/// silhouette, but all live ship call sites use this asset-backed path. The
-/// logical save-game model names are mapped to the downloaded models so old
-/// saves keep working without migration.
+/// Missing optional downloads use the procedural builder above, keeping ships
+/// visible and interactive in the minimal release. Save-game model names stay
+/// unchanged so installing external models later requires no migration.
 pub fn spawn_external_ship(
     commands: &mut Commands,
-    _meshes: &mut Assets<Mesh>,
-    _mats: &mut Assets<StandardMaterial>,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     pos: Vec3,
     yaw: f32,
@@ -2007,6 +2006,9 @@ pub fn spawn_external_ship(
             ),
         },
     };
+    if !crate::app::asset_file_exists(path) {
+        return spawn_ship(commands, meshes, mats, asset_server, pos, yaw, cls);
+    }
     let root = commands
         .spawn((
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -2223,7 +2225,9 @@ pub fn spawn_space_scene(
     for pd in &galaxy.planets {
         // 起源星（家园星系 id 0「始源星」）：太空侧使用地球模型 assets/models/earth，
         // 其余行星保持程序化贴图球。模型实测半径约 6.47，缩放到行星半径。
-        let is_origin = galaxy.seed == data::HOME_GALAXY_SEED && pd.id == 0;
+        let is_origin = galaxy.seed == data::HOME_GALAXY_SEED
+            && pd.id == 0
+            && crate::app::asset_file_exists("models/earth/scene.gltf");
         let root = if is_origin {
             commands
                 .spawn((

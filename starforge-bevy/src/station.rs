@@ -388,15 +388,56 @@ pub fn spawn_station_model(
             crate::InGame,
         ))
         .id();
-    let model = commands
-        .spawn((
-            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path))),
-            Transform::from_rotation(rotation).with_scale(Vec3::splat(scale)),
-            crate::InGame,
-        ))
-        .id();
-    crate::space::attach_external_animation(commands, model, path);
-    commands.entity(root).add_child(model);
+    if crate::app::asset_file_exists(path) {
+        let model = commands
+            .spawn((
+                WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path))),
+                Transform::from_rotation(rotation).with_scale(Vec3::splat(scale)),
+                crate::InGame,
+            ))
+            .id();
+        crate::space::attach_external_animation(commands, model, path);
+        commands.entity(root).add_child(model);
+    } else {
+        // Match the existing collision boxes so an asset-free station has a
+        // visible hull and keeps the same docking and service coordinates.
+        let hull = mats.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.28, 0.34),
+            metallic: 0.65,
+            perceptual_roughness: 0.55,
+            ..default()
+        });
+        for &(minimum, maximum) in m.boxes {
+            let minimum = Vec3::from(minimum);
+            let maximum = Vec3::from(maximum);
+            let module = commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::from_size((maximum - minimum) * scale))),
+                    MeshMaterial3d(hull.clone()),
+                    Transform::from_translation(rotation * ((minimum + maximum) * 0.5 * scale))
+                        .with_rotation(rotation),
+                    StationModule,
+                    crate::InGame,
+                ))
+                .id();
+            commands.entity(root).add_child(module);
+        }
+        let beacon = commands
+            .spawn((
+                Mesh3d(meshes.add(Sphere::new(3.0))),
+                MeshMaterial3d(mats.add(StandardMaterial {
+                    base_color: Color::srgb(0.15, 0.8, 1.0),
+                    emissive: LinearRgba::new(0.05, 0.6, 1.0, 1.0) * 3.0,
+                    unlit: true,
+                    ..default()
+                })),
+                Transform::from_translation(m.hover_point(pos) - pos - Vec3::Y * 6.0),
+                StationModule,
+                crate::InGame,
+            ))
+            .id();
+        commands.entity(root).add_child(beacon);
+    }
 
     // 交互系统使用独立的防护盾实体，不依赖外部模型的材质节点。
     let shield = commands

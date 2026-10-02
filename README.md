@@ -23,7 +23,8 @@ Bevy 版全面美术提升的工程规划见 [`美术与视觉质量升级方案
 发布时请将 `assets/` 放在可执行文件旁边；Bevy 版会固定从可执行文件所在目录读取
 模型、纹理、动画和着色器，不依赖启动时的当前工作目录。
 
-> 注意：外部飞船和空间站模型体积较大，不包含在 Git 仓库中。首次运行前请按
+> 注意：外部飞船和空间站模型体积较大，不包含在 Git 仓库中。基础版使用程序化
+> 飞船、空间站和起源星外观即可运行。如需完整模型，请按
 > [`starforge-bevy/CREDITS.md`](starforge-bevy/CREDITS.md) 中的来源链接下载，并按
 > [`assets/licenses/models-directory-audit.md`](starforge-bevy/assets/licenses/models-directory-audit.md)
 > 的目录结构解压到 `starforge-bevy/assets/models/external/`。

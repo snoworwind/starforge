@@ -154,6 +154,16 @@ pub fn resolve_asset_root(exe_dir: Option<&Path>, override_value: Option<&str>) 
     }
 }
 
+/// Optional models must be checked against the same root used by AssetPlugin.
+/// Missing downloads use procedural visuals in the minimal release package.
+pub fn asset_file_exists(relative: &str) -> bool {
+    let override_value = std::env::var("STARFORGE_ASSET_DIR").ok();
+    resolve_asset_root(executable_dir().as_deref(), override_value.as_deref())
+        .path
+        .join(relative)
+        .is_file()
+}
+
 /// Result of one bootstrap pass over an asset root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetBootstrapReport {

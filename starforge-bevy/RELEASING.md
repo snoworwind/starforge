@@ -16,7 +16,7 @@ GitHub Release，也可在 GitHub 的 **Actions → Release → Run workflow** �
    git push origin v0.1.1
    ```
 
-当前 Cargo 版本为 `0.1.0` 时，也可以在包含发布配置的提交上创建 `v0.1.0`。
+当前预发布 Cargo 版本为 `0.1.0-alpha.1`，对应标签 `v0.1.0-alpha.1`。
 预发布版本应同时使用 Cargo 版本 `0.2.0-rc.1` 和标签 `v0.2.0-rc.1`；流程会自动
 标记为 **Pre-release**，不会将它设为 Latest。
 
@@ -26,6 +26,7 @@ GitHub Release，也可在 GitHub 的 **Actions → Release → Run workflow** �
 - 复用 `test.yml`，执行打包测试、格式检查、`cargo check`、Clippy 和 Rust 测试。
 - 使用 `windows-2022` 与 `x86_64-pc-windows-msvc` 执行锁定依赖的 release 构建，静态链接 MSVC 运行库。
 - 生成 ZIP 与 SHA-256 校验文件，上传构建产物（保留 7 天）。
+- 上传前解压 ZIP，在隔离素材目录中运行包内程序的 `--art-audit`，验证必需素材与许可完整，且没有大型外部模型。
 - 验证校验值，创建 Release 草稿，上传 ZIP 和 `SHA256SUMS.txt`，上传成功后公开发布。
 
 ZIP 名称为 `starforge-v<版本>-x86_64-pc-windows-msvc.zip`，解压结构为：
@@ -43,6 +44,7 @@ starforge-v0.1.1-x86_64-pc-windows-msvc/
 完整解压后运行 `starforge-bevy.exe`；必须保留旁边的 `assets/`。
 仅打包 Git 跟踪的素材，不包含存档、调试文件、构建缓存及本地下载的大型外部模型。
 外部飞船、空间站和地球模型按 `README.md` / `CREDITS.md` 的说明另行下载。
+未安装它们时自动使用程序化外观，可直接运行基础游戏。
 
 可用 PowerShell 的 `Get-FileHash <ZIP路径> -Algorithm SHA256` 核对下载文件与
 `SHA256SUMS.txt` 中的哈希。

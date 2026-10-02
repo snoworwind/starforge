@@ -600,7 +600,7 @@ mod tests {
     fn normal_maps_are_unit_and_neutral_for_flat_tiles() {
         let flat = [[128u8, 128, 128, 255]; 256];
         let map = build_normal_map(&flat, 0.5);
-        for pixel in map.chunks_exact(4) {
+        for pixel in map.as_chunks::<4>().0 {
             let x = pixel[0] as f32 / 255.0 * 2.0 - 1.0;
             let y = pixel[1] as f32 / 255.0 * 2.0 - 1.0;
             let z = pixel[2] as f32 / 255.0 * 2.0 - 1.0;
@@ -626,7 +626,7 @@ mod tests {
         let material = material_by_key("stone").unwrap();
         let map = build_orm_map(&tile, &surface_pbr(material));
         let (min, max) = MaterialFamily::Rock.roughness_range();
-        for pixel in map.chunks_exact(4) {
+        for pixel in map.as_chunks::<4>().0 {
             assert_eq!(pixel[0], 255, "occlusion must not be baked (R040)");
             assert!(
                 (min * 255.0 - 1.0..=max * 255.0 + 1.0).contains(&(pixel[1] as f32)),
@@ -646,7 +646,9 @@ mod tests {
         let plain = material_by_key("stone").unwrap();
         assert!(
             build_emission_map(&bright, &surface_pbr(plain))
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0)
         );
         assert!(emission_tint(&surface_pbr(plain)).is_none());
@@ -661,7 +663,9 @@ mod tests {
         let dark = [[0u8, 0, 0, 0]; 256];
         assert!(
             build_emission_map(&dark, &pbr)
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0),
             "dark texels must not glow"
         );

@@ -73,7 +73,7 @@ jobs:
 
   build:
     name: Build Windows x64
-    needs: [prepare, checks]
+    needs: prepare
     runs-on: windows-2022
     timeout-minutes: 120
     defaults:
@@ -116,6 +116,29 @@ jobs:
       - name: Package executable, assets and licenses
         run: python -B .github/scripts/package_release.py --tag "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary "starforge-bevy/target/$RELEASE_TARGET/release/starforge-bevy.exe" --output "$RUNNER_TEMP/release"
 
+      - name: Verify the extracted minimal package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/release" -Filter '*.zip' -File
+          if ($archive.Count -ne 1) { throw 'Expected one Windows release archive' }
+          $verifyRoot = Join-Path $env:RUNNER_TEMP 'release-verify'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $verifyRoot
+          $packageRoot = Join-Path $verifyRoot $archive.BaseName
+          $env:STARFORGE_ASSET_DIR = Join-Path $packageRoot 'assets'
+          foreach ($optional in @('models/external', 'models/earth')) {
+            if (Test-Path -LiteralPath (Join-Path $env:STARFORGE_ASSET_DIR $optional)) {
+              throw "Optional model directory must not be shipped: $optional"
+            }
+          }
+          Push-Location $verifyRoot
+          try {
+            & (Join-Path $packageRoot 'starforge-bevy.exe') --art-audit
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged executable or required asset audit failed' }
+          } finally {
+            Pop-Location
+          }
+
       - name: Upload release package
         uses: actions/upload-artifact@v7
         with:
@@ -127,7 +150,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [prepare, build]
+    needs: [prepare, checks, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -164,6 +187,8 @@ jobs:
           下载 Windows x64 ZIP，完整解压后运行 `starforge-bevy.exe`，并保留旁边的 `assets/` 目录。`SHA256SUMS.txt` 提供下载文件的 SHA-256 校验值。
 
           压缩包包含仓库内素材及许可。可选的外部飞船、空间站和地球模型需另行下载，详情见包内 `README.md` 和 `CREDITS.md`。
+
+          未安装大模型时，飞船、空间站和起源星使用程序化替代外观，可直接开始基础游戏。
           NOTES
             flags=()
             if [[ "$PRERELEASE" == true ]]; then

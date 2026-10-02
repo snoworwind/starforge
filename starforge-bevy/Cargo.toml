@@ -1,6 +1,6 @@
 [package]
 name = "starforge-bevy"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 description = "STARFORGE 星穹熔炉 — 体素星际工厂 Bevy 移植版"
 license = "MIT"

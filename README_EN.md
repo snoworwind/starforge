@@ -25,6 +25,10 @@ Push a `v*` tag matching the version in `starforge-bevy/Cargo.toml` (for example
 with the executable, tracked assets, licenses, and SHA-256 checksums. Manual reruns
 and prerelease tags are supported. See the [release guide](starforge-bevy/RELEASING.md) (Chinese).
 
+The minimal package runs without the optional large models. Missing ship, station,
+and Earth models use procedural visuals; installing the optional packs enables
+their full models automatically.
+
 ## Legacy web archive
 
 The old source and its documentation are kept under [`legacy-web/`](legacy-web/). That directory is no longer maintained or included in CI; it exists only as a historical archive and migration reference, and is neither a dependency nor a compatibility target for the Bevy version.

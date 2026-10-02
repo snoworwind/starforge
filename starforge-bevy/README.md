@@ -71,6 +71,12 @@ assets/
 
 首次构建需编译全部依赖（约 10~30 分钟，取决于机器）。需要 Rust ≥ 1.85（stable 即可）。
 
+## GitHub 自动发布
+
+Windows x64 版本由 GitHub Actions 在推送 `v*` 版本标签后自动构建并发布。
+下载 ZIP 后完整解压，直接运行包内的 `starforge-bevy.exe`。
+版本校验、预发布、手动重跑及素材打包规则见 [`RELEASING.md`](RELEASING.md)。
+
 ## 操作
 
 ### 地面（星球）

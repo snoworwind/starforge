@@ -4,23 +4,45 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to check for a release
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
 
 jobs:
   bevy:
     name: Bevy 严格检查与测试
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: starforge-bevy -> target
+          key: checks
+
       - name: Install Linux audio and device dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libx11-dev libwayland-dev libxkbcommon-dev
+
+      - name: Test release packaging
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Check formatting
         run: cargo fmt --all -- --check

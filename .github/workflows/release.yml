@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Validate tag format
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo '::error::Expected a version tag such as v0.1.0 or v0.2.0-rc.1'
+            exit 1
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Cargo version and resolve commit
+        id: version
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version=$(cargo metadata --manifest-path starforge-bevy/Cargo.toml --locked --offline --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "starforge-bevy") | .version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  checks:
+    name: Release checks
+    needs: prepare
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.prepare.outputs.commit }}
+
+  build:
+    name: Build Windows x64
+    needs: [prepare, checks]
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Bound peak memory during the initial Bevy build.
+      CARGO_BUILD_JOBS: '2'
+      RUSTFLAGS: -C target-feature=+crt-static
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout the validated commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Python for packaging
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: starforge-bevy -> target
+          key: release-windows-x64
+
+      - name: Build release executable
+        working-directory: starforge-bevy
+        run: cargo build --release --locked --bin starforge-bevy --target "$RELEASE_TARGET"
+
+      - name: Package executable, assets and licenses
+        run: python -B .github/scripts/package_release.py --tag "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary "starforge-bevy/target/$RELEASE_TARGET/release/starforge-bevy.exe" --output "$RUNNER_TEMP/release"
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-x64
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      - name: Download release package
+        uses: actions/download-artifact@v8
+        with:
+          name: release-windows-x64
+          path: release
+
+      - name: Verify packages and combine checksums
+        working-directory: release
+        run: |
+          cat ./*.sha256 > SHA256SUMS.txt
+          test "$(wc -l < SHA256SUMS.txt)" -eq 1
+          sha256sum --check SHA256SUMS.txt
+
+      - name: Create draft, upload packages and publish
+        working-directory: release
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft > existing-release.json; then
+            if ! jq -e '.isDraft == true' existing-release.json > /dev/null; then
+              echo '::error::This release is already published. Create a new version tag to release changes.'
+              exit 1
+            fi
+          else
+            cat > release-notes.md <<'NOTES'
+          下载 Windows x64 ZIP，完整解压后运行 `starforge-bevy.exe`，并保留旁边的 `assets/` 目录。`SHA256SUMS.txt` 提供下载文件的 SHA-256 校验值。
+
+          压缩包包含仓库内素材及许可。可选的外部飞船、空间站和地球模型需另行下载，详情见包内 `README.md` 和 `CREDITS.md`。
+          NOTES
+            flags=()
+            if [[ "$PRERELEASE" == true ]]; then
+              flags+=(--prerelease --latest=false)
+            fi
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "STARFORGE $RELEASE_TAG" --generate-notes --notes-file release-notes.md "${flags[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" ./*.zip SHA256SUMS.txt --clobber
+          flags=(--draft=false --prerelease="$PRERELEASE")
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--latest=false)
+          fi
+          gh release edit "$RELEASE_TAG" "${flags[@]}"

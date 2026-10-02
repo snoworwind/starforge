@@ -18,6 +18,13 @@ New in this revision: a **procedural real-time soundtrack** (separate soundscape
 
 The **Frontier Guild expansion** adds 30 renewable supply contracts, six expeditions with 24 stages, surveys for all 16 biomes, 12 milestones, and repeatable village requests. Press **L** to open the terminal and **C** on the ground to collect survey records. Existing saves are supported. See the [expansion and review notes](starforge-bevy/FRONTIER_EXPANSION.md) (Chinese).
 
+## Automated GitHub releases
+
+Push a `v*` tag matching the version in `starforge-bevy/Cargo.toml` (for example,
+`v0.1.0`) to run checks and tests, build Windows x64, and publish a GitHub Release
+with the executable, tracked assets, licenses, and SHA-256 checksums. Manual reruns
+and prerelease tags are supported. See the [release guide](starforge-bevy/RELEASING.md) (Chinese).
+
 ## Legacy web archive
 
 The old source and its documentation are kept under [`legacy-web/`](legacy-web/). That directory is no longer maintained or included in CI; it exists only as a historical archive and migration reference, and is neither a dependency nor a compatibility target for the Bevy version.

@@ -28,6 +28,13 @@ Bevy 版全面美术提升的工程规划见 [`美术与视觉质量升级方案
 > [`assets/licenses/models-directory-audit.md`](starforge-bevy/assets/licenses/models-directory-audit.md)
 > 的目录结构解压到 `starforge-bevy/assets/models/external/`。
 
+## GitHub 自动发布
+
+推送与 `starforge-bevy/Cargo.toml` 版本一致的 `v*` 标签（如 `v0.1.0`）后，
+GitHub Actions 会运行检查与测试、构建 Windows x64 版本，并自动发布包含可执行文件、
+仓库内素材和许可证的 ZIP 及 SHA-256 校验文件。支持手动重跑和预发布标签。
+配置与操作见 [`发布说明`](starforge-bevy/RELEASING.md)。
+
 ## 旧版 Web 归档
 
 旧版源码及其说明见 [`legacy-web/`](legacy-web/)；该目录不再维护或进入 CI，仅作历史归档和迁移核对，不是 Bevy 版的依赖或兼容目标。
